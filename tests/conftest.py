@@ -31,3 +31,18 @@ def binary_cube(tmp_path) -> str:
     path = tmp_path / "cube.fbx"
     path.write_bytes(fb.build_cube())
     return str(path)
+
+
+@pytest.fixture(scope="session")
+def real_fbx_path() -> str:
+    """A real exporter's file, if one is available.
+
+    Set ``FBXTOOL_SAMPLE`` to point at your own; the tests that need it skip
+    when it is absent, since no such file is checked in.
+    """
+    import os
+
+    candidate = os.environ.get("FBXTOOL_SAMPLE")
+    if candidate and Path(candidate).is_file():
+        return candidate
+    pytest.skip("set FBXTOOL_SAMPLE to a real .fbx file to run this test")

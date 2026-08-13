@@ -1,10 +1,14 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-build/
-dist/
+/build/
+/dist/
 .pytest_cache/
 .coverage
 htmlcov/
 .venv/
 venv/
+
+# Web intermediates. web/dist/fbxview.html IS committed, so that the page can
+# be opened without a clang toolchain.
+web/build/

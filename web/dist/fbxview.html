@@ -1,0 +1,2360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fbxtool — FBX inspector and viewer</title>
+<style>:root {
+  --bg: #0d0f13;
+  --bg-panel: #14171d;
+  --bg-raised: #1b1f27;
+  --line: #262b35;
+  --text: #dfe3ea;
+  --muted: #8d97a8;
+  --accent: #6aa9ff;
+  --warn: #e2b449;
+  --error: #ef6b6b;
+  --ok: #5fcf8e;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------- bar */
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.brand strong { font-size: 15px; letter-spacing: 0.01em; }
+.brand span { color: var(--muted); font-size: 13px; }
+
+.bar-right { display: flex; align-items: center; gap: 12px; }
+
+.status {
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46vw;
+}
+.status.ok { color: var(--ok); }
+.status.warn { color: var(--warn); }
+.status.error { color: var(--error); }
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+button:hover { border-color: #38414f; }
+button.primary { background: var(--accent); color: #08101d; border-color: transparent; font-weight: 600; }
+button.primary:hover { filter: brightness(1.08); }
+
+select {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(20, 23, 29, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+select:disabled { opacity: 0.5; }
+
+/* ----------------------------------------------------------------- layout */
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  /* minmax(0, 1fr) rather than the default auto row: otherwise the sidebar's
+     content sets the row height and the canvas stretches past the viewport. */
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+.stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(1200px 600px at 50% 0%, #191d26 0%, #0d0f13 70%);
+}
+
+#viewport { display: block; width: 100%; height: 100%; touch-action: none; }
+.stage.no-webgl #viewport { display: none; }
+
+.viewport-controls {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
+.viewport-controls button { font-size: 12px; padding: 5px 10px; background: rgba(20, 23, 29, 0.92); }
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(20, 23, 29, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+
+.mesh-info {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(13, 15, 19, 0.75);
+  padding: 5px 9px;
+  border-radius: 6px;
+}
+
+/* ------------------------------------------------------------------- drop */
+
+.drop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  background: rgba(13, 15, 19, 0.86);
+  transition: opacity 0.15s;
+}
+body.loaded .drop { opacity: 0; pointer-events: none; }
+.drop.active { background: rgba(26, 40, 64, 0.92); opacity: 1 !important; pointer-events: auto; }
+.drop-inner { max-width: 420px; }
+.drop h1 { font-size: 20px; margin: 0 0 10px; font-weight: 600; }
+.drop p { margin: 0; color: var(--muted); font-size: 13px; }
+
+/* ---------------------------------------------------------------- sidebar */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line);
+}
+
+.tabs { display: flex; gap: 2px; padding: 8px 8px 0; flex: none; }
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  padding: 7px 12px;
+  font-size: 13px;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; flex: 1; min-height: 0; }
+.tab-panel.active { display: flex; min-height: 0; }
+
+.panel {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 16px 32px;
+  min-width: 0;
+}
+
+.panel-section { border-bottom: 1px solid var(--line); padding: 14px 0; }
+.panel-section:last-child { border-bottom: none; }
+.panel-section h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+.panel-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  margin: 14px 0 6px;
+  font-weight: 600;
+}
+.placeholder p { color: var(--muted); margin: 0; font-size: 13px; }
+.placeholder code { font-family: var(--mono); color: var(--accent); }
+
+dl {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+  gap: 3px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+dt { color: var(--muted); }
+dd { margin: 0; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+
+table.counts { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
+table.counts td, table.counts th { padding: 2px 0; text-align: left; }
+table.counts th { color: var(--muted); font-weight: 500; font-size: 11px; }
+table.counts td:last-child, table.counts th:last-child { text-align: right; }
+table.counts.wide td:nth-child(2) { text-align: left; color: var(--muted); padding-left: 12px; }
+table.counts.wide td:last-child { text-align: right; }
+table.counts tr.total td { border-top: 1px solid var(--line); color: var(--muted); }
+
+.note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+
+pre.tree {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+  color: #c8cedb;
+}
+
+ul.warnings { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--warn); }
+ul.warnings li { margin-bottom: 4px; }
+
+/* ------------------------------------------------------------ record tree */
+
+ul.record-tree, ul.record-tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+}
+ul.record-tree { padding-left: 0; }
+ul.record-tree li { border-left: 1px solid var(--line); padding-left: 10px; }
+ul.record-tree summary { cursor: pointer; list-style: none; }
+ul.record-tree summary::-webkit-details-marker { display: none; }
+ul.record-tree summary::before { content: "▸ "; color: var(--muted); }
+ul.record-tree details[open] > summary::before { content: "▾ "; }
+ul.record-tree .count { color: var(--muted); }
+
+@media (max-width: 900px) {
+  main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .sidebar { border-left: none; border-top: 1px solid var(--line); }
+  .status { max-width: 30vw; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <strong>fbxtool</strong>
+    <span>FBX format inspector &amp; viewer</span>
+  </div>
+  <div class="bar-right">
+    <span id="status" class="status">Loading WebAssembly…</span>
+    <button id="picker" type="button" class="primary">Open .fbx</button>
+    <input id="file-input" type="file" accept=".fbx" hidden>
+  </div>
+</header>
+
+<main>
+  <section id="stage" class="stage">
+    <canvas id="viewport"></canvas>
+    <div class="viewport-controls">
+      <select id="geometry-select" title="Geometry to display" disabled></select>
+      <select id="mode-select" title="Shading mode">
+        <option value="0">Materials</option>
+        <option value="1">Clay</option>
+        <option value="2">Normals</option>
+      </select>
+      <select id="up-select" title="Which axis points up in the mesh data">
+        <option value="y">Y up</option>
+        <option value="z">Z up</option>
+      </select>
+      <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
+      <button id="reset-view" type="button">Reset view</button>
+    </div>
+    <p id="mesh-info" class="mesh-info">no file loaded</p>
+    <div id="drop" class="drop">
+      <div class="drop-inner">
+        <h1>Drop an FBX file</h1>
+        <p>Binary or ASCII. Everything runs in this tab — the file is parsed by
+           a WebAssembly module and drawn with WebGL, and never leaves your
+           machine.</p>
+      </div>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <nav class="tabs">
+      <button class="tab active" data-target="tab-report" type="button">Report</button>
+      <button class="tab" data-target="tab-tree" type="button">Records</button>
+    </nav>
+    <div id="tab-report" class="tab-panel active">
+      <div id="panel" class="panel">
+        <section class="panel-section placeholder">
+          <h2>Nothing loaded yet</h2>
+          <p>Open a file to see its version, metadata, axis system, object
+             table, scene hierarchy and connection graph — the same report the
+             <code>fbxinfo</code> command prints.</p>
+        </section>
+      </div>
+    </div>
+    <div id="tab-tree" class="tab-panel">
+      <div id="tree" class="panel">
+        <section class="panel-section placeholder">
+          <h2>Record tree</h2>
+          <p>The raw container: every node record, its properties and the size
+             and encoding of each array payload.</p>
+        </section>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>const WASM_BASE64 = "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Vg0AIAJBAWohCSAOpyELAkADQCALIAMoAgwiBU0NAQJAIAsgBWsgBksNAEEAKAL4iYCAACIJQT9LDQJBACAJQQFqNgL4iYCAACAJQQN0IglBpIqAgABqIAc2AgAgCUGgioCAAGpBBDYCAAwCC0EBQQBBBiADQQxqIBAgCRCMgICAACIFGyAFQQBIGyIFRQ0ACyAFQQZHDQIgAygCDCEFCwJAIAUgC0YNAEEAKAL4iYCAACIFQT9LDQBBACAFQQFqNgL4iYCAACAFQQN0IgVBpIqAgABqIAc2AgAgBUGgioCAAGpBAzYCAAsgACALNgIAQQEhBAwBCwJAQQAoAviJgIAAIgVBP0sNAEEAIAVBAWo2AviJgIAAIAVBA3QiBUGkioCAAGogBzYCACAFQaCKgIAAakECNgIAC0EBIQQgACALIAdBAWogCyAHSxs2AgALIANBEGokgICAgAAgBAsLAEEAKAL0iYCAAAsEAEEYCwsAQQAoAuSJgIAACy0AQQBBoI7AgABBD2pBcHE2ApSKgIAAQQBBADYCmIqAgABBAEEANgKcioCAAAsLAEEAKAKEioCAAAsLAEEAKAL4iYCAAAsIAEGgioCAAAsLAEEAKAKQioCAAAsL5gEBAEGACAveARAREgAIBwkGCgULBAwDDQIOAQ8AAAAAAAAAAAAAAAAAAwAEAAUABgAHAAgACQAKAAsADQAPABEAEwAXABsAHwAjACsAMwA7AEMAUwBjAHMAgwCjAMMA4wACAQAAAAAAAAAAAAAAAAAAAQEBAQICAgIDAwMDBAQEBAUFBQUAAAAAAQACAAMABAAFAAcACQANABEAGQAhADEAQQBhAIEAwQABAYEBAQIBAwEEAQYBCAEMARABGAEgATABQAFgAAAAAAAAAAABAQICAwMEBAUFBgYHBwgICQkKCgsLDAwNDQDgAgRuYW1lAAkIZmJ4Lndhc20BrQIVAAlmYnhfYWxsb2MBDmZieF9idWlsZF9tZXNoAhJmYnhfZm9vdGVyX3ZlcnNpb24DDmZieF9oYXNfZm9vdGVyBAtmYnhfaW5mbGF0ZQUGbWVtc2V0BgpodWZmX2J1aWxkBw1pbmZsYXRlX2Jsb2NrCA5mYnhfbm9kZV9jb3VudAkPZmJ4X25vZGVfc3RyaWRlCg1mYnhfbm9kZXNfcHRyCwlmYnhfcGFyc2UMCXJlYWRfbm9kZQ0OZmJ4X3Byb3BfY291bnQOD2ZieF9wcm9wX3N0cmlkZQ8NZmJ4X3Byb3BzX3B0chAJZmJ4X3Jlc2V0EQtmYnhfdmVyc2lvbhIRZmJ4X3dhcm5pbmdfY291bnQTEGZieF93YXJuaW5nc19wdHIUCGZieF93aWRlBxIBAA9fX3N0YWNrX3BvaW50ZXIJCgEABy5yb2RhdGEAOAlwcm9kdWNlcnMBDHByb2Nlc3NlZC1ieQEMVWJ1bnR1IGNsYW5nETE4LjEuMyAoMXVidW50dTEpACwPdGFyZ2V0X2ZlYXR1cmVzAisPbXV0YWJsZS1nbG9iYWxzKwhzaWduLWV4dA==";</script>
+<script>// ---- wasm.js -----------------------------------------------------------
+/* Glue for the WebAssembly core: uploads a file into linear memory, walks the
+ * flat tree image the parser writes there, and hands geometry back to it.
+ *
+ * Loads in both the browser (inlined into the page) and Node (via require),
+ * so the same code path is what the tests exercise.
+ */
+'use strict';
+
+const FbxWasm = (function () {
+  const NODE_STRIDE = 32;
+  const PROP_STRIDE = 24;
+
+  // Property type code -> bytes per element, for array payloads.
+  const ARRAY_ELEMENT = { f: 4, d: 8, l: 8, i: 4, b: 1 };
+  const ARRAY_TYPE_NAME = {
+    f: 'float32', d: 'float64', l: 'int64', i: 'int32', b: 'bool',
+  };
+  const SCALAR_TYPE_NAME = {
+    Y: 'int16', C: 'bool', I: 'int32', F: 'float32', D: 'float64', L: 'int64',
+    S: 'string', R: 'raw',
+  };
+
+  const WARNINGS = {
+    1: (a) => `record at offset ${a}: property list length disagrees with its header`,
+    2: (a) => `record at offset ${a}: end offset out of range; that branch was cut short`,
+    3: (a) => `record at offset ${a}: ends somewhere other than its declared end offset`,
+    4: (a) => `record at offset ${a}: stray bytes where a nested record was expected`,
+    5: () => 'footer magic not found; the file may be truncated',
+    6: (a) => `footer version ${a} does not match the header version`,
+    7: (a) => `file ends part-way through a top-level record header at ${a}`,
+    8: (a) => `unknown property type code 0x${a.toString(16)}`,
+  };
+
+  let instance = null;
+  let exports_ = null;
+  let fileOffset = 0;
+  let fileLength = 0;
+
+  /** Views must be re-taken after anything that can grow memory. */
+  function bytes() { return new Uint8Array(exports_.memory.buffer); }
+  function view() { return new DataView(exports_.memory.buffer); }
+
+  async function init(source) {
+    let module_;
+    if (source instanceof WebAssembly.Module) {
+      module_ = source;
+    } else if (typeof source === 'string') {
+      const raw = atob(source);
+      const buffer = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) buffer[i] = raw.charCodeAt(i);
+      module_ = await WebAssembly.compile(buffer);
+    } else {
+      module_ = await WebAssembly.compile(source);
+    }
+    instance = await WebAssembly.instantiate(module_, {});
+    exports_ = instance.exports;
+    return exports_;
+  }
+
+  /** Copy a file into linear memory. Returns its offset. */
+  function upload(data) {
+    exports_.fbx_reset();
+    const offset = exports_.fbx_alloc(data.length);
+    if (!offset) throw new Error('out of WebAssembly memory');
+    bytes().set(data, offset);
+    fileOffset = offset;
+    fileLength = data.length;
+    return offset;
+  }
+
+  /* Descriptors record offsets relative to the start of the file, so they stay
+   * valid wherever the upload landed; resolve them against that base. */
+  function absolute(fileRelative) { return fileOffset + fileRelative; }
+
+  function decodeUtf8(offset, length) {
+    const slice = bytes().subarray(offset, offset + length);
+    return new TextDecoder('utf-8').decode(slice);
+  }
+
+  function readScalar(code, at) {
+    const dv = view();
+    switch (code) {
+      case 'C': return dv.getUint8(at) !== 0;
+      case 'Y': return dv.getInt16(at, true);
+      case 'I': return dv.getInt32(at, true);
+      case 'F': return dv.getFloat32(at, true);
+      case 'D': return dv.getFloat64(at, true);
+      case 'L': {
+        const big = dv.getBigInt64(at, true);
+        // FBX UIDs comfortably fit a double; fall back to BigInt if not.
+        return (big >= -9007199254740991n && big <= 9007199254740991n)
+          ? Number(big) : big;
+      }
+      default: return null;
+    }
+  }
+
+  /** Build the JavaScript tree from the flat image the parser wrote. */
+  function readTree() {
+    const count = exports_.fbx_node_count();
+    const nodesAt = exports_.fbx_nodes_ptr();
+    const propsAt = exports_.fbx_props_ptr();
+    const dv = view();
+
+    const props = [];
+    const propCount = exports_.fbx_prop_count();
+    for (let i = 0; i < propCount; i++) {
+      const base = propsAt + i * PROP_STRIDE;
+      const code = String.fromCharCode(dv.getUint32(base, true));
+      const arrayLen = dv.getUint32(base + 4, true);
+      const encoding = dv.getUint32(base + 8, true);
+      const byteLen = dv.getUint32(base + 12, true);
+      const dataOff = dv.getUint32(base + 16, true);
+      const isArray = dv.getUint32(base + 20, true) === 1;
+
+      if (isArray) {
+        props.push({
+          code,
+          typeName: (ARRAY_TYPE_NAME[code] || code) + '[]',
+          array: { length: arrayLen, encoding, byteLength: byteLen, dataOffset: dataOff },
+          value: null,
+        });
+      } else if (code === 'S') {
+        props.push({
+          code, typeName: 'string',
+          value: decodeUtf8(absolute(dataOff), byteLen),
+        });
+      } else if (code === 'R') {
+        props.push({
+          code, typeName: 'raw',
+          value: bytes().slice(absolute(dataOff), absolute(dataOff) + byteLen),
+        });
+      } else {
+        props.push({
+          code,
+          typeName: SCALAR_TYPE_NAME[code] || `unknown(${code})`,
+          value: readScalar(code, absolute(dataOff)),
+        });
+      }
+    }
+
+    const nodes = new Array(count);
+    for (let i = 0; i < count; i++) {
+      const base = nodesAt + i * NODE_STRIDE;
+      const nameOff = dv.getUint32(base, true);
+      const nameLen = dv.getUint32(base + 4, true);
+      const propStart = dv.getUint32(base + 8, true);
+      const propCountHere = dv.getUint32(base + 12, true);
+      const parent = dv.getUint32(base + 16, true);
+      const srcOffset = dv.getUint32(base + 20, true);
+
+      nodes[i] = {
+        name: i === 0 ? '' : decodeUtf8(absolute(nameOff), nameLen),
+        props: props.slice(propStart, propStart + propCountHere),
+        children: [],
+        offset: srcOffset,
+      };
+      // Records are emitted depth-first, so a parent always exists already.
+      if (i > 0 && parent < i) nodes[parent].children.push(nodes[i]);
+    }
+    return nodes[0] || { name: '', props: [], children: [] };
+  }
+
+  function readWarnings() {
+    const count = exports_.fbx_warning_count();
+    const at = exports_.fbx_warnings_ptr();
+    const dv = view();
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const code = dv.getUint32(at + i * 8, true);
+      const arg = dv.getUint32(at + i * 8 + 4, true);
+      const format = WARNINGS[code];
+      const text = format ? format(arg) : `warning ${code} (${arg})`;
+      if (!out.includes(text)) out.push(text);
+    }
+    return out;
+  }
+
+  /** Parse binary FBX data. Returns null when it is not a binary FBX file. */
+  function parseBinary(data) {
+    upload(data);
+    if (!exports_.fbx_parse(fileOffset, fileLength)) return null;
+    return {
+      encoding: 'binary',
+      version: exports_.fbx_version(),
+      wideOffsets: exports_.fbx_wide() !== 0,
+      hasFooter: exports_.fbx_has_footer() !== 0,
+      footerVersion: exports_.fbx_footer_version() || null,
+      fileSize: fileLength,
+      root: readTree(),
+      warnings: readWarnings(),
+    };
+  }
+
+  /* ---------------------------------------------------------------- arrays */
+
+  /** Offset of an array payload in linear memory, inflating it if needed. */
+  function payloadOffset(prop) {
+    const info = prop.array;
+    const elementSize = ARRAY_ELEMENT[prop.code] || 1;
+    const expected = info.length * elementSize;
+    const at = absolute(info.dataOffset);
+    if (info.encoding === 0) return at; // already contiguous in memory
+    const out = exports_.fbx_inflate(at, info.byteLength, expected);
+    if (!out) throw new Error('could not inflate an array payload');
+    return out;
+  }
+
+  /** An array payload as float64 in linear memory, converting if needed. */
+  function asFloat64(prop) {
+    const at = payloadOffset(prop);
+    const count = prop.array.length;
+    if (prop.code === 'd') return { offset: at, count };
+    const out = exports_.fbx_alloc(count * 8);
+    const buffer = exports_.memory.buffer;
+    const dst = new Float64Array(buffer, out, count);
+    if (prop.code === 'f') dst.set(new Float32Array(buffer, at, count));
+    else if (prop.code === 'i') dst.set(new Int32Array(buffer, at, count));
+    else return { offset: 0, count: 0 };
+    return { offset: out, count };
+  }
+
+  /** An array payload as int32 in linear memory, converting if needed. */
+  function asInt32(prop) {
+    const at = payloadOffset(prop);
+    const count = prop.array.length;
+    if (prop.code === 'i') return { offset: at, count };
+    const out = exports_.fbx_alloc(count * 4);
+    const buffer = exports_.memory.buffer;
+    const dst = new Int32Array(buffer, out, count);
+    if (prop.code === 'l') {
+      const src = new BigInt64Array(buffer, at, count);
+      for (let i = 0; i < count; i++) dst[i] = Number(src[i]);
+    } else if (prop.code === 'd') {
+      dst.set(new Float64Array(buffer, at, count));
+    } else {
+      return { offset: 0, count: 0 };
+    }
+    return { offset: out, count };
+  }
+
+  /** Copy a JavaScript array into linear memory as float64. */
+  function uploadFloat64(values) {
+    const out = exports_.fbx_alloc(Math.max(values.length, 1) * 8);
+    new Float64Array(exports_.memory.buffer, out, values.length).set(values);
+    return { offset: out, count: values.length };
+  }
+
+  /** Copy a JavaScript array into linear memory as int32. */
+  function uploadInt32(values) {
+    const out = exports_.fbx_alloc(Math.max(values.length, 1) * 4);
+    new Int32Array(exports_.memory.buffer, out, values.length).set(values);
+    return { offset: out, count: values.length };
+  }
+
+  /* ------------------------------------------------------------------ mesh */
+
+  const MAPPING = { none: 0, byPolygonVertex: 1, byVertex: 2 };
+
+  /**
+   * Triangulate a mesh. `positions` and `indices` are {offset, count} pairs in
+   * linear memory; `normals` and `materials` are optional.
+   */
+  function buildMesh(positions, indices, normals, mapping, materials) {
+    const result = exports_.fbx_build_mesh(
+      positions.offset, positions.count,
+      indices.offset, indices.count,
+      normals ? normals.offset : 0, normals ? normals.count : 0,
+      MAPPING[mapping] || 0,
+      materials ? materials.offset : 0, materials ? materials.count : 0,
+    );
+    if (!result) throw new Error('mesh building ran out of memory');
+
+    const dv = view();
+    const triangleCount = dv.getUint32(result, true);
+    const positionsAt = dv.getUint32(result + 4, true);
+    const normalsAt = dv.getUint32(result + 8, true);
+    const materialsAt = dv.getUint32(result + 12, true);
+    const min = [16, 20, 24].map((o) => dv.getFloat32(result + o, true));
+    const max = [28, 32, 36].map((o) => dv.getFloat32(result + o, true));
+    const polygonCount = dv.getUint32(result + 40, true);
+    const degenerate = dv.getUint32(result + 44, true);
+
+    const vertices = triangleCount * 9;
+    const buffer = exports_.memory.buffer;
+    return {
+      triangleCount,
+      polygonCount,
+      degenerate,
+      min,
+      max,
+      // Views into linear memory — copied before the next parse, not retained.
+      positions: triangleCount ? new Float32Array(buffer, positionsAt, vertices) : new Float32Array(0),
+      normals: triangleCount ? new Float32Array(buffer, normalsAt, vertices) : new Float32Array(0),
+      materials: triangleCount ? new Float32Array(buffer, materialsAt, triangleCount * 3) : new Float32Array(0),
+    };
+  }
+
+  return {
+    init, parseBinary, buildMesh, payloadOffset, asFloat64, asInt32,
+    uploadFloat64, uploadInt32,
+    get exports() { return exports_; },
+    get fileOffset() { return fileOffset; },
+    ARRAY_ELEMENT,
+  };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxWasm;
+
+// ---- ascii.js ----------------------------------------------------------
+/* Reader for ASCII FBX, producing the same tree shape as the WebAssembly
+ * binary reader so that analysis and rendering do not care which one ran.
+ *
+ * ASCII files are text, and the work is tokenising rather than number
+ * crunching, so this stays in JavaScript; the geometry it produces still goes
+ * through the same WebAssembly triangulator.
+ */
+'use strict';
+
+const FbxAscii = (function () {
+  const VERSION_COMMENT = /;\s*FBX\s+(\d+)\.(\d+)\.(\d+)/i;
+  const NODE_LINE = /^[ \t]*[A-Za-z_]\w*[ \t]*:/m;
+  const INT_RE = /^[+-]?\d+$/;
+  const FLOAT_RE = /^[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?$/;
+  const COUNT_RE = /^\*(\d+)$/;
+
+  const SPECIAL_FLOATS = {
+    '1.#inf': Infinity, '-1.#inf': -Infinity,
+    '1.#ind': NaN, '-1.#ind': NaN, '1.#qnan': NaN, '-1.#qnan': NaN,
+    nan: NaN, inf: Infinity, '-inf': -Infinity,
+  };
+
+  const DELIMITERS = new Set([' ', '\t', '\r', '\f', '\v', '\n', ';', '"', ':', ',', '{', '}']);
+
+  function looksLikeAscii(text) {
+    if (VERSION_COMMENT.test(text)) return true;
+    const head = text.slice(0, 8192);
+    if (head.includes('FBXHeaderExtension') || head.includes('FBXVersion')) return true;
+    return (head.match(NODE_LINE) || []).length >= 2 && head.includes('{');
+  }
+
+  function tokenize(text) {
+    const tokens = [];
+    let pos = 0;
+    let line = 1;
+    const length = text.length;
+    while (pos < length) {
+      const ch = text[pos];
+      if (ch === '\n') { tokens.push({ kind: 'nl', line }); line++; pos++; }
+      else if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\f' || ch === '\v') pos++;
+      else if (ch === ';') { const end = text.indexOf('\n', pos); pos = end < 0 ? length : end; }
+      else if (ch === '"') {
+        const end = text.indexOf('"', pos + 1);
+        if (end < 0) throw new Error(`unterminated string on line ${line}`);
+        let raw = text.slice(pos + 1, end);
+        if (raw.includes('&quot;')) raw = raw.split('&quot;').join('"');
+        tokens.push({ kind: 'str', text: raw, line });
+        pos = end + 1;
+      } else if (ch === ':') { tokens.push({ kind: ':', line }); pos++; }
+      else if (ch === ',') { tokens.push({ kind: ',', line }); pos++; }
+      else if (ch === '{') { tokens.push({ kind: '{', line }); pos++; }
+      else if (ch === '}') { tokens.push({ kind: '}', line }); pos++; }
+      else {
+        const start = pos;
+        while (pos < length && !DELIMITERS.has(text[pos])) pos++;
+        tokens.push({ kind: 'word', text: text.slice(start, pos), line });
+      }
+    }
+    tokens.push({ kind: 'eof', line });
+    return tokens;
+  }
+
+  function parseValue(token) {
+    if (token.kind === 'str') return { kind: 'string', value: token.text };
+    const text = token.text;
+    const count = COUNT_RE.exec(text);
+    if (count) return { kind: 'count', value: parseInt(count[1], 10) };
+    if (INT_RE.test(text)) return { kind: 'int', value: parseInt(text, 10) };
+    if (FLOAT_RE.test(text)) return { kind: 'float', value: parseFloat(text) };
+    const lowered = text.toLowerCase();
+    if (lowered in SPECIAL_FLOATS) return { kind: 'float', value: SPECIAL_FLOATS[lowered] };
+    return { kind: 'word', value: text };
+  }
+
+  function toProp(entry) {
+    switch (entry.kind) {
+      case 'count': return { code: '*', typeName: 'array-size', value: entry.value };
+      case 'word': return { code: 'W', typeName: 'word', value: entry.value };
+      case 'int': return { code: 'L', typeName: 'int64', value: entry.value };
+      case 'float': return { code: 'D', typeName: 'float64', value: entry.value };
+      case 'string': return { code: 'S', typeName: 'string', value: entry.value };
+      default: return { code: 'W', typeName: 'word', value: String(entry.value) };
+    }
+  }
+
+  /** Fold the values of an `a:` record into a single array property. */
+  function foldArray(entries) {
+    if (!entries.length) return [];
+    const allInt = entries.every((e) => e.kind === 'int' || e.kind === 'count');
+    const code = allInt ? 'l' : 'd';
+    const values = entries.map((e) => (typeof e.value === 'number' ? e.value : 0));
+    return [{
+      code,
+      typeName: (allInt ? 'int64' : 'float64') + '[]',
+      array: { length: values.length, encoding: 0, byteLength: 0, dataOffset: 0 },
+      // ASCII arrays are already decoded, so the values ride along.
+      values,
+      value: null,
+    }];
+  }
+
+  function parse(text) {
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    const tokens = tokenize(text);
+    const warnings = [];
+    let index = 0;
+
+    const peek = (ahead = 0) => tokens[Math.min(index + ahead, tokens.length - 1)];
+    const next = () => tokens[index++];
+    const skipNewlines = () => { while (peek().kind === 'nl') index++; };
+
+    function consumeSeparator() {
+      if (peek().kind === ',') { index++; skipNewlines(); return true; }
+      let ahead = 0;
+      while (peek(ahead).kind === 'nl') ahead++;
+      if (ahead && peek(ahead).kind === ',') {
+        index += ahead + 1;
+        skipNewlines();
+        return true;
+      }
+      return false;
+    }
+
+    function parseProperties(name) {
+      const entries = [];
+      for (;;) {
+        const token = peek();
+        if (token.kind === 'nl' || token.kind === '{' || token.kind === '}' || token.kind === 'eof') break;
+        if (token.kind === ',') { index++; entries.push({ kind: 'word', value: '' }); continue; }
+        entries.push(parseValue(next()));
+        if (!consumeSeparator()) break;
+      }
+      return name === 'a' ? foldArray(entries) : entries.map(toProp);
+    }
+
+    function parseRecords(depth, insideBraces) {
+      const records = [];
+      for (;;) {
+        skipNewlines();
+        const token = peek();
+        if (token.kind === 'eof') {
+          if (insideBraces) warnings.push(`file ends with an unclosed '{' (line ${token.line})`);
+          return records;
+        }
+        if (token.kind === '}') {
+          if (!insideBraces) { warnings.push(`stray '}' on line ${token.line}`); index++; continue; }
+          return records;
+        }
+        const head = next();
+        if (head.kind !== 'word' && head.kind !== 'str') {
+          warnings.push(`unexpected token on line ${head.line}; skipped`);
+          continue;
+        }
+        if (peek().kind !== ':') {
+          warnings.push(`record '${head.text}' on line ${head.line} is not followed by ':'; skipped`);
+          continue;
+        }
+        index++; // ':'
+        const node = { name: head.text, props: parseProperties(head.text), children: [], line: head.line };
+        if (peek().kind === '{') {
+          index++;
+          node.children = parseRecords(depth + 1, true);
+          if (peek().kind === '}') index++;
+        }
+        records.push(node);
+      }
+    }
+
+    const root = { name: '', props: [], children: parseRecords(0, false) };
+
+    let version = null;
+    let versionSource = null;
+    const header = root.children.find((n) => n.name === 'FBXHeaderExtension');
+    const declared = header && header.children.find((n) => n.name === 'FBXVersion');
+    if (declared && declared.props.length && typeof declared.props[0].value === 'number') {
+      version = declared.props[0].value;
+      versionSource = 'FBXHeaderExtension';
+    } else {
+      const match = VERSION_COMMENT.exec(text.slice(0, 4096));
+      if (match) {
+        version = (+match[1]) * 1000 + (+match[2]) * 100 + (+match[3]);
+        versionSource = 'header comment';
+      } else {
+        warnings.push('no FBXVersion record and no version comment; version unknown');
+      }
+    }
+    if (!root.children.length) warnings.push('no records were found');
+
+    return {
+      encoding: 'ascii',
+      version,
+      versionSource,
+      wideOffsets: false,
+      hasFooter: false,
+      footerVersion: null,
+      fileSize: text.length,
+      root,
+      warnings,
+    };
+  }
+
+  return { parse, looksLikeAscii };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxAscii;
+
+// ---- analyze.js --------------------------------------------------------
+/* Scene-level interpretation of a parsed record tree — the browser counterpart
+ * of fbxtool/analyze.py, working on whichever reader produced the tree.
+ */
+'use strict';
+
+const FbxAnalyze = (function () {
+  const NAME_CLASS_SEPARATOR = '\u0000\u0001';  // binary form; ASCII writes Class::Name instead
+  const FBX_TIME_UNIT = 46186158000;
+
+  const KNOWN_VERSIONS = {
+    5000: ['FBX 5.0', 'pre-Autodesk Kaydara format'],
+    5800: ['FBX 5.8', 'pre-Autodesk Kaydara format'],
+    6000: ['FBX 6.0', 'legacy layout: Objects hold names instead of UIDs'],
+    6100: ['FBX 2009 / 2010', 'legacy layout: Objects hold names instead of UIDs'],
+    7000: ['FBX 2010', 'first release of the modern 7.x layout'],
+    7100: ['FBX 2011', ''],
+    7200: ['FBX 2012', ''],
+    7300: ['FBX 2013', ''],
+    7400: ['FBX 2014 / 2015', 'most widely supported version'],
+    7500: ['FBX 2016 / 2017', 'binary node offsets widen to 64 bits'],
+    7600: ['FBX 2018', ''],
+    7700: ['FBX 2019 / 2020', ''],
+  };
+
+  const TIME_MODES = {
+    0: 'DefaultMode', 1: '120 fps', 2: '100 fps', 3: '60 fps', 4: '50 fps',
+    5: '48 fps', 6: '30 fps', 7: '30 fps (drop)', 8: 'NTSC drop frame',
+    9: 'NTSC full frame', 10: 'PAL (25 fps)', 11: '24 fps (cinema)',
+    12: '1000 fps', 13: 'cinema (drop)', 14: 'custom', 15: '96 fps',
+    16: '72 fps', 17: '59.94 fps',
+  };
+
+  const AXIS_NAMES = { 0: 'X', 1: 'Y', 2: 'Z' };
+  const UNITS = {
+    1: 'centimetres', 2.54: 'inches', 30.48: 'feet', 100: 'metres',
+    0.1: 'millimetres', 91.44: 'yards', 10: 'decimetres',
+  };
+  const TYPES_OUTSIDE_OBJECTS = new Set(['GlobalSettings']);
+
+  function describeVersion(stamp) {
+    if (stamp === null || stamp === undefined) return null;
+    const major = Math.floor(stamp / 1000);
+    const minor = Math.floor((stamp % 1000) / 100);
+    const patch = stamp % 100;
+    const dotted = `${major}.${minor}.${patch}`;
+    const known = KNOWN_VERSIONS[stamp];
+    return {
+      stamp,
+      dotted,
+      product: known ? known[0] : null,
+      notes: known ? known[1] : '',
+      legacyLayout: stamp < 7000,
+      wideOffsets: stamp >= 7500,
+      label: known
+        ? `${stamp} (FBX ${dotted} — ${known[0]})`
+        : `${stamp} (FBX ${dotted} — unrecognised, newer than this tool)`,
+    };
+  }
+
+  function splitObjectName(raw) {
+    if (typeof raw !== 'string') return ['', ''];
+    const sep = raw.indexOf(NAME_CLASS_SEPARATOR);
+    if (sep >= 0) return [raw.slice(0, sep), raw.slice(sep + 2)];
+    const colons = raw.indexOf('::');
+    if (colons >= 0) return [raw.slice(colons + 2), raw.slice(0, colons)];
+    return [raw, ''];
+  }
+
+  const child = (node, name) => (node ? node.children.find((c) => c.name === name) : undefined);
+  const childAll = (node, name) => (node ? node.children.filter((c) => c.name === name) : []);
+  const value = (node, index = 0) => (node && node.props[index] ? node.props[index].value : undefined);
+
+  function pathValue(node, names, index = 0) {
+    let cursor = node;
+    for (const name of names) {
+      cursor = child(cursor, name);
+      if (!cursor) return undefined;
+    }
+    return value(cursor, index);
+  }
+
+  /** Flatten a Properties70/Properties60 block into a plain object. */
+  function properties(node) {
+    if (!node) return {};
+    const block = child(node, 'Properties70') || child(node, 'Properties60');
+    if (!block) return {};
+    const out = {};
+    for (const entry of block.children) {
+      if (entry.name !== 'P' && entry.name !== 'Property') continue;
+      const values = entry.props.map((p) => p.value);
+      if (!values.length || typeof values[0] !== 'string') continue;
+      let payload = entry.name === 'P' ? values.slice(4) : values.slice(3);
+      if (!payload.length) payload = values.slice(1);
+      out[values[0]] = payload.length === 1 ? payload[0] : payload;
+    }
+    return out;
+  }
+
+  function arrayLength(node) {
+    if (!node) return null;
+    for (const prop of node.props) {
+      if (prop.array) return prop.array.length;
+      if (prop.code === '*' && typeof prop.value === 'number') return prop.value;
+    }
+    const values = child(node, 'a');
+    if (values && values.props[0] && values.props[0].array) return values.props[0].array.length;
+    return null;
+  }
+
+  function countRecords(node) {
+    let total = 0;
+    for (const c of node.children) total += 1 + countRecords(c);
+    return total;
+  }
+
+  function depthOf(node) {
+    if (!node.children.length) return 0;
+    let best = 0;
+    for (const c of node.children) best = Math.max(best, depthOf(c));
+    return best + 1;
+  }
+
+  function formatTimestamp(node) {
+    if (!node) return '';
+    const part = (name) => {
+      const v = pathValue(node, [name]);
+      return typeof v === 'number' ? v : 0;
+    };
+    const pad = (n, w = 2) => String(n).padStart(w, '0');
+    const year = part('Year');
+    if (!year) return '';
+    return `${pad(year, 4)}-${pad(part('Month'))}-${pad(part('Day'))} `
+      + `${pad(part('Hour'))}:${pad(part('Minute'))}:${pad(part('Second'))}`
+      + `.${pad(part('Millisecond'), 3)}`;
+  }
+
+  function readSceneInfo(node) {
+    const props = properties(node);
+    const info = {};
+    const map = {
+      DocumentUrl: 'documentUrl',
+      SrcDocumentUrl: 'sourceDocumentUrl',
+      'Original|ApplicationVendor': 'originalVendor',
+      'Original|ApplicationName': 'originalApplication',
+      'Original|ApplicationVersion': 'originalVersion',
+      'Original|DateTime_GMT': 'originalDateTime',
+      'Original|FileName': 'originalFilename',
+      'LastSaved|ApplicationVendor': 'lastSavedVendor',
+      'LastSaved|ApplicationName': 'lastSavedApplication',
+      'LastSaved|ApplicationVersion': 'lastSavedVersion',
+      'LastSaved|DateTime_GMT': 'lastSavedDateTime',
+    };
+    for (const [key, label] of Object.entries(map)) {
+      if (props[key] !== undefined && props[key] !== '') info[label] = props[key];
+    }
+    const meta = child(node, 'MetaData');
+    if (meta) {
+      for (const name of ['Title', 'Subject', 'Author', 'Keywords', 'Revision', 'Comment']) {
+        const v = pathValue(meta, [name]);
+        if (v) info[name.toLowerCase()] = v;
+      }
+    }
+    return info;
+  }
+
+  function describeObject(entry, subclass) {
+    if ((entry.name === 'Geometry' || entry.name === 'Model') && child(entry, 'Vertices')) {
+      const bits = [];
+      const verts = arrayLength(child(entry, 'Vertices'));
+      if (verts !== null) bits.push(`${Math.floor(verts / 3)} vertices`);
+      const indices = arrayLength(child(entry, 'PolygonVertexIndex'));
+      if (indices !== null) bits.push(`${indices} polygon indices`);
+      const layers = childAll(entry, 'Layer').length;
+      if (layers) bits.push(`${layers} layer${layers === 1 ? '' : 's'}`);
+      const uvs = childAll(entry, 'LayerElementUV').length;
+      if (uvs) bits.push(`${uvs} UV set${uvs === 1 ? '' : 's'}`);
+      return bits.join(', ');
+    }
+    if (entry.name === 'Texture' || entry.name === 'Video') {
+      for (const key of ['RelativeFilename', 'FileName', 'Filename']) {
+        const v = pathValue(entry, [key]);
+        if (typeof v === 'string' && v) return v;
+      }
+      return '';
+    }
+    if (entry.name === 'Material') {
+      const shading = pathValue(entry, ['ShadingModel']);
+      return shading ? `shading: ${shading}` : '';
+    }
+    if (entry.name === 'Deformer' && subclass === 'Cluster') {
+      const n = arrayLength(child(entry, 'Indexes'));
+      return n === null ? '' : `${n} weighted vertices`;
+    }
+    if (entry.name === 'AnimationCurve') {
+      const n = arrayLength(child(entry, 'KeyTime'));
+      return n === null ? '' : `${n} keys`;
+    }
+    if (entry.name === 'NodeAttribute') {
+      const flags = pathValue(entry, ['TypeFlags']);
+      return flags ? `flags: ${flags}` : '';
+    }
+    return '';
+  }
+
+  function analyze(doc) {
+    const root = doc.root;
+    const out = {
+      doc,
+      version: describeVersion(doc.version),
+      header: {},
+      sceneInfo: {},
+      globalSettings: {},
+      definitions: [],
+      definitionsCount: null,
+      definitionsOutsideObjects: 0,
+      objects: [],
+      objectCounts: new Map(),
+      connections: [],
+      connectionCounts: new Map(),
+      sections: root.children.map((c) => [c.name, countRecords(c) + 1]),
+      totalRecords: countRecords(root),
+      maxDepth: depthOf(root),
+      propertyCounts: new Map(),
+      arrayBytes: 0,
+      media: [],
+      animation: {},
+      roots: [],
+      orphans: [],
+      warnings: doc.warnings.slice(),
+    };
+
+    (function countProps(node) {
+      for (const c of node.children) {
+        for (const prop of c.props) {
+          const key = prop.typeName || prop.code;
+          out.propertyCounts.set(key, (out.propertyCounts.get(key) || 0) + 1);
+          if (prop.array) out.arrayBytes += prop.array.byteLength;
+        }
+        countProps(c);
+      }
+    })(root);
+
+    // ---- header ----
+    const ext = child(root, 'FBXHeaderExtension');
+    if (ext) {
+      out.header.headerVersion = pathValue(ext, ['FBXHeaderExtensionVersion'])
+        ?? pathValue(ext, ['FBXHeaderVersion']);
+      out.header.encryption = pathValue(ext, ['EncryptionType']);
+      out.header.creator = pathValue(ext, ['Creator']);
+      out.header.creationTime = formatTimestamp(child(ext, 'CreationTimeStamp'));
+      const sceneInfo = child(ext, 'SceneInfo');
+      if (sceneInfo) out.sceneInfo = readSceneInfo(sceneInfo);
+    }
+    if (!out.header.creator) out.header.creator = pathValue(root, ['Creator']);
+    if (!out.header.creationTime) out.header.creationTime = pathValue(root, ['CreationTime']);
+    const fileId = child(root, 'FileId');
+    if (fileId && fileId.props.length) {
+      const raw = fileId.props[0].value;
+      if (raw instanceof Uint8Array) {
+        out.header.fileId = Array.from(raw, (b) => b.toString(16).padStart(2, '0')).join('');
+      } else if (raw !== null && raw !== undefined) {
+        out.header.fileId = String(raw);
+      }
+    }
+
+    // ---- global settings ----
+    const settingsNode = child(root, 'GlobalSettings');
+    if (settingsNode) {
+      const props = properties(settingsNode);
+      const settings = {};
+      for (const axis of ['Up', 'Front', 'Coord']) {
+        const idx = props[`${axis}Axis`];
+        const sign = props[`${axis}AxisSign`];
+        if (typeof idx === 'number') {
+          const letter = AXIS_NAMES[idx] !== undefined ? AXIS_NAMES[idx] : String(idx);
+          settings[`${axis.toLowerCase()}Axis`] = (typeof sign === 'number' && sign < 0 ? '-' : '+') + letter;
+        }
+      }
+      const scale = props.UnitScaleFactor;
+      if (typeof scale === 'number') {
+        settings.unitScale = scale;
+        settings.units = UNITS[Math.round(scale * 100000) / 100000] || 'custom';
+      }
+      if (typeof props.OriginalUnitScaleFactor === 'number') {
+        settings.originalUnitScale = props.OriginalUnitScaleFactor;
+      }
+      if (typeof props.TimeMode === 'number') {
+        settings.timeMode = TIME_MODES[props.TimeMode] || `mode ${props.TimeMode}`;
+      }
+      if (typeof props.CustomFrameRate === 'number' && props.CustomFrameRate > 0) {
+        settings.customFrameRate = props.CustomFrameRate;
+      }
+      const start = props.TimeSpanStart;
+      const stop = props.TimeSpanStop;
+      if (typeof start === 'number' && typeof stop === 'number' && stop >= start) {
+        settings.timeSpanSeconds = (stop - start) / FBX_TIME_UNIT;
+      }
+      out.globalSettings = settings;
+    }
+
+    // ---- definitions ----
+    const definitions = child(root, 'Definitions');
+    if (definitions) {
+      const count = pathValue(definitions, ['Count']);
+      if (typeof count === 'number') out.definitionsCount = count;
+      for (const entry of childAll(definitions, 'ObjectType')) {
+        const template = child(entry, 'PropertyTemplate');
+        const typeName = value(entry) || '';
+        const typeCount = pathValue(entry, ['Count']) || 0;
+        if (TYPES_OUTSIDE_OBJECTS.has(typeName)) out.definitionsOutsideObjects += typeCount;
+        out.definitions.push({
+          type: typeName,
+          count: typeCount,
+          template: template ? value(template) : null,
+          templateProperties: template ? Object.keys(properties(template)).length : 0,
+        });
+      }
+    }
+    out.expectedObjectCount = out.definitionsCount === null
+      ? null : out.definitionsCount - out.definitionsOutsideObjects;
+
+    // ---- objects ----
+    const objects = child(root, 'Objects');
+    if (objects) {
+      for (const entry of objects.children) {
+        const values = entry.props.map((p) => p.value);
+        let uid = null;
+        let rawName = '';
+        let subclass = '';
+        if (values.length && typeof values[0] === 'number') {
+          uid = values[0];
+          rawName = typeof values[1] === 'string' ? values[1] : '';
+          subclass = typeof values[2] === 'string' ? values[2] : '';
+        } else {
+          rawName = typeof values[0] === 'string' ? values[0] : '';
+          subclass = typeof values[1] === 'string' ? values[1] : '';
+        }
+        const [name, className] = splitObjectName(rawName);
+        const obj = {
+          nodeType: entry.name,
+          uid,
+          name,
+          className: className || entry.name,
+          subclass,
+          detail: describeObject(entry, subclass),
+          node: entry,
+          get displayName() { return this.name || '<unnamed>'; },
+          get kind() { return this.subclass ? `${this.nodeType} (${this.subclass})` : this.nodeType; },
+        };
+        out.objects.push(obj);
+        out.objectCounts.set(obj.kind, (out.objectCounts.get(obj.kind) || 0) + 1);
+        if ((obj.nodeType === 'Texture' || obj.nodeType === 'Video') && obj.detail) {
+          out.media.push({ type: obj.nodeType, name: obj.displayName, path: obj.detail });
+        }
+      }
+    }
+
+    // ---- connections ----
+    const connections = child(root, 'Connections') || child(root, 'Relations');
+    if (connections) {
+      for (const entry of connections.children) {
+        if (entry.name !== 'C' && entry.name !== 'Connect') continue;
+        const values = entry.props.map((p) => p.value);
+        if (values.length < 3) continue;
+        const kind = typeof values[0] === 'string' ? values[0] : '??';
+        out.connections.push({
+          kind,
+          src: values[1],
+          dst: values[2],
+          prop: typeof values[3] === 'string' ? values[3] : null,
+        });
+        out.connectionCounts.set(kind, (out.connectionCounts.get(kind) || 0) + 1);
+      }
+    }
+
+    // ---- animation ----
+    const byType = new Map();
+    for (const obj of out.objects) byType.set(obj.nodeType, (byType.get(obj.nodeType) || 0) + 1);
+    for (const key of ['AnimationStack', 'AnimationLayer', 'AnimationCurve', 'AnimationCurveNode']) {
+      if (byType.get(key)) out.animation[key] = byType.get(key);
+    }
+    const stacks = out.objects.filter((o) => o.nodeType === 'AnimationStack');
+    if (stacks.length) {
+      out.animation.stacks = stacks.map((stack) => {
+        const props = properties(stack.node);
+        const entry = { name: stack.displayName };
+        if (typeof props.LocalStart === 'number' && typeof props.LocalStop === 'number'
+            && props.LocalStop >= props.LocalStart) {
+          entry.durationSeconds = (props.LocalStop - props.LocalStart) / FBX_TIME_UNIT;
+        }
+        return entry;
+      });
+    }
+    const takes = child(root, 'Takes');
+    if (takes) {
+      const names = childAll(takes, 'Take').map((t) => value(t)).filter((n) => typeof n === 'string');
+      if (names.length) out.animation.takes = names;
+      const current = pathValue(takes, ['Current']);
+      if (current) out.animation.currentTake = current;
+    }
+
+    buildHierarchy(out);
+    return out;
+  }
+
+  function buildHierarchy(out) {
+    const models = out.objects.filter((o) => o.nodeType === 'Model');
+    if (!models.length) return;
+
+    const byKey = new Map();
+    for (const obj of out.objects) {
+      if (obj.uid !== null && !byKey.has(obj.uid)) byKey.set(obj.uid, obj);
+      const named = `${obj.className}::${obj.name}`;
+      if (obj.name && !byKey.has(named)) byKey.set(named, obj);
+    }
+
+    const children = new Map();
+    const parents = new Map();
+    for (const conn of out.connections) {
+      if (conn.kind !== 'OO' && conn.kind !== 'OP') continue;
+      const kid = byKey.get(conn.src);
+      if (!kid) continue;
+      if (!children.has(conn.dst)) children.set(conn.dst, []);
+      children.get(conn.dst).push(kid);
+      if (!parents.has(kid)) parents.set(kid, []);
+      parents.get(kid).push(conn.dst);
+    }
+
+    const visited = new Set();
+    const keyOf = (obj) => (obj.uid !== null ? obj.uid : `${obj.className}::${obj.name}`);
+
+    function attach(parentNode, obj, depth) {
+      if (visited.has(obj) || depth > 128) return;
+      visited.add(obj);
+      const node = { obj, children: [], attachments: [] };
+      parentNode.children.push(node);
+      for (const kid of children.get(keyOf(obj)) || []) {
+        if (kid.nodeType === 'Model') attach(node, kid, depth + 1);
+        else if (['Geometry', 'Material', 'NodeAttribute'].includes(kid.nodeType)) {
+          node.attachments.push(kid);
+        }
+      }
+    }
+
+    const sceneRoot = { obj: null, children: [], attachments: [], label: 'RootNode' };
+    for (const key of [0, 'Model::Scene', 'Model::SceneRoot']) {
+      for (const kid of children.get(key) || []) {
+        if (kid.nodeType === 'Model') attach(sceneRoot, kid, 0);
+      }
+    }
+    if (sceneRoot.children.length) out.roots.push(sceneRoot);
+
+    if (!out.roots.length) {
+      const modelSet = new Set(models);
+      const floating = { obj: null, children: [], attachments: [], label: 'Models (no scene root record)' };
+      for (const obj of models) {
+        const parentObjs = (parents.get(obj) || []).map((k) => byKey.get(k));
+        if (!parentObjs.some((p) => p && modelSet.has(p))) attach(floating, obj, 0);
+      }
+      if (floating.children.length) out.roots.push(floating);
+      out.orphans = models.filter((m) => !visited.has(m));
+    } else {
+      out.orphans = models.filter((m) => !visited.has(m) && !(parents.get(m) || []).length);
+    }
+  }
+
+  /** Pick the mesh geometry worth rendering: the one with the most vertices. */
+  function findGeometry(doc) {
+    const objects = doc.root.children.find((c) => c.name === 'Objects');
+    if (!objects) return null;
+    let best = null;
+    let bestSize = -1;
+    for (const entry of objects.children) {
+      if (entry.name !== 'Geometry' && entry.name !== 'Model') continue;
+      const vertices = entry.children.find((c) => c.name === 'Vertices');
+      const indices = entry.children.find((c) => c.name === 'PolygonVertexIndex');
+      if (!vertices || !indices) continue;
+      const size = arrayLength(vertices) || 0;
+      if (size > bestSize) { bestSize = size; best = entry; }
+    }
+    return best;
+  }
+
+  /** Every renderable geometry record, largest first. */
+  function findAllGeometry(doc) {
+    const objects = doc.root.children.find((c) => c.name === 'Objects');
+    if (!objects) return [];
+    return objects.children
+      .filter((entry) => (entry.name === 'Geometry' || entry.name === 'Model')
+        && entry.children.some((c) => c.name === 'Vertices')
+        && entry.children.some((c) => c.name === 'PolygonVertexIndex'))
+      .sort((a, b) => (arrayLength(a.children.find((c) => c.name === 'Vertices')) || 0)
+        < (arrayLength(b.children.find((c) => c.name === 'Vertices')) || 0) ? 1 : -1);
+  }
+
+  return {
+    analyze, describeVersion, splitObjectName, properties, arrayLength,
+    child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
+  };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxAnalyze;
+
+// ---- report.js ---------------------------------------------------------
+/* Renders the analysis as HTML for the info panel — the browser counterpart of
+ * fbxtool/report.py.
+ */
+'use strict';
+
+const FbxReport = (function () {
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  function formatSize(bytes) {
+    let value = bytes;
+    for (const unit of ['B', 'KiB', 'MiB', 'GiB']) {
+      if (value < 1024 || unit === 'GiB') {
+        return unit === 'B' ? `${Math.round(value)} B` : `${value.toFixed(1)} ${unit}`;
+      }
+      value /= 1024;
+    }
+    return `${value} GiB`;
+  }
+
+  const number = (n) => n.toLocaleString('en-US');
+
+  function rows(pairs) {
+    const kept = pairs.filter(([, v]) => v !== null && v !== undefined && v !== '');
+    if (!kept.length) return '';
+    return `<dl>${kept.map(([k, v]) =>
+      `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('')}</dl>`;
+  }
+
+  function section(title, body, extra = '') {
+    if (!body) return '';
+    return `<section class="panel-section"><h2>${escapeHtml(title)}${extra}</h2>${body}</section>`;
+  }
+
+  function joinApp(name, version, vendor) {
+    const parts = [name, version].filter(Boolean).join(' ');
+    if (vendor && !parts.includes(vendor)) return parts ? `${parts} (${vendor})` : String(vendor);
+    return parts;
+  }
+
+  function fileSection(info) {
+    const doc = info.doc;
+    const version = info.version;
+    const pairs = [
+      ['Name', doc.fileName || '—'],
+      ['Size', formatSize(doc.fileSize)],
+      ['Encoding', doc.encoding === 'binary' ? 'binary' : 'ASCII text'],
+      ['Version', version ? version.label : 'unknown'],
+    ];
+    if (version && version.notes) pairs.push(['Version note', version.notes]);
+    if (doc.versionSource) pairs.push(['Version read from', doc.versionSource]);
+    if (doc.encoding === 'binary') {
+      pairs.push(['Node offsets', doc.wideOffsets ? '64-bit (version >= 7500)' : '32-bit']);
+      pairs.push(['Footer', doc.hasFooter
+        ? `present${doc.footerVersion ? `, version stamp ${doc.footerVersion}` : ''}`
+        : 'missing']);
+    }
+    if (version && version.legacyLayout) {
+      pairs.push(['Layout', 'legacy 6.x (objects addressed by name, not UID)']);
+    }
+    if (doc.parseMilliseconds !== undefined) {
+      pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
+    }
+    return section('File', rows(pairs));
+  }
+
+  function metadataSection(info) {
+    const h = info.header;
+    const s = info.sceneInfo;
+    const pairs = [
+      ['Creator', h.creator],
+      ['Created', h.creationTime],
+      ['Header extension version', h.headerVersion],
+      ['Encryption type', h.encryption],
+      ['File id', h.fileId],
+      ['Originally written by', joinApp(s.originalApplication, s.originalVersion, s.originalVendor)],
+      ['Originally written', s.originalDateTime],
+      ['Last saved by', joinApp(s.lastSavedApplication, s.lastSavedVersion, s.lastSavedVendor)],
+      ['Last saved', s.lastSavedDateTime],
+      ['Document url', s.documentUrl],
+      ['Title', s.title],
+      ['Author', s.author],
+      ['Comment', s.comment],
+    ];
+    return section('Metadata', rows(pairs));
+  }
+
+  function settingsSection(info) {
+    const s = info.globalSettings;
+    if (!Object.keys(s).length) return '';
+    const axes = [s.upAxis, s.frontAxis, s.coordAxis];
+    const pairs = [];
+    if (axes.some(Boolean)) {
+      pairs.push(['Axis system',
+        `up ${axes[0] || '?'}, front ${axes[1] || '?'}, right ${axes[2] || '?'}`]);
+    }
+    if (s.unitScale !== undefined) {
+      let text = `${s.unitScale} cm per unit (${s.units || 'custom'})`;
+      if (s.originalUnitScale !== undefined && s.originalUnitScale !== s.unitScale) {
+        text += `, originally ${s.originalUnitScale}`;
+      }
+      pairs.push(['Units', text]);
+    }
+    pairs.push(['Time mode', s.timeMode]);
+    if (s.customFrameRate) pairs.push(['Custom frame rate', s.customFrameRate]);
+    if (s.timeSpanSeconds !== undefined) {
+      pairs.push(['Time span', `${s.timeSpanSeconds.toFixed(3)} s`]);
+    }
+    return section('Global settings', rows(pairs));
+  }
+
+  function structureSection(info) {
+    let body = rows([
+      ['Total records', number(info.totalRecords)],
+      ['Maximum nesting depth', info.maxDepth],
+      ['Top-level sections', info.sections.length],
+    ]);
+    if (info.sections.length) {
+      body += `<table class="counts">${info.sections.map(([name, count]) =>
+        `<tr><td>${escapeHtml(name)}</td><td>${number(count)}</td></tr>`).join('')}</table>`;
+    }
+    const props = [...info.propertyCounts.entries()].sort((a, b) => b[1] - a[1]);
+    if (props.length) {
+      const total = props.reduce((sum, [, n]) => sum + n, 0);
+      body += '<h3>Properties by type</h3>';
+      body += `<table class="counts">${props.map(([name, count]) =>
+        `<tr><td>${escapeHtml(name)}</td><td>${number(count)}</td></tr>`).join('')}`
+        + `<tr class="total"><td>total</td><td>${number(total)}</td></tr></table>`;
+      if (info.arrayBytes) {
+        body += `<p class="note">Array payloads: ${formatSize(info.arrayBytes)} as stored</p>`;
+      }
+    }
+    return section('Record structure', body);
+  }
+
+  function definitionsSection(info) {
+    if (!info.definitions.length && info.definitionsCount === null) return '';
+    let body = '';
+    if (info.definitionsCount !== null) {
+      body += `<p class="note">Declared object count: ${number(info.definitionsCount)}</p>`;
+    }
+    if (info.definitions.length) {
+      body += '<table class="counts wide"><tr><th>object type</th><th>count</th><th>template</th></tr>';
+      body += info.definitions.map((d) => {
+        const template = d.template
+          ? `${escapeHtml(d.template)} (${d.templateProperties} defaults)` : '—';
+        return `<tr><td>${escapeHtml(d.type)}</td><td>${number(d.count)}</td><td>${template}</td></tr>`;
+      }).join('');
+      body += '</table>';
+    }
+    return section('Definitions', body);
+  }
+
+  function objectsSection(info) {
+    if (!info.objects.length) return '';
+    let body = `<p class="note">${number(info.objects.length)} object records`;
+    const expected = info.expectedObjectCount;
+    if (expected !== null && expected !== info.objects.length) {
+      const diff = Math.abs(expected - info.objects.length);
+      body += ` — Definitions implies ${number(expected)}, so ${number(diff)} `
+        + (expected > info.objects.length ? 'are missing' : 'are extra');
+    }
+    body += '</p>';
+    const counts = [...info.objectCounts.entries()].sort((a, b) => b[1] - a[1]);
+    body += `<table class="counts">${counts.map(([kind, count]) =>
+      `<tr><td>${escapeHtml(kind)}</td><td>${number(count)}</td></tr>`).join('')}</table>`;
+    return section('Objects', body);
+  }
+
+  function hierarchySection(info) {
+    if (!info.roots.length && !info.orphans.length) return '';
+    const lines = [];
+    const label = (obj) => {
+      let text = obj.displayName;
+      if (obj.subclass) text += `  [${obj.subclass}]`;
+      if (obj.detail) text += `  (${obj.detail})`;
+      return text;
+    };
+    const walk = (node, prefix) => {
+      const total = node.children.length;
+      node.children.forEach((child, index) => {
+        if (lines.length >= 400) return;
+        const last = index === total - 1;
+        lines.push(prefix + (last ? '└── ' : '├── ') + label(child.obj));
+        const childPrefix = prefix + (last ? '    ' : '│   ');
+        child.attachments.forEach((item, position) => {
+          const attachmentLast = position === child.attachments.length - 1 && !child.children.length;
+          lines.push(childPrefix + (attachmentLast ? '└── ' : '├── ')
+            + `[${item.nodeType}] ${item.displayName}`
+            + (item.detail ? ` (${item.detail})` : ''));
+        });
+        walk(child, childPrefix);
+      });
+    };
+    for (const root of info.roots) {
+      lines.push(root.label || 'RootNode');
+      walk(root, '');
+    }
+    if (info.orphans.length) {
+      lines.push('');
+      lines.push(`Unparented models: ${info.orphans.length}`);
+      for (const obj of info.orphans.slice(0, 40)) lines.push(`  ${label(obj)}`);
+    }
+    return section('Scene hierarchy', `<pre class="tree">${escapeHtml(lines.join('\n'))}</pre>`);
+  }
+
+  function connectionsSection(info) {
+    if (!info.connections.length) return '';
+    const names = {
+      OO: 'object → object', OP: 'object → property',
+      PO: 'property → object', PP: 'property → property',
+    };
+    const counts = [...info.connectionCounts.entries()].sort((a, b) => b[1] - a[1]);
+    const body = `<p class="note">${number(info.connections.length)} connections</p>`
+      + `<table class="counts wide">${counts.map(([kind, count]) =>
+        `<tr><td>${escapeHtml(kind)}</td><td>${escapeHtml(names[kind] || 'unknown')}</td>`
+        + `<td>${number(count)}</td></tr>`).join('')}</table>`;
+    return section('Connections', body);
+  }
+
+  function animationSection(info) {
+    const a = info.animation;
+    if (!Object.keys(a).length) return '';
+    const pairs = Object.entries(a)
+      .filter(([k, v]) => k !== 'stacks' && k !== 'takes' && typeof v !== 'object');
+    let body = rows(pairs);
+    for (const stack of a.stacks || []) {
+      body += `<p class="note">stack ${escapeHtml(stack.name)}`
+        + (stack.durationSeconds !== undefined ? ` (${stack.durationSeconds.toFixed(3)} s)` : '')
+        + '</p>';
+    }
+    for (const take of a.takes || []) body += `<p class="note">take ${escapeHtml(take)}</p>`;
+    return section('Animation', body);
+  }
+
+  function warningsSection(info) {
+    if (!info.warnings.length) return '';
+    const items = info.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('');
+    return section(`Warnings (${info.warnings.length})`, `<ul class="warnings">${items}</ul>`);
+  }
+
+  /** Render the record tree, lazily expandable below the top levels. */
+  function recordTree(root, maxDepth = 2) {
+    const summarise = (prop) => {
+      if (prop.array) {
+        const encoding = prop.array.encoding === 1 ? 'deflate' : 'raw';
+        const stored = prop.array.byteLength ? ` ${formatSize(prop.array.byteLength)}` : '';
+        return `*${number(prop.array.length)} [${prop.code}] ${encoding}${stored}`;
+      }
+      if (prop.code === 'S') {
+        let text = String(prop.value).split('\u0000\u0001').join('::');
+        if (text.length > 32) text = `${text.slice(0, 29)}...`;
+        return `"${text}"`;
+      }
+      if (prop.code === 'R') return `<raw ${prop.value.length} B>`;
+      if (typeof prop.value === 'boolean') return prop.value ? 'true' : 'false';
+      return String(prop.value);
+    };
+
+    const render = (node, depth) => {
+      const preview = node.props.slice(0, 3).map(summarise).join(', ')
+        + (node.props.length > 3 ? `, +${node.props.length - 3} more` : '');
+      const label = escapeHtml(node.name + (node.props.length ? `: ${preview}` : ''))
+        + (node.children.length ? ` <span class="count">{${node.children.length}}</span>` : '');
+      if (!node.children.length) return `<li>${label}</li>`;
+      const open = depth < maxDepth ? ' open' : '';
+      return `<li><details${open}><summary>${label}</summary><ul>`
+        + node.children.map((c) => render(c, depth + 1)).join('') + '</ul></details></li>';
+    };
+    return `<ul class="record-tree">${root.children.map((c) => render(c, 0)).join('')}</ul>`;
+  }
+
+  function render(info) {
+    return [
+      fileSection(info),
+      warningsSection(info),
+      metadataSection(info),
+      settingsSection(info),
+      hierarchySection(info),
+      objectsSection(info),
+      definitionsSection(info),
+      connectionsSection(info),
+      animationSection(info),
+      structureSection(info),
+    ].join('');
+  }
+
+  return { render, recordTree, formatSize, escapeHtml };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxReport;
+
+// ---- viewer.js ---------------------------------------------------------
+/* WebGL2 viewport: orbit camera, per-material shading, and axis correction.
+ *
+ * Geometry arrives already triangulated from the WebAssembly core, so this
+ * only uploads buffers and draws.
+ */
+'use strict';
+
+const FbxViewer = (function () {
+  const VERTEX_SHADER = `#version 300 es
+  precision highp float;
+  layout(location = 0) in vec3 aPosition;
+  layout(location = 1) in vec3 aNormal;
+  layout(location = 2) in float aMaterial;
+
+  uniform mat4 uModelView;
+  uniform mat4 uProjection;
+  uniform mat3 uNormalMatrix;
+
+  out vec3 vNormal;
+  out vec3 vViewPosition;
+  out float vMaterial;
+
+  void main() {
+    vec4 viewPosition = uModelView * vec4(aPosition, 1.0);
+    vViewPosition = viewPosition.xyz;
+    vNormal = uNormalMatrix * aNormal;
+    vMaterial = aMaterial;
+    gl_Position = uProjection * viewPosition;
+  }`;
+
+  const FRAGMENT_SHADER = `#version 300 es
+  precision highp float;
+
+  in vec3 vNormal;
+  in vec3 vViewPosition;
+  in float vMaterial;
+
+  uniform int uMode;          // 0 materials, 1 clay, 2 normals
+  uniform vec3 uClayColour;
+
+  out vec4 fragColour;
+
+  // Distinct hues per material index without a lookup table.
+  vec3 materialColour(float id) {
+    float hue = fract(id * 0.6180339887);
+    vec3 k = vec3(3.0, 2.0, 1.0);
+    vec3 p = abs(fract(vec3(hue) + k / 3.0) * 6.0 - 3.0);
+    vec3 rgb = clamp(p - 1.0, 0.0, 1.0);
+    float sat = 0.55 + 0.25 * fract(id * 0.7548776662);
+    return mix(vec3(0.85), rgb, sat);
+  }
+
+  void main() {
+    // Flat-shade from screen-space derivatives when a normal is degenerate,
+    // so meshes without usable normals still read as solid.
+    vec3 normal = normalize(vNormal);
+    if (!all(lessThan(abs(normal), vec3(1e3))) || dot(normal, normal) < 0.5) {
+      normal = normalize(cross(dFdx(vViewPosition), dFdy(vViewPosition)));
+    }
+    if (!gl_FrontFacing) normal = -normal;
+
+    if (uMode == 2) {
+      fragColour = vec4(normal * 0.5 + 0.5, 1.0);
+      return;
+    }
+
+    vec3 base = uMode == 0 ? materialColour(vMaterial) : uClayColour;
+
+    vec3 viewDir = normalize(-vViewPosition);
+    vec3 keyDir = normalize(vec3(0.4, 0.7, 0.8));
+    vec3 fillDir = normalize(vec3(-0.6, 0.2, -0.4));
+
+    float key = max(dot(normal, keyDir), 0.0);
+    float fill = max(dot(normal, fillDir), 0.0) * 0.35;
+    float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.5) * 0.35;
+
+    vec3 halfway = normalize(keyDir + viewDir);
+    float spec = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
+
+    vec3 colour = base * (0.22 + 0.78 * key + fill) + vec3(spec) + vec3(0.35, 0.45, 0.6) * rim;
+    fragColour = vec4(pow(clamp(colour, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);
+  }`;
+
+  /* ------------------------------------------------------------- matrices */
+
+  function identity() {
+    return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  }
+
+  function perspective(fovY, aspect, near, far) {
+    const f = 1 / Math.tan(fovY / 2);
+    const out = new Float32Array(16);
+    out[0] = f / aspect;
+    out[5] = f;
+    out[10] = (far + near) / (near - far);
+    out[11] = -1;
+    out[14] = (2 * far * near) / (near - far);
+    return out;
+  }
+
+  function lookAt(eye, target, up) {
+    const z = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+    let x = normalize(cross(up, z));
+    if (!isFinite(x[0]) || (x[0] === 0 && x[1] === 0 && x[2] === 0)) x = [1, 0, 0];
+    const y = cross(z, x);
+    const out = new Float32Array(16);
+    out[0] = x[0]; out[4] = x[1]; out[8] = x[2];
+    out[1] = y[0]; out[5] = y[1]; out[9] = y[2];
+    out[2] = z[0]; out[6] = z[1]; out[10] = z[2];
+    out[12] = -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]);
+    out[13] = -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]);
+    out[14] = -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]);
+    out[15] = 1;
+    return out;
+  }
+
+  function multiply(a, b) {
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1]
+          + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  }
+
+  function cross(a, b) {
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  }
+
+  function normalize(v) {
+    const len = Math.hypot(v[0], v[1], v[2]);
+    return len ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
+  }
+
+  /** Upper-left 3x3 of a matrix; adequate while the model matrix is a rotation. */
+  function normalMatrix(m) {
+    return new Float32Array([m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]);
+  }
+
+  /** Rotate Z-up geometry into the viewer's Y-up world: -90 degrees about X,
+   *  so mesh +Z becomes world +Y and mesh +Y becomes world -Z.  Columns are
+   *  the images of the basis vectors, this being column-major. */
+  function zUpToYUp() {
+    const m = identity();
+    m[0] = 1; m[1] = 0; m[2] = 0;    // X -> X
+    m[4] = 0; m[5] = 0; m[6] = -1;   // Y -> -Z
+    m[8] = 0; m[9] = 1; m[10] = 0;   // Z -> Y
+    return m;
+  }
+
+  /* --------------------------------------------------------------- viewer */
+
+  class Viewer {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.gl = canvas.getContext('webgl2', {
+        antialias: true, alpha: false, depth: true, preserveDrawingBuffer: true,
+      });
+      if (!this.gl) throw new Error('WebGL2 is not available in this browser');
+
+      this.mode = 0;
+      this.upAxis = 'y';
+      this.triangleCount = 0;
+      this.yaw = 0.7;
+      this.pitch = 0.35;
+      this.distance = 4;
+      this.target = [0, 0, 0];
+      this.radius = 1;
+      this.autoRotate = false;
+      this.dirty = true;
+      this._frame = 0;
+
+      this._initProgram();
+      this._initBuffers();
+      this._bindInput();
+
+      const gl = this.gl;
+      gl.enable(gl.DEPTH_TEST);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      gl.clearColor(0.086, 0.094, 0.114, 1);
+
+      this._loop = this._loop.bind(this);
+      requestAnimationFrame(this._loop);
+    }
+
+    _compile(type, source) {
+      const gl = this.gl;
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        throw new Error(`shader failed to compile: ${gl.getShaderInfoLog(shader)}`);
+      }
+      return shader;
+    }
+
+    _initProgram() {
+      const gl = this.gl;
+      const program = gl.createProgram();
+      gl.attachShader(program, this._compile(gl.VERTEX_SHADER, VERTEX_SHADER));
+      gl.attachShader(program, this._compile(gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(`program failed to link: ${gl.getProgramInfoLog(program)}`);
+      }
+      this.program = program;
+      this.uniforms = {
+        modelView: gl.getUniformLocation(program, 'uModelView'),
+        projection: gl.getUniformLocation(program, 'uProjection'),
+        normalMatrix: gl.getUniformLocation(program, 'uNormalMatrix'),
+        mode: gl.getUniformLocation(program, 'uMode'),
+        clayColour: gl.getUniformLocation(program, 'uClayColour'),
+      };
+    }
+
+    _initBuffers() {
+      const gl = this.gl;
+      this.vao = gl.createVertexArray();
+      gl.bindVertexArray(this.vao);
+      this.positionBuffer = gl.createBuffer();
+      this.normalBuffer = gl.createBuffer();
+      this.materialBuffer = gl.createBuffer();
+
+      const attach = (buffer, location, size) => {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+      };
+      attach(this.positionBuffer, 0, 3);
+      attach(this.normalBuffer, 1, 3);
+      attach(this.materialBuffer, 2, 1);
+      gl.bindVertexArray(null);
+    }
+
+    /** Upload a mesh. Buffers are copied, so WASM memory may be reused after. */
+    setMesh(mesh) {
+      const gl = this.gl;
+      gl.bindVertexArray(this.vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.materialBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.materials, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+
+      this.triangleCount = mesh.triangleCount;
+      this.frame(mesh.min, mesh.max);
+      this.dirty = true;
+    }
+
+    clear() {
+      this.triangleCount = 0;
+      this.dirty = true;
+    }
+
+    /** Point the camera at a bounding box. */
+    frame(min, max) {
+      const centre = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
+      const size = [0, 1, 2].map((i) => Math.abs(max[i] - min[i]));
+      const radius = Math.max(Math.hypot(size[0], size[1], size[2]) / 2, 1e-4);
+      this.modelCentre = centre;
+      this.radius = radius;
+      this.target = [0, 0, 0];
+      this.distance = radius * 2.6;
+      this.yaw = 0.9;
+      this.pitch = 0.28;
+      this.dirty = true;
+    }
+
+    setMode(mode) { this.mode = mode; this.dirty = true; }
+    setUpAxis(axis) { this.upAxis = axis; this.dirty = true; }
+    setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
+
+    resetView() {
+      this.yaw = 0.9;
+      this.pitch = 0.28;
+      this.distance = this.radius * 2.6;
+      this.target = [0, 0, 0];
+      this.dirty = true;
+    }
+
+    _bindInput() {
+      const canvas = this.canvas;
+      let dragging = null;
+      let lastX = 0;
+      let lastY = 0;
+
+      canvas.addEventListener('pointerdown', (event) => {
+        dragging = (event.button === 2 || event.shiftKey) ? 'pan' : 'orbit';
+        lastX = event.clientX;
+        lastY = event.clientY;
+        canvas.setPointerCapture(event.pointerId);
+      });
+      canvas.addEventListener('pointermove', (event) => {
+        if (!dragging) return;
+        const dx = event.clientX - lastX;
+        const dy = event.clientY - lastY;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        if (dragging === 'orbit') {
+          this.yaw -= dx * 0.008;
+          this.pitch = Math.max(-1.5533, Math.min(1.5533, this.pitch - dy * 0.008));
+        } else {
+          const scale = this.distance * 0.0016;
+          this.target[0] -= dx * scale * Math.cos(this.yaw);
+          this.target[2] += dx * scale * Math.sin(this.yaw);
+          this.target[1] += dy * scale;
+        }
+        this.dirty = true;
+      });
+      const stop = (event) => {
+        dragging = null;
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      };
+      canvas.addEventListener('pointerup', stop);
+      canvas.addEventListener('pointercancel', stop);
+      canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+      canvas.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const factor = Math.exp(event.deltaY * 0.0012);
+        this.distance = Math.max(this.radius * 0.05, Math.min(this.radius * 40, this.distance * factor));
+        this.dirty = true;
+      }, { passive: false });
+    }
+
+    _resize() {
+      const canvas = this.canvas;
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(canvas.clientWidth * ratio));
+      const height = Math.max(1, Math.round(canvas.clientHeight * ratio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        this.dirty = true;
+      }
+    }
+
+    _loop() {
+      this._resize();
+      if (this.autoRotate && this.triangleCount) {
+        this.yaw += 0.004;
+        this.dirty = true;
+      }
+      if (this.dirty) {
+        this.render();
+        this.dirty = false;
+      }
+      this._frame++;
+      requestAnimationFrame(this._loop);
+    }
+
+    render() {
+      const gl = this.gl;
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (!this.triangleCount) return;
+
+      const centre = this.modelCentre || [0, 0, 0];
+      let model = identity();
+      if (this.upAxis === 'z') model = zUpToYUp();
+      // Centre the model at the origin before the up-axis rotation.
+      const translate = identity();
+      translate[12] = -centre[0];
+      translate[13] = -centre[1];
+      translate[14] = -centre[2];
+      model = multiply(model, translate);
+
+      const eye = [
+        this.target[0] + this.distance * Math.cos(this.pitch) * Math.sin(this.yaw),
+        this.target[1] + this.distance * Math.sin(this.pitch),
+        this.target[2] + this.distance * Math.cos(this.pitch) * Math.cos(this.yaw),
+      ];
+      const view = lookAt(eye, this.target, [0, 1, 0]);
+      const modelView = multiply(view, model);
+      const aspect = this.canvas.width / Math.max(this.canvas.height, 1);
+      const near = Math.max(this.radius * 0.005, 1e-3);
+      const projection = perspective(0.9, aspect, near, this.radius * 100 + 10);
+
+      gl.useProgram(this.program);
+      gl.uniformMatrix4fv(this.uniforms.modelView, false, modelView);
+      gl.uniformMatrix4fv(this.uniforms.projection, false, projection);
+      gl.uniformMatrix3fv(this.uniforms.normalMatrix, false, normalMatrix(modelView));
+      gl.uniform1i(this.uniforms.mode, this.mode);
+      gl.uniform3f(this.uniforms.clayColour, 0.72, 0.73, 0.76);
+
+      gl.bindVertexArray(this.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
+      gl.bindVertexArray(null);
+    }
+  }
+
+  return { Viewer };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
+
+// ---- main.js -----------------------------------------------------------
+/* UI wiring: file input, drag and drop, geometry selection and viewport
+ * controls.
+ */
+'use strict';
+
+(function () {
+  const $ = (id) => document.getElementById(id);
+
+  const dom = {
+    drop: $('drop'),
+    fileInput: $('file-input'),
+    picker: $('picker'),
+    panel: $('panel'),
+    status: $('status'),
+    canvas: $('viewport'),
+    meshInfo: $('mesh-info'),
+    geometrySelect: $('geometry-select'),
+    modeSelect: $('mode-select'),
+    upSelect: $('up-select'),
+    spinToggle: $('spin-toggle'),
+    resetView: $('reset-view'),
+    tabs: document.querySelectorAll('.tab'),
+    tree: $('tree'),
+    stage: $('stage'),
+  };
+
+  let viewer = null;
+  let currentDoc = null;
+  let currentAnalysis = null;
+
+  function setStatus(text, kind = '') {
+    dom.status.textContent = text || '';
+    dom.status.className = `status ${kind}`;
+  }
+
+  /* --------------------------------------------------------------- loading */
+
+  async function loadFile(file) {
+    setStatus(`Reading ${file.name}…`);
+    try {
+      const buffer = new Uint8Array(await file.arrayBuffer());
+      const started = performance.now();
+
+      let doc = FbxWasm.parseBinary(buffer);
+      if (!doc) {
+        // Not binary — try ASCII.
+        const text = new TextDecoder('utf-8').decode(buffer);
+        if (!FbxAscii.looksLikeAscii(text)) {
+          setStatus(`${file.name} is not an FBX file — no binary magic and no `
+            + 'recognisable ASCII records.', 'error');
+          return;
+        }
+        doc = FbxAscii.parse(text);
+      } else {
+        doc.versionSource = 'header';
+      }
+      doc.fileName = file.name;
+      doc.fileSize = file.size;
+      doc.parseMilliseconds = performance.now() - started;
+
+      currentDoc = doc;
+      currentAnalysis = FbxAnalyze.analyze(doc);
+
+      dom.panel.innerHTML = FbxReport.render(currentAnalysis);
+      dom.tree.innerHTML = FbxReport.recordTree(doc.root);
+      document.body.classList.add('loaded');
+
+      populateGeometry(doc);
+      const label = `${doc.encoding} · FBX ${doc.version || '?'} · `
+        + `${currentAnalysis.totalRecords.toLocaleString()} records · `
+        + `${doc.parseMilliseconds.toFixed(0)} ms`;
+      setStatus(label, doc.warnings.length ? 'warn' : 'ok');
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not read ${file.name}: ${error.message}`, 'error');
+    }
+  }
+
+  /* -------------------------------------------------------------- geometry */
+
+  /**
+   * Decide which axis points up, preferring the file's declaration but
+   * overriding it when the vertex data clearly disagrees: a model resting on a
+   * ground plane has its minimum at zero along the up axis.
+   */
+  function guessUpAxis(min, max, declared) {
+    const score = (i) => {
+      const extent = max[i] - min[i];
+      return extent > 0 ? Math.abs(min[i]) / extent : Infinity;
+    };
+    const scores = [0, 1, 2].map(score);
+    const best = scores.indexOf(Math.min(...scores));
+    const declaredIndex = declared === 'z' ? 2 : 1;
+    if ((best === 1 || best === 2) && scores[best] < 0.05 && scores[declaredIndex] > 0.2) {
+      return { axis: best === 2 ? 'z' : 'y', fromGeometry: true };
+    }
+    return { axis: declared, fromGeometry: false };
+  }
+
+
+  function populateGeometry(doc) {
+    const candidates = FbxAnalyze.findAllGeometry(doc);
+    dom.geometrySelect.innerHTML = '';
+    if (!candidates.length) {
+      dom.geometrySelect.disabled = true;
+      dom.meshInfo.textContent = 'no renderable geometry in this file';
+      viewer.clear();
+      return;
+    }
+    dom.geometrySelect.disabled = candidates.length === 1;
+    candidates.forEach((entry, index) => {
+      const [name] = FbxAnalyze.splitObjectName(
+        entry.props.map((p) => p.value).find((v) => typeof v === 'string') || '',
+      );
+      const vertices = Math.floor(
+        (FbxAnalyze.arrayLength(entry.children.find((c) => c.name === 'Vertices')) || 0) / 3,
+      );
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = `${name || entry.name} — ${vertices.toLocaleString()} vertices`;
+      dom.geometrySelect.appendChild(option);
+    });
+    dom.geometrySelect.dataset.count = String(candidates.length);
+    showGeometry(candidates[0]);
+  }
+
+  /** Pull the arrays a geometry record needs and hand them to the WASM core. */
+  function buildMesh(entry) {
+    const child = (name) => entry.children.find((c) => c.name === name);
+    const nestedArray = (node) => {
+      if (!node) return null;
+      const direct = node.props.find((p) => p.array);
+      if (direct) return direct;
+      const inner = node.children.find((c) => c.name === 'a');
+      return inner ? inner.props.find((p) => p.array) : null;
+    };
+
+    const vertices = nestedArray(child('Vertices'));
+    const indices = nestedArray(child('PolygonVertexIndex'));
+    if (!vertices || !indices) return null;
+
+    // ASCII arrays arrive already decoded, so they are copied in; binary ones
+    // are inflated in place inside WebAssembly memory.
+    const toF64 = (prop) => (prop.values ? FbxWasm.uploadFloat64(prop.values) : FbxWasm.asFloat64(prop));
+    const toI32 = (prop) => (prop.values ? FbxWasm.uploadInt32(prop.values) : FbxWasm.asInt32(prop));
+
+    const positions = toF64(vertices);
+    const polygons = toI32(indices);
+
+    let normals = null;
+    let mapping = 'none';
+    const normalLayer = entry.children.find((c) => c.name === 'LayerElementNormal');
+    if (normalLayer) {
+      const prop = nestedArray(normalLayer.children.find((c) => c.name === 'Normals'));
+      const mapType = FbxAnalyze.pathValue(normalLayer, ['MappingInformationType']);
+      const refType = FbxAnalyze.pathValue(normalLayer, ['ReferenceInformationType']);
+      // Only Direct reference is honoured; IndexToDirect falls back to face normals.
+      if (prop && (!refType || String(refType).startsWith('Direct'))) {
+        if (mapType === 'ByPolygonVertex') mapping = 'byPolygonVertex';
+        else if (mapType === 'ByVertice' || mapType === 'ByVertex') mapping = 'byVertex';
+        if (mapping !== 'none') normals = toF64(prop);
+      }
+    }
+
+    let materials = null;
+    const materialLayer = entry.children.find((c) => c.name === 'LayerElementMaterial');
+    if (materialLayer) {
+      const prop = nestedArray(materialLayer.children.find((c) => c.name === 'Materials'));
+      if (prop) materials = toI32(prop);
+    }
+
+    return FbxWasm.buildMesh(positions, polygons, normals, mapping, materials);
+  }
+
+  function showGeometry(entry) {
+    try {
+      const started = performance.now();
+      const mesh = buildMesh(entry);
+      if (!mesh || !mesh.triangleCount) {
+        dom.meshInfo.textContent = 'this record has no triangles';
+        viewer.clear();
+        return;
+      }
+      const elapsed = performance.now() - started;
+      viewer.setMesh(mesh);
+
+      const declaredAxis = (currentAnalysis.globalSettings.upAxis || '+Y').includes('Z')
+        ? 'z' : 'y';
+      const chosen = guessUpAxis(mesh.min, mesh.max, declaredAxis);
+      dom.upSelect.value = chosen.axis;
+      viewer.setUpAxis(chosen.axis);
+
+      const size = [0, 1, 2].map((i) => (mesh.max[i] - mesh.min[i]));
+      let text = `${mesh.triangleCount.toLocaleString()} triangles from `
+        + `${mesh.polygonCount.toLocaleString()} polygons · `
+        + `${size.map((v) => v.toFixed(1)).join(' × ')} units · ${elapsed.toFixed(0)} ms`;
+      if (chosen.fromGeometry) {
+        text += ` · ${chosen.axis.toUpperCase()} up from the geometry, though the `
+          + `file declares ${currentAnalysis.globalSettings.upAxis}`;
+      }
+      dom.meshInfo.textContent = text;
+    } catch (error) {
+      console.error(error);
+      dom.meshInfo.textContent = `could not build the mesh: ${error.message}`;
+      viewer.clear();
+    }
+  }
+
+  /* ------------------------------------------------------------------ init */
+
+  function bindUi() {
+    dom.picker.addEventListener('click', () => dom.fileInput.click());
+    dom.fileInput.addEventListener('change', () => {
+      if (dom.fileInput.files.length) loadFile(dom.fileInput.files[0]);
+    });
+
+    ['dragenter', 'dragover'].forEach((type) => {
+      document.addEventListener(type, (event) => {
+        event.preventDefault();
+        dom.drop.classList.add('active');
+      });
+    });
+    ['dragleave', 'drop'].forEach((type) => {
+      document.addEventListener(type, (event) => {
+        event.preventDefault();
+        if (type === 'drop' || event.relatedTarget === null) dom.drop.classList.remove('active');
+      });
+    });
+    document.addEventListener('drop', (event) => {
+      const file = event.dataTransfer && event.dataTransfer.files[0];
+      if (file) loadFile(file);
+    });
+
+    dom.geometrySelect.addEventListener('change', () => {
+      const candidates = FbxAnalyze.findAllGeometry(currentDoc);
+      const entry = candidates[Number(dom.geometrySelect.value)];
+      if (entry) showGeometry(entry);
+    });
+    dom.modeSelect.addEventListener('change', () => viewer.setMode(Number(dom.modeSelect.value)));
+    dom.upSelect.addEventListener('change', () => viewer.setUpAxis(dom.upSelect.value));
+    dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
+    dom.resetView.addEventListener('click', () => viewer.resetView());
+
+    dom.tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        dom.tabs.forEach((t) => t.classList.toggle('active', t === tab));
+        document.querySelectorAll('.tab-panel').forEach((p) => {
+          p.classList.toggle('active', p.id === tab.dataset.target);
+        });
+      });
+    });
+  }
+
+  async function start() {
+    try {
+      await FbxWasm.init(WASM_BASE64);
+    } catch (error) {
+      setStatus(`WebAssembly failed to load: ${error.message}`, 'error');
+      return;
+    }
+    try {
+      viewer = new FbxViewer.Viewer(dom.canvas);
+    } catch (error) {
+      dom.stage.classList.add('no-webgl');
+      dom.meshInfo.textContent = error.message;
+    }
+    bindUi();
+    setStatus('Ready — drop an .fbx file, ASCII or binary.');
+    window.fbxtool = {
+      get doc() { return currentDoc; },
+      get analysis() { return currentAnalysis; },
+      get viewer() { return viewer; },
+      loadFile,
+    };
+    document.body.dataset.ready = 'true';
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+</script>
+</body>
+</html>

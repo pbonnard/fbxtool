@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fbxtool — FBX inspector and viewer</title>
+<style>/*INLINE_CSS*/</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <strong>fbxtool</strong>
+    <span>FBX format inspector &amp; viewer</span>
+  </div>
+  <div class="bar-right">
+    <span id="status" class="status">Loading WebAssembly…</span>
+    <button id="picker" type="button" class="primary">Open .fbx</button>
+    <input id="file-input" type="file" accept=".fbx" hidden>
+  </div>
+</header>
+
+<main>
+  <section id="stage" class="stage">
+    <canvas id="viewport"></canvas>
+    <div class="viewport-controls">
+      <select id="geometry-select" title="Geometry to display" disabled></select>
+      <select id="mode-select" title="Shading mode">
+        <option value="0">Materials</option>
+        <option value="1">Clay</option>
+        <option value="2">Normals</option>
+      </select>
+      <select id="up-select" title="Which axis points up in the mesh data">
+        <option value="y">Y up</option>
+        <option value="z">Z up</option>
+      </select>
+      <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
+      <button id="reset-view" type="button">Reset view</button>
+    </div>
+    <p id="mesh-info" class="mesh-info">no file loaded</p>
+    <div id="drop" class="drop">
+      <div class="drop-inner">
+        <h1>Drop an FBX file</h1>
+        <p>Binary or ASCII. Everything runs in this tab — the file is parsed by
+           a WebAssembly module and drawn with WebGL, and never leaves your
+           machine.</p>
+      </div>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <nav class="tabs">
+      <button class="tab active" data-target="tab-report" type="button">Report</button>
+      <button class="tab" data-target="tab-tree" type="button">Records</button>
+    </nav>
+    <div id="tab-report" class="tab-panel active">
+      <div id="panel" class="panel">
+        <section class="panel-section placeholder">
+          <h2>Nothing loaded yet</h2>
+          <p>Open a file to see its version, metadata, axis system, object
+             table, scene hierarchy and connection graph — the same report the
+             <code>fbxinfo</code> command prints.</p>
+        </section>
+      </div>
+    </div>
+    <div id="tab-tree" class="tab-panel">
+      <div id="tree" class="panel">
+        <section class="panel-section placeholder">
+          <h2>Record tree</h2>
+          <p>The raw container: every node record, its properties and the size
+             and encoding of each array payload.</p>
+        </section>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>const WASM_BASE64 = /*INLINE_WASM*/;</script>
+<script>/*INLINE_JS*/</script>
+</body>
+</html>

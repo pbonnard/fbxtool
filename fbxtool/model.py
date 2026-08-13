@@ -92,6 +92,8 @@ class ArrayInfo:
     length: int
     encoding: int = 0
     byte_length: int = 0
+    #: File offset of the payload (binary files only; 0 for ASCII).
+    data_offset: int = 0
 
     @property
     def compressed(self) -> bool:

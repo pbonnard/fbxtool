@@ -272,8 +272,9 @@ def _read_array_property(ctx: _Context, pos: int, code: str) -> tuple[Property, 
     data = ctx.data
     length, encoding, byte_length = struct.unpack_from("<III", data, pos)
     pos += 12
-    info = ArrayInfo(length=length, encoding=encoding, byte_length=byte_length)
-    payload_start = pos
+    payload_start = pos + 0
+    info = ArrayInfo(length=length, encoding=encoding, byte_length=byte_length,
+                     data_offset=payload_start)
     pos += byte_length
     if pos > len(data):
         raise ParseError(f"array property runs past the end of the file at {payload_start}")
