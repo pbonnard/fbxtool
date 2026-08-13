@@ -129,6 +129,7 @@ ${ENVIRONMENT}
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
   uniform float uOpaqueLimit;
+  uniform int uHighlight;     // material group to pick out, or -1
 
   out vec4 fragColour;
 ${ENVIRONMENT}
@@ -191,15 +192,22 @@ ${ENVIRONMENT}
     vec3 f0 = vec3(0.04);       // a plain dielectric, unless the file says more
     float roughness = 0.55;
     float opacity = 1.0;
+    int group = -1;
+    // The material index is a whole number carried in a float attribute.
+    int slot = clamp(int(vMaterial + 0.5), 0, max(uPaletteSize - 1, 0));
+    // The third row holds opacity and which material group this slot belongs
+    // to; the group is wanted in every shading mode, for the highlight.
+    if (uPaletteSize > 0) {
+      vec4 extra = texelFetch(uPalette, ivec2(slot, 2), 0);
+      opacity = clamp(extra.r, 0.0, 1.0);
+      group = int(extra.g + 0.5);
+    }
     if (uMode == 0 && uPaletteSize > 0) {
-      // The material index is a whole number carried in a float attribute.
-      int slot = clamp(int(vMaterial + 0.5), 0, uPaletteSize - 1);
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
       vec4 finish = texelFetch(uPalette, ivec2(slot, 1), 0);
       albedo = entry.rgb;
       f0 = finish.rgb;
       roughness = clamp(finish.a, 0.05, 1.0);
-      opacity = clamp(texelFetch(uPalette, ivec2(slot, 2), 0).r, 0.0, 1.0);
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
@@ -210,9 +218,15 @@ ${ENVIRONMENT}
       }
     } else if (uMode == 1) {
       albedo = indexColour(vMaterial);
+      opacity = 1.0;
     } else {
       albedo = uClayColour;
+      opacity = 1.0;
     }
+
+    // Picking a material out of the list marks where it is on the model.
+    bool marked = uHighlight >= 0 && group == uHighlight;
+    if (marked) albedo = mix(albedo, vec3(1.0, 0.42, 0.05), 0.85);
 
     // Each pass takes the half of the scene it is set up to draw.
     bool blended = opacity < uOpaqueLimit;
@@ -254,7 +268,9 @@ ${ENVIRONMENT}
     float mirrored = clamp(dot(reflectance, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     float coverage = clamp(opacity + (1.0 - opacity) * mirrored, 0.0, 1.0);
 
-    fragColour = vec4(encodeSrgb(toneMap(direct + ambient)), coverage);
+    // A marked material glows a little, so it reads even where it is in shadow.
+    vec3 lit = direct + ambient + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
+    fragColour = vec4(encodeSrgb(toneMap(lit)), marked ? 1.0 : coverage);
   }`;
 
   /* ------------------------------------------------------------- matrices */
@@ -420,6 +436,7 @@ ${ENVIRONMENT}
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
         opaqueLimit: gl.getUniformLocation(program, 'uOpaqueLimit'),
+        highlight: gl.getUniformLocation(program, 'uHighlight'),
       };
 
       const background = gl.createProgram();
@@ -471,6 +488,7 @@ ${ENVIRONMENT}
       this.textureLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
+      this.highlight = -1;
     }
 
     /**
@@ -506,6 +524,8 @@ ${ENVIRONMENT}
         const opacity = typeof material.opacity === 'number'
           ? Math.min(1, Math.max(0, material.opacity)) : 1;
         data[(width * 2 + i) * 4] = opacity;
+        // Which material this slot belongs to, for the highlight.
+        data[(width * 2 + i) * 4 + 1] = Number.isInteger(material.group) ? material.group : -1;
         if (opacity < OPAQUE) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -602,6 +622,13 @@ ${ENVIRONMENT}
     }
 
     setMode(mode) { this.mode = mode; this.dirty = true; }
+    /** Pick a material group out on the model, or -1 for none. */
+    setHighlight(group) {
+      const next = Number.isInteger(group) ? group : -1;
+      if (next === this.highlight) return;
+      this.highlight = next;
+      this.dirty = true;
+    }
     setShowTextures(on) { this.showTextures = on; this.dirty = true; }
     setUpAxis(axis) { this.upAxis = axis; this.dirty = true; }
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
@@ -743,6 +770,8 @@ ${ENVIRONMENT}
       gl.uniform1i(this.uniforms.useTextures,
         (this.textureLayers > 0 && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
+      gl.uniform1i(this.uniforms.highlight,
+        Number.isInteger(this.highlight) ? this.highlight : -1);
 
       gl.bindVertexArray(this.vao);
       const vertices = this.triangleCount * 3;

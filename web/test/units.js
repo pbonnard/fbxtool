@@ -14,6 +14,7 @@ const APP = path.resolve(__dirname, '..', 'app');
 const T = require(path.join(APP, 'transform.js'));
 const FbxAscii = require(path.join(APP, 'ascii.js'));
 const FbxAnalyze = require(path.join(APP, 'analyze.js'));
+const FbxPalette = require(path.join(APP, 'palette.js'));
 
 let failures = 0;
 
@@ -223,6 +224,83 @@ check('transparency becomes opacity',
   FbxAnalyze.materialAppearance({ TransparencyFactor: 0.25 }).opacity === 0.75);
 check('opacity is read when transparency is absent',
   FbxAnalyze.materialAppearance({ Opacity: 0.4 }).opacity === 0.4);
+
+console.log('\npalette: colour inputs');
+// A colour input speaks sRGB; shading is linear. Mid grey is the giveaway:
+// 0.5 linear encodes to #bcbcbc, not #808080.
+check('linear to sRGB and back', near(FbxPalette.fromSrgb(FbxPalette.toSrgb(0.37)), 0.37, 1e-12));
+check('mid linear grey is not mid sRGB grey', FbxPalette.toHex([0.5, 0.5, 0.5]) === '#bcbcbc',
+  FbxPalette.toHex([0.5, 0.5, 0.5]));
+check('black and white survive',
+  FbxPalette.toHex([0, 0, 0]) === '#000000' && FbxPalette.toHex([1, 1, 1]) === '#ffffff');
+check('a hex colour comes back linear',
+  nearAll(FbxPalette.fromHex('#bcbcbc'), [0.5, 0.5, 0.5], 0.005),
+  show(FbxPalette.fromHex('#bcbcbc')));
+check('short hex works too', nearAll(FbxPalette.fromHex('#fff'), [1, 1, 1]));
+
+console.log('\npalette: grouping');
+const entry = (name, uid) => ({
+  name,
+  uid,
+  colour: [0.8, 0.8, 0.8],
+  specular: [0.04, 0.04, 0.04],
+  roughness: 0.3,
+  opacity: 1,
+  fromFile: { colour: [0.8, 0.8, 0.8], specular: [0.04, 0.04, 0.04], roughness: 0.3, opacity: 1 },
+});
+// Three slots, two materials: the first is used by two parts.
+const slots = [entry('paint', 10), entry('glass', 11), entry('paint', 10)];
+const list = FbxPalette.groups(slots, [30, 90, 10]);
+check('slots of one material become one row', list.length === 2, `${list.length} rows`);
+check('the biggest surface comes first', list[0].name === 'glass', list.map((g) => g.name).join(', '));
+check('a shared material keeps all its slots',
+  list[1].slots.length === 2 && list[1].triangles === 40,
+  `${list[1].slots.length} slots, ${list[1].triangles} triangles`);
+check('shares add up to one',
+  near(list.reduce((sum, g) => sum + g.share, 0), 1, 1e-9));
+check('every slot learns its group',
+  slots[0].group === 1 && slots[2].group === 1 && slots[1].group === 0);
+
+console.log('\npalette: assignments');
+FbxPalette.apply(slots, { paint: { colour: [0.2, 0.4, 0.6], roughness: 0.9 } });
+check('an assignment reaches every slot of its material',
+  nearAll(slots[0].colour, [0.2, 0.4, 0.6]) && nearAll(slots[2].colour, [0.2, 0.4, 0.6])
+  && slots[0].roughness === 0.9 && slots[2].roughness === 0.9);
+check('and leaves the other material alone',
+  nearAll(slots[1].colour, [0.8, 0.8, 0.8]) && slots[1].roughness === 0.3);
+FbxPalette.apply(slots, {});
+check('clearing it restores the file exactly',
+  nearAll(slots[0].colour, [0.8, 0.8, 0.8]) && slots[0].roughness === 0.3
+  && nearAll(slots[0].specular, [0.04, 0.04, 0.04]) && slots[0].opacity === 1);
+
+FbxPalette.apply(slots, { paint: { colour: [0.9, 0.8, 0.5], metallic: 1 } });
+check('a metal takes its reflectance from its colour',
+  nearAll(slots[0].specular, [0.9, 0.8, 0.5]) && nearAll(slots[0].colour, [0, 0, 0]),
+  show(slots[0].specular));
+FbxPalette.apply(slots, { paint: { colour: [0.9, 0.8, 0.5], metallic: 0 } });
+check('a dielectric reflects four per cent', nearAll(slots[0].specular, [0.04, 0.04, 0.04]));
+
+const glassPreset = FbxPalette.preset('glass');
+check('presets carry an opacity', glassPreset && glassPreset.opacity < 1,
+  glassPreset ? String(glassPreset.opacity) : 'missing');
+check('every preset is complete', FbxPalette.PRESETS.every((p) => p.id && p.label
+  && Array.isArray(p.colour) && typeof p.roughness === 'number'));
+
+console.log('\npalette: saved assignments');
+const written = FbxPalette.serialise({ paint: { colour: [0.2, 0.4, 0.6], opacity: 0.5 } });
+const read = FbxPalette.parse(written);
+check('an assignment round-trips',
+  nearAll(read.paint.colour, [0.2, 0.4, 0.6]) && read.paint.opacity === 0.5);
+check('values outside the range are pulled back',
+  FbxPalette.parse(FbxPalette.serialise({ a: { roughness: 5, opacity: -2 } })).a.roughness === 1);
+check('unknown fields are dropped',
+  Object.keys(FbxPalette.parse('{"fbxtoolMaterials":1,"materials":{"a":{"nonsense":1}}}'))
+    .length === 0);
+for (const junk of ['not json at all', '{}', '{"materials":{}}', '[]', 'null']) {
+  let refused = false;
+  try { FbxPalette.parse(junk); } catch (error) { refused = true; }
+  check(`refuses ${JSON.stringify(junk).slice(0, 24)}`, refused);
+}
 
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

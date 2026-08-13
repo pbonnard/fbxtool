@@ -283,6 +283,97 @@ ul.record-tree .count { color: var(--muted); }
   .sidebar { border-left: none; border-top: 1px solid var(--line); }
   .status { max-width: 30vw; }
 }
+
+/* -------------------------------------------------------------- materials */
+
+.materials-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.materials-bar span { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; }
+.materials-bar button { font-size: 12px; padding: 4px 9px; }
+
+#tab-materials { flex-direction: column; }
+
+.material-list { display: flex; flex-direction: column; padding: 6px 0 24px; }
+
+.material {
+  border-bottom: 1px solid var(--line);
+}
+.material > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  cursor: pointer;
+  list-style: none;
+}
+.material > summary::-webkit-details-marker { display: none; }
+.material > summary:hover { background: var(--bg-raised); }
+.material[open] > summary { background: var(--bg-raised); }
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  flex: none;
+}
+.material-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.material.edited .material-name::after {
+  content: " •";
+  color: var(--accent);
+}
+.material-slots, .material-share {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  flex: none;
+}
+.material-share { min-width: 46px; text-align: right; }
+
+.material-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 4px 12px 28px;
+}
+.material-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.material-field > span { width: 52px; flex: none; }
+.material-field input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.material-field input[type="color"] {
+  width: 46px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.material-field output {
+  width: 34px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.material-actions { display: flex; gap: 8px; padding-top: 2px; }
+.material-actions select, .material-actions button { font-size: 12px; padding: 3px 8px; }
 </style>
 </head>
 <body>
@@ -294,7 +385,8 @@ ul.record-tree .count { color: var(--muted); }
   <div class="bar-right">
     <span id="status" class="status">Loading WebAssembly…</span>
     <button id="picker" type="button" class="primary">Open model</button>
-    <input id="file-input" type="file" accept=".fbx,.obj,.mtl,.blend,image/*" multiple hidden>
+    <input id="file-input" type="file"
+           accept=".fbx,.obj,.mtl,.blend,.json,image/*" multiple hidden>
   </div>
 </header>
 
@@ -335,6 +427,7 @@ ul.record-tree .count { color: var(--muted); }
   <aside class="sidebar">
     <nav class="tabs">
       <button class="tab active" data-target="tab-report" type="button">Report</button>
+      <button class="tab" data-target="tab-materials" type="button">Materials</button>
       <button class="tab" data-target="tab-tree" type="button">Records</button>
     </nav>
     <div id="tab-report" class="tab-panel active">
@@ -344,6 +437,25 @@ ul.record-tree .count { color: var(--muted); }
           <p>Open a file to see its version, metadata, axis system, object
              table, scene hierarchy and connection graph — the same report the
              <code>fbxinfo</code> command prints.</p>
+        </section>
+      </div>
+    </div>
+    <div id="tab-materials" class="tab-panel">
+      <div class="materials-bar">
+        <span id="materials-status">Nothing loaded yet</span>
+        <button id="materials-save" type="button" disabled>Save assignment</button>
+        <button id="materials-clear" type="button" disabled>Clear all</button>
+      </div>
+      <div id="materials" class="panel">
+        <section class="panel-section placeholder">
+          <h2>Materials</h2>
+          <p>Every material the scene uses, largest surface first. Set a colour,
+             how metallic or rough it is, and how much it lets through — the
+             file's own values are kept, so <em>From file</em> always puts one
+             back.</p>
+          <p>Assignments are remembered for the file, and
+             <em>Save assignment</em> writes them out as JSON. Drop that file in
+             later — on its own or with the model — to apply it again.</p>
         </section>
       </div>
     </div>
@@ -2622,6 +2734,268 @@ const FbxAnalyze = (function () {
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxAnalyze;
 
+// ---- palette.js --------------------------------------------------------
+/* Material assignments.
+ *
+ * The render palette is one entry per material slot, in the order the
+ * per-polygon material index refers to — and a scene of many parts repeats the
+ * same material once per part, so the Shelby's 20 materials arrive as 62
+ * slots. This module groups those slots back into materials, applies whatever
+ * the user has set on top of what the file said, and remembers it.
+ *
+ * An override never destroys the file's own values: each entry keeps them, so
+ * clearing an override puts the material back exactly as it was read.
+ */
+'use strict';
+
+const FbxPalette = (function () {
+  /* ------------------------------------------------------------- colour */
+
+  /* Shading works in linear light; a colour input speaks sRGB. */
+  function toSrgb(value) {
+    const c = Math.min(Math.max(value, 0), 1);
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * (c ** (1 / 2.4)) - 0.055;
+  }
+
+  function fromSrgb(value) {
+    const c = Math.min(Math.max(value, 0), 1);
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  }
+
+  const pair = (v) => Math.round(v * 255).toString(16).padStart(2, '0');
+
+  /** Linear rgb -> "#rrggbb" for an <input type="color">. */
+  function toHex(rgb) {
+    return `#${[0, 1, 2].map((i) => pair(toSrgb(Number(rgb[i]) || 0))).join('')}`;
+  }
+
+  /** "#rrggbb" -> linear rgb. */
+  function fromHex(hex) {
+    const text = String(hex).replace('#', '');
+    const full = text.length === 3 ? [...text].map((c) => c + c).join('') : text;
+    return [0, 1, 2].map((i) => fromSrgb(parseInt(full.slice(i * 2, i * 2 + 2), 16) / 255));
+  }
+
+  /* ------------------------------------------------------------ presets */
+
+  /* Starting points for the usual surfaces. Colours are linear. */
+  const PRESETS = [
+    { id: 'paint', label: 'Body paint', colour: [0.35, 0.02, 0.02], metallic: 0, roughness: 0.25 },
+    { id: 'chrome', label: 'Chrome', colour: [0.86, 0.87, 0.89], metallic: 1, roughness: 0.08 },
+    { id: 'brushed', label: 'Brushed metal', colour: [0.55, 0.56, 0.58], metallic: 1, roughness: 0.35 },
+    { id: 'glass', label: 'Glass', colour: [0.7, 0.75, 0.78], metallic: 0, roughness: 0.05, opacity: 0.25 },
+    { id: 'rubber', label: 'Rubber', colour: [0.015, 0.015, 0.017], metallic: 0, roughness: 0.75 },
+    { id: 'leather', label: 'Leather', colour: [0.055, 0.03, 0.02], metallic: 0, roughness: 0.55 },
+    { id: 'plastic', label: 'Plastic', colour: [0.035, 0.035, 0.038], metallic: 0, roughness: 0.45 },
+    { id: 'wood', label: 'Wood', colour: [0.1, 0.045, 0.02], metallic: 0, roughness: 0.35 },
+    { id: 'fabric', label: 'Fabric', colour: [0.045, 0.04, 0.038], metallic: 0, roughness: 0.95 },
+    { id: 'lamp', label: 'Lamp glass', colour: [0.6, 0.58, 0.5], metallic: 0, roughness: 0.15, opacity: 0.5 },
+  ];
+
+  const preset = (id) => PRESETS.find((p) => p.id === id) || null;
+
+  /* ------------------------------------------------------------ grouping */
+
+  /** A material's identity: its UID where the file has one, else its name. */
+  const keyOf = (entry) => (entry.uid === undefined || entry.uid === null
+    ? `name:${entry.name}` : `uid:${entry.uid}`);
+
+  /**
+   * Group palette slots by material, largest surface first.
+   *
+   * `slotTriangles` counts triangles per slot, so the list opens on whatever
+   * covers the model rather than on whatever happens to be first.
+   */
+  function groups(palette, slotTriangles) {
+    const counts = slotTriangles || [];
+    const byKey = new Map();
+    palette.forEach((entry, slot) => {
+      const key = keyOf(entry);
+      let group = byKey.get(key);
+      if (!group) {
+        group = { key, name: entry.name || '(unnamed)', slots: [], triangles: 0, entry };
+        byKey.set(key, group);
+      }
+      group.slots.push(slot);
+      group.triangles += counts[slot] || 0;
+    });
+
+    const total = [...byKey.values()].reduce((sum, g) => sum + g.triangles, 0);
+    const list = [...byKey.values()];
+    list.sort((a, b) => b.triangles - a.triangles || a.name.localeCompare(b.name));
+    list.forEach((group, index) => {
+      group.index = index;
+      group.share = total ? group.triangles / total : 0;
+      // The shader compares this against the highlighted group.
+      for (const slot of group.slots) palette[slot].group = index;
+    });
+    return list;
+  }
+
+  /* ----------------------------------------------------------- overrides */
+
+  /**
+   * Fold the user's settings into the palette, or restore the file's values
+   * where nothing is set. Metalness follows the Principled convention: a metal
+   * has no diffuse and reflects its own colour, a dielectric reflects 4%.
+   */
+  function apply(palette, overrides) {
+    const settings = overrides || {};
+    for (const entry of palette) {
+      const set = settings[entry.name];
+      if (!set) {
+        entry.colour = entry.fromFile.colour.slice();
+        entry.specular = entry.fromFile.specular.slice();
+        entry.roughness = entry.fromFile.roughness;
+        entry.opacity = entry.fromFile.opacity;
+        continue;
+      }
+      const base = set.colour || entry.fromFile.colour;
+      const metallic = typeof set.metallic === 'number' ? set.metallic : 0;
+      entry.colour = base.map((c) => c * (1 - metallic));
+      entry.specular = base.map((c) => 0.04 * (1 - metallic) + c * metallic);
+      entry.roughness = typeof set.roughness === 'number'
+        ? set.roughness : entry.fromFile.roughness;
+      entry.opacity = typeof set.opacity === 'number' ? set.opacity : entry.fromFile.opacity;
+    }
+    return palette;
+  }
+
+  /** What a group's controls should read, given the current override. */
+  function settingsFor(group, overrides) {
+    const set = (overrides || {})[group.name] || {};
+    const file = group.entry.fromFile;
+    return {
+      colour: set.colour || file.colour,
+      metallic: typeof set.metallic === 'number' ? set.metallic : 0,
+      roughness: typeof set.roughness === 'number' ? set.roughness : file.roughness,
+      opacity: typeof set.opacity === 'number' ? set.opacity : file.opacity,
+      edited: Object.keys(set).length > 0,
+    };
+  }
+
+  /* --------------------------------------------------------- persistence */
+
+  const storageKey = (fileName) => `fbxtool:materials:${fileName || 'unnamed'}`;
+
+  /** Storage is unavailable in some browsers on file:// URLs; degrade quietly. */
+  function load(fileName) {
+    try {
+      const raw = window.localStorage.getItem(storageKey(fileName));
+      return raw ? parse(raw) : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function save(fileName, overrides) {
+    try {
+      if (!overrides || !Object.keys(overrides).length) {
+        window.localStorage.removeItem(storageKey(fileName));
+      } else {
+        window.localStorage.setItem(storageKey(fileName), serialise(overrides));
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function serialise(overrides) {
+    return `${JSON.stringify({ fbxtoolMaterials: 1, materials: overrides }, null, 2)}\n`;
+  }
+
+  /** Read a saved assignment, tolerating anything that is not one. */
+  function parse(text) {
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      throw new Error('that file is not a material assignment');
+    }
+    const materials = data && data.materials;
+    if (!data || !data.fbxtoolMaterials || typeof materials !== 'object' || !materials) {
+      throw new Error('that file is not a material assignment');
+    }
+    const out = {};
+    for (const [name, value] of Object.entries(materials)) {
+      if (!value || typeof value !== 'object') continue;
+      const set = {};
+      if (Array.isArray(value.colour) && value.colour.length >= 3) {
+        set.colour = [0, 1, 2].map((i) => Math.max(0, Number(value.colour[i]) || 0));
+      }
+      for (const field of ['metallic', 'roughness', 'opacity']) {
+        if (typeof value[field] === 'number' && isFinite(value[field])) {
+          set[field] = Math.min(1, Math.max(0, value[field]));
+        }
+      }
+      if (Object.keys(set).length) out[name] = set;
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------------------- markup */
+
+  const escape = (text) => String(text).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+
+  const percent = (share) => (share >= 0.001 ? `${(share * 100).toFixed(1)}%` : '<0.1%');
+
+  function slider(group, field, value, label) {
+    return `<label class="material-field"><span>${label}</span>`
+      + `<input type="range" min="0" max="1" step="0.01" value="${value.toFixed(2)}"`
+      + ` data-key="${escape(group.name)}" data-field="${field}">`
+      + `<output>${value.toFixed(2)}</output></label>`;
+  }
+
+  /** The Materials tab: one row per material, biggest first. */
+  function render(list, overrides) {
+    if (!list.length) {
+      return '<section class="panel-section placeholder"><h2>No materials</h2>'
+        + '<p>This file connects no materials to its meshes, so there is nothing '
+        + 'to assign. The viewer draws it in clay.</p></section>';
+    }
+    const rows = list.map((group) => {
+      const set = settingsFor(group, overrides);
+      const hex = toHex(set.colour);
+      const slots = group.slots.length > 1
+        ? `<span class="material-slots">${group.slots.length} parts</span>` : '';
+      const options = PRESETS.map((p) => `<option value="${p.id}">${escape(p.label)}</option>`)
+        .join('');
+      return `<details class="material${set.edited ? ' edited' : ''}"`
+        + ` data-key="${escape(group.name)}" data-index="${group.index}">`
+        + '<summary>'
+        + `<span class="swatch" style="background:${hex}"></span>`
+        + `<span class="material-name">${escape(group.name)}</span>${slots}`
+        + `<span class="material-share">${percent(group.share)}</span>`
+        + '</summary>'
+        + '<div class="material-edit">'
+        + '<label class="material-field"><span>Colour</span>'
+        + `<input type="color" value="${hex}" data-key="${escape(group.name)}"`
+        + ' data-field="colour"></label>'
+        + slider(group, 'metallic', set.metallic, 'Metal')
+        + slider(group, 'roughness', set.roughness, 'Rough')
+        + slider(group, 'opacity', set.opacity, 'Opacity')
+        + '<div class="material-actions">'
+        + `<select data-key="${escape(group.name)}" data-field="preset">`
+        + `<option value="">Preset…</option>${options}</select>`
+        + `<button type="button" data-key="${escape(group.name)}" data-action="reset">`
+        + 'From file</button>'
+        + '</div></div></details>';
+    }).join('');
+    return `<div class="material-list">${rows}</div>`;
+  }
+
+  return {
+    toSrgb, fromSrgb, toHex, fromHex,
+    PRESETS, preset, groups, apply, settingsFor,
+    load, save, serialise, parse, render, keyOf,
+  };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxPalette;
+
 // ---- report.js ---------------------------------------------------------
 /* Renders the analysis as HTML for the info panel — the browser counterpart of
  * fbxtool/report.py.
@@ -3091,6 +3465,7 @@ ${ENVIRONMENT}
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
   uniform float uOpaqueLimit;
+  uniform int uHighlight;     // material group to pick out, or -1
 
   out vec4 fragColour;
 ${ENVIRONMENT}
@@ -3153,15 +3528,22 @@ ${ENVIRONMENT}
     vec3 f0 = vec3(0.04);       // a plain dielectric, unless the file says more
     float roughness = 0.55;
     float opacity = 1.0;
+    int group = -1;
+    // The material index is a whole number carried in a float attribute.
+    int slot = clamp(int(vMaterial + 0.5), 0, max(uPaletteSize - 1, 0));
+    // The third row holds opacity and which material group this slot belongs
+    // to; the group is wanted in every shading mode, for the highlight.
+    if (uPaletteSize > 0) {
+      vec4 extra = texelFetch(uPalette, ivec2(slot, 2), 0);
+      opacity = clamp(extra.r, 0.0, 1.0);
+      group = int(extra.g + 0.5);
+    }
     if (uMode == 0 && uPaletteSize > 0) {
-      // The material index is a whole number carried in a float attribute.
-      int slot = clamp(int(vMaterial + 0.5), 0, uPaletteSize - 1);
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
       vec4 finish = texelFetch(uPalette, ivec2(slot, 1), 0);
       albedo = entry.rgb;
       f0 = finish.rgb;
       roughness = clamp(finish.a, 0.05, 1.0);
-      opacity = clamp(texelFetch(uPalette, ivec2(slot, 2), 0).r, 0.0, 1.0);
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
@@ -3172,9 +3554,15 @@ ${ENVIRONMENT}
       }
     } else if (uMode == 1) {
       albedo = indexColour(vMaterial);
+      opacity = 1.0;
     } else {
       albedo = uClayColour;
+      opacity = 1.0;
     }
+
+    // Picking a material out of the list marks where it is on the model.
+    bool marked = uHighlight >= 0 && group == uHighlight;
+    if (marked) albedo = mix(albedo, vec3(1.0, 0.42, 0.05), 0.85);
 
     // Each pass takes the half of the scene it is set up to draw.
     bool blended = opacity < uOpaqueLimit;
@@ -3216,7 +3604,9 @@ ${ENVIRONMENT}
     float mirrored = clamp(dot(reflectance, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     float coverage = clamp(opacity + (1.0 - opacity) * mirrored, 0.0, 1.0);
 
-    fragColour = vec4(encodeSrgb(toneMap(direct + ambient)), coverage);
+    // A marked material glows a little, so it reads even where it is in shadow.
+    vec3 lit = direct + ambient + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
+    fragColour = vec4(encodeSrgb(toneMap(lit)), marked ? 1.0 : coverage);
   }`;
 
   /* ------------------------------------------------------------- matrices */
@@ -3382,6 +3772,7 @@ ${ENVIRONMENT}
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
         opaqueLimit: gl.getUniformLocation(program, 'uOpaqueLimit'),
+        highlight: gl.getUniformLocation(program, 'uHighlight'),
       };
 
       const background = gl.createProgram();
@@ -3433,6 +3824,7 @@ ${ENVIRONMENT}
       this.textureLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
+      this.highlight = -1;
     }
 
     /**
@@ -3468,6 +3860,8 @@ ${ENVIRONMENT}
         const opacity = typeof material.opacity === 'number'
           ? Math.min(1, Math.max(0, material.opacity)) : 1;
         data[(width * 2 + i) * 4] = opacity;
+        // Which material this slot belongs to, for the highlight.
+        data[(width * 2 + i) * 4 + 1] = Number.isInteger(material.group) ? material.group : -1;
         if (opacity < OPAQUE) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -3564,6 +3958,13 @@ ${ENVIRONMENT}
     }
 
     setMode(mode) { this.mode = mode; this.dirty = true; }
+    /** Pick a material group out on the model, or -1 for none. */
+    setHighlight(group) {
+      const next = Number.isInteger(group) ? group : -1;
+      if (next === this.highlight) return;
+      this.highlight = next;
+      this.dirty = true;
+    }
     setShowTextures(on) { this.showTextures = on; this.dirty = true; }
     setUpAxis(axis) { this.upAxis = axis; this.dirty = true; }
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
@@ -3705,6 +4106,8 @@ ${ENVIRONMENT}
       gl.uniform1i(this.uniforms.useTextures,
         (this.textureLayers > 0 && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
+      gl.uniform1i(this.uniforms.highlight,
+        Number.isInteger(this.highlight) ? this.highlight : -1);
 
       gl.bindVertexArray(this.vao);
       const vertices = this.triangleCount * 3;
@@ -3763,6 +4166,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     tabs: document.querySelectorAll('.tab'),
     tree: $('tree'),
     stage: $('stage'),
+    materials: $('materials'),
+    materialsStatus: $('materials-status'),
+    materialsSave: $('materials-save'),
+    materialsClear: $('materials-clear'),
   };
 
   let viewer = null;
@@ -3778,6 +4185,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
   let missingTextures = [];
+  /** The palette on screen, its materials grouped, and the user's edits. */
+  let currentPalette = [];
+  let materialGroups = [];
+  let materialOverrides = {};
 
   function setStatus(text, kind = '') {
     dom.status.textContent = text || '';
@@ -3791,15 +4202,26 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const list = Array.from(files);
     const images = list.filter((f) => /\.(png|jpe?g|gif|bmp|webp|tga)$/i.test(f.name));
     const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
+    const assignments = list.filter((f) => /\.json$/i.test(f.name));
     for (const image of images) suppliedImages.set(image.name.toLowerCase(), image);
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
     }
+    // A saved material assignment applies to whatever is on screen.
+    for (const file of assignments) {
+      try {
+        useAssignment(FbxPalette.parse(await file.text()));
+        setStatus(`Applied ${file.name}.`, 'ok');
+      } catch (error) {
+        setStatus(`${file.name}: ${error.message}`, 'error');
+      }
+    }
 
-    const companions = new Set([...images, ...libraries]);
+    const companions = new Set([...images, ...libraries, ...assignments]);
     const scene = list.find((f) => !companions.has(f));
     if (!scene) {
       const added = companions.size;
+      if (assignments.length && added === assignments.length) return;
       if (!currentDoc) {
         setStatus(`Added ${added} companion file(s) — now open a model.`);
         return;
@@ -3848,6 +4270,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
 
       currentDoc = doc;
       currentAnalysis = FbxAnalyze.analyze(doc);
+      // Whatever was assigned to this file last time it was open.
+      materialOverrides = FbxPalette.load(doc.fileName);
       uidIndex = new Map(currentAnalysis.objects
         .filter((o) => o.uid !== null).map((o) => [o.uid, o]));
 
@@ -4056,6 +4480,168 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     return count ? ` · ${count} see-through` : '';
   }
 
+  /* --------------------------------------------------- material assignment */
+
+  /** Triangles drawn with each palette slot, for sorting the material list. */
+  function trianglesPerSlot(mesh, size) {
+    const counts = new Array(size).fill(0);
+    if (!mesh || !mesh.materials) return counts;
+    // One value per vertex, three to a triangle.
+    for (let i = 0; i < mesh.materials.length; i += 3) {
+      const slot = Math.round(mesh.materials[i]);
+      if (slot >= 0 && slot < size) counts[slot]++;
+    }
+    return counts;
+  }
+
+  /**
+   * Group a freshly built palette by material, fold in the user's assignment,
+   * upload it and list it in the sidebar.
+   */
+  function installPalette(palette, mesh) {
+    currentPalette = palette;
+    materialGroups = FbxPalette.groups(palette, trianglesPerSlot(mesh, palette.length));
+    FbxPalette.apply(palette, materialOverrides);
+    viewer.setPalette(palette);
+    renderMaterials();
+  }
+
+  /** Re-upload after an edit. The mesh is untouched: this is a few texels. */
+  function refreshPalette() {
+    FbxPalette.apply(currentPalette, materialOverrides);
+    viewer.setPalette(currentPalette);
+    dom.meshInfo.textContent = dom.meshInfo.textContent
+      .replace(/ · \d+ see-through/, '') + seeThrough(currentPalette);
+  }
+
+  function renderMaterials() {
+    dom.materials.innerHTML = FbxPalette.render(materialGroups, materialOverrides);
+    const edited = Object.keys(materialOverrides).length;
+    dom.materialsSave.disabled = !edited;
+    dom.materialsClear.disabled = !edited;
+    if (!materialGroups.length) {
+      dom.materialsStatus.textContent = 'No materials in this file';
+      return;
+    }
+    const slots = materialGroups.reduce((sum, g) => sum + g.slots.length, 0);
+    const count = materialGroups.length;
+    const parts = slots > count ? ` across ${slots} slots` : '';
+    dom.materialsStatus.textContent = `${count} material${count === 1 ? '' : 's'}${parts}`
+      + (edited ? ` · ${edited} assigned` : '');
+  }
+
+  /** Change one field of one material and show it straight away. */
+  function editMaterial(name, changes) {
+    const set = Object.assign({}, materialOverrides[name], changes);
+    materialOverrides[name] = set;
+    refreshPalette();
+
+    const row = dom.materials.querySelector(`.material[data-key="${CSS.escape(name)}"]`);
+    if (row) {
+      const group = materialGroups.find((g) => g.name === name);
+      const settings = FbxPalette.settingsFor(group, materialOverrides);
+      row.classList.add('edited');
+      const swatch = row.querySelector('.swatch');
+      const colour = row.querySelector('input[type="color"]');
+      const hex = FbxPalette.toHex(settings.colour);
+      if (swatch) swatch.style.background = hex;
+      if (colour && colour.value !== hex) colour.value = hex;
+      row.querySelectorAll('input[type="range"]').forEach((input) => {
+        const value = settings[input.dataset.field];
+        if (typeof value !== 'number') return;
+        input.value = value.toFixed(2);
+        const output = input.parentElement.querySelector('output');
+        if (output) output.textContent = value.toFixed(2);
+      });
+    }
+    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    dom.materialsSave.disabled = false;
+    dom.materialsClear.disabled = false;
+  }
+
+  /** Put every material back to what the file said. */
+  function clearMaterials() {
+    materialOverrides = {};
+    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    refreshPalette();
+    renderMaterials();
+  }
+
+  /** Apply a saved assignment, from storage or a dropped file. */
+  function useAssignment(overrides) {
+    materialOverrides = overrides;
+    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    if (currentPalette.length) refreshPalette();
+    renderMaterials();
+  }
+
+  function saveAssignment() {
+    const text = FbxPalette.serialise(materialOverrides);
+    const name = `${(currentDoc && currentDoc.fileName) || 'model'}.materials.json`;
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /** Mark on the model whichever material the pointer or the open row names. */
+  function updateHighlight() {
+    if (!viewer) return;
+    const open = dom.materials.querySelector('.material[open]');
+    const hovered = dom.materials.querySelector('.material:hover');
+    const row = hovered || open;
+    viewer.setHighlight(row ? Number(row.dataset.index) : -1);
+  }
+
+  function bindMaterials() {
+    const keyOf = (event) => {
+      const row = event.target.closest('.material');
+      return row ? row.dataset.key : null;
+    };
+
+    dom.materials.addEventListener('input', (event) => {
+      const field = event.target.dataset.field;
+      const name = keyOf(event);
+      if (!name || !field) return;
+      if (field === 'colour') editMaterial(name, { colour: FbxPalette.fromHex(event.target.value) });
+      else editMaterial(name, { [field]: Number(event.target.value) });
+    });
+
+    dom.materials.addEventListener('change', (event) => {
+      if (event.target.dataset.field !== 'preset') return;
+      const name = keyOf(event);
+      const chosen = FbxPalette.preset(event.target.value);
+      if (!name || !chosen) return;
+      const { id, label, ...values } = chosen;
+      editMaterial(name, values);
+      event.target.value = '';
+    });
+
+    dom.materials.addEventListener('click', (event) => {
+      if (event.target.dataset.action !== 'reset') return;
+      const name = keyOf(event);
+      if (!name) return;
+      delete materialOverrides[name];
+      if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+      refreshPalette();
+      renderMaterials();
+    });
+
+    ['pointerover', 'pointerout', 'toggle'].forEach((type) => {
+      dom.materials.addEventListener(type, updateHighlight, true);
+    });
+    dom.materials.addEventListener('pointerleave', () => {
+      if (viewer) viewer.setHighlight(-1);
+    });
+
+    dom.materialsSave.addEventListener('click', saveAssignment);
+    dom.materialsClear.addEventListener('click', clearMaterials);
+  }
+
   /** One palette entry: how a material shades, and the image it wears. */
   function materialEntry(material) {
     // Template defaults sit underneath, so a material with no Properties70
@@ -4064,11 +4650,19 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const look = FbxAnalyze.materialAppearance(props);
     return {
       name: material.displayName,
+      uid: material.uid,
       // Values are linear, which is what the shader works in.
       colour: look.colour,
       specular: look.specular,
       roughness: look.roughness,
       opacity: look.opacity,
+      // Kept so an assignment can always be undone back to the file itself.
+      fromFile: {
+        colour: look.colour.slice(),
+        specular: look.specular.slice(),
+        roughness: look.roughness,
+        opacity: look.opacity,
+      },
       texture: diffuseTexture(material, uidIndex, currentAnalysis.connections),
       layer: -1,
     };
@@ -4263,7 +4857,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
 
       const textures = await resolveTextures(built.palette);
       missingTextures = textures.missing;
-      viewer.setPalette(built.palette);
+      installPalette(built.palette, built.mesh);
       viewer.setTextures(textures.images);
       dom.modeSelect.value = built.palette.length ? '0' : '2';
       viewer.setMode(Number(dom.modeSelect.value));
@@ -4399,7 +4993,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const palette = materialPalette(entry);
       const textures = await resolveTextures(palette);
       missingTextures = textures.missing;
-      viewer.setPalette(palette);
+      installPalette(palette, mesh);
       viewer.setTextures(textures.images);
       // Without usable colours the file-colour mode has nothing to show.
       dom.modeSelect.value = palette.length ? '0' : '2';
@@ -4475,6 +5069,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());
 
+    bindMaterials();
+
     dom.tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
         dom.tabs.forEach((t) => t.classList.toggle('active', t === tab));
@@ -4507,8 +5103,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       get viewer() { return viewer; },
       get missingTextures() { return missingTextures; },
       get loadCount() { return loadCount; },
+      get palette() { return currentPalette; },
+      get materials() { return materialGroups; },
+      get overrides() { return materialOverrides; },
       loadFile,
       loadFiles,
+      editMaterial,
+      useAssignment,
+      clearMaterials,
     };
     document.body.dataset.ready = 'true';
   }

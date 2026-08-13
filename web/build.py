@@ -34,6 +34,7 @@ SCRIPTS = [
     "blend.js",
     "transform.js",
     "analyze.js",
+    "palette.js",
     "report.js",
     "viewer.js",
     "main.js",

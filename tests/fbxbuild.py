@@ -293,13 +293,17 @@ SCENE_DIFFUSE = (0.8, 0.1, 0.05)
 def scene_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
     """A scene that only assembles correctly when transforms are honoured.
 
-    One geometry is instanced by three models, each with its own placement and
-    its own material, and none of the materials carries a colour of its own —
-    that comes from the ``PropertyTemplate`` in ``Definitions``.
+    One geometry is instanced by three models, each with its own placement, and
+    one material shared by all three — so the render palette has three slots
+    that are really a single material, which is what the material list has to
+    group back together. The material carries no colour of its own; that comes
+    from the ``PropertyTemplate`` in ``Definitions``.
     """
     geometry_uid = 1000
     hub_uid, arm_uid, mirror_uid = 2001, 2002, 2003
-    materials = {hub_uid: 3001, arm_uid: 3002, mirror_uid: 3003}
+    shared_material = 3001
+    materials = {hub_uid: shared_material, arm_uid: shared_material,
+                 mirror_uid: shared_material}
 
     def model(uid: int, name: str, props: list[N]) -> N:
         return N("Model", [L(uid), S(f"{name}\x00\x01Model"), S("Mesh")], [
@@ -325,21 +329,21 @@ def scene_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
                                lcl("Scaling", 2.0, 2.0, 2.0)]),
         model(mirror_uid, "mirror", [lcl("Translation", 0.0, 0.0, 3.0),
                                      lcl("Scaling", 1.0, 1.0, -1.0)]),
-        *[N("Material", [L(uid), S(f"paint{index}\x00\x01Material"), S("")], [
+        N("Material", [L(shared_material), S("paint\x00\x01Material"), S("")], [
             N("Version", [I(102)]),
             N("ShadingModel", [S("phong")]),
             N("MultiLayer", [I(0)]),
-        ]) for index, uid in enumerate(materials.values())],
+        ]),
     ])
 
     definitions = N("Definitions", [], [
         N("Version", [I(100)]),
-        N("Count", [I(8)]),
+        N("Count", [I(6)]),
         N("ObjectType", [S("GlobalSettings")], [N("Count", [I(1)])]),
         N("ObjectType", [S("Geometry")], [N("Count", [I(1)])]),
         N("ObjectType", [S("Model")], [N("Count", [I(3)])]),
         N("ObjectType", [S("Material")], [
-            N("Count", [I(3)]),
+            N("Count", [I(1)]),
             N("PropertyTemplate", [S("FbxSurfacePhong")], [
                 N("Properties70", [], [
                     N("P", [S("DiffuseColor"), S("Color"), S(""), S("A"),

@@ -305,6 +305,38 @@ returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before
 being encoded back to sRGB. Highlights roll off instead of clipping.
 
+### Assigning materials
+
+Files are often vague about how a surface should look. The Shelby's twenty
+materials carry no properties at all — every one of them falls back to the same
+grey — so the **Materials** tab lets you say what they are: a colour, how
+metallic and how rough, and how much light gets through, with presets for the
+usual surfaces. The file's own values are always kept, so *From file* puts any
+material back exactly as it was read.
+
+The list groups the render palette by material rather than by slot, which
+matters more than it sounds: a scene of many parts repeats the same material
+once per part, so the Shelby arrives as 62 slots that are really 20 materials —
+`Chrome` alone is used by 24 of the 44 parts. Rows are ordered by how much of
+the model each covers (`Chrome` 49.5%, `Carroserie` 13.1%), and hovering one
+marks it on the model, which is the quickest way to find out what
+`Material.002` actually is.
+
+Editing is instant even on a 553,006-triangle scene: materials live in a
+texture the shader reads per fragment, so a change is a few texels and the
+geometry is never touched.
+
+Assignments are remembered per file, and **Save assignment** writes them out as
+JSON:
+
+```json
+{ "fbxtoolMaterials": 1,
+  "materials": { "Carroserie": { "colour": [0.02, 0.05, 0.26], "roughness": 0.25 } } }
+```
+
+Drop that file back in — on its own or alongside the model — to apply it again,
+so an assignment can travel with a model that does not carry its own.
+
 ### Transparency
 
 A material below full opacity is drawn in a second, blended pass: solid
@@ -494,6 +526,7 @@ node web/test/heap.js samples/cube_binary.fbx # the WASM bump allocator
 node web/test/dump.js samples/cube_binary.fbx # the WASM reader's whole tree
 node web/test/browser.js samples/*.fbx        # the built page in Chromium
 node web/test/transparency.js glass.fbx       # reads pixels through glass
+node web/test/materials.js samples/scene_parts.fbx   # the material list
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks

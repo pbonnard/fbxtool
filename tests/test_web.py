@@ -193,6 +193,26 @@ def test_wasm_heap_mark_and_release(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_materials_can_be_assigned(built):
+    """Group the palette, edit a material, save it and get it back."""
+    try:
+        probe = subprocess.run(["node", "-e", "require('playwright')"],
+                               capture_output=True, text=True, env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    scene = ROOT / "samples" / "scene_parts.fbx"
+    result = subprocess.run(["node", str(WEB / "test" / "materials.js"), str(scene)],
+                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_transparency_is_drawn(built, tmp_path):
     """A solid core inside a see-through shell has to stay visible."""
     try:

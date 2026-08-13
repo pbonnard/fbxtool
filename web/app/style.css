@@ -277,3 +277,94 @@ ul.record-tree .count { color: var(--muted); }
   .sidebar { border-left: none; border-top: 1px solid var(--line); }
   .status { max-width: 30vw; }
 }
+
+/* -------------------------------------------------------------- materials */
+
+.materials-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.materials-bar span { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; }
+.materials-bar button { font-size: 12px; padding: 4px 9px; }
+
+#tab-materials { flex-direction: column; }
+
+.material-list { display: flex; flex-direction: column; padding: 6px 0 24px; }
+
+.material {
+  border-bottom: 1px solid var(--line);
+}
+.material > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  cursor: pointer;
+  list-style: none;
+}
+.material > summary::-webkit-details-marker { display: none; }
+.material > summary:hover { background: var(--bg-raised); }
+.material[open] > summary { background: var(--bg-raised); }
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  flex: none;
+}
+.material-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.material.edited .material-name::after {
+  content: " •";
+  color: var(--accent);
+}
+.material-slots, .material-share {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  flex: none;
+}
+.material-share { min-width: 46px; text-align: right; }
+
+.material-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 4px 12px 28px;
+}
+.material-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.material-field > span { width: 52px; flex: none; }
+.material-field input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.material-field input[type="color"] {
+  width: 46px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.material-field output {
+  width: 34px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.material-actions { display: flex; gap: 8px; padding-top: 2px; }
+.material-actions select, .material-actions button { font-size: 12px; padding: 3px 8px; }

@@ -15,7 +15,8 @@
   <div class="bar-right">
     <span id="status" class="status">Loading WebAssembly…</span>
     <button id="picker" type="button" class="primary">Open model</button>
-    <input id="file-input" type="file" accept=".fbx,.obj,.mtl,.blend,image/*" multiple hidden>
+    <input id="file-input" type="file"
+           accept=".fbx,.obj,.mtl,.blend,.json,image/*" multiple hidden>
   </div>
 </header>
 
@@ -56,6 +57,7 @@
   <aside class="sidebar">
     <nav class="tabs">
       <button class="tab active" data-target="tab-report" type="button">Report</button>
+      <button class="tab" data-target="tab-materials" type="button">Materials</button>
       <button class="tab" data-target="tab-tree" type="button">Records</button>
     </nav>
     <div id="tab-report" class="tab-panel active">
@@ -65,6 +67,25 @@
           <p>Open a file to see its version, metadata, axis system, object
              table, scene hierarchy and connection graph — the same report the
              <code>fbxinfo</code> command prints.</p>
+        </section>
+      </div>
+    </div>
+    <div id="tab-materials" class="tab-panel">
+      <div class="materials-bar">
+        <span id="materials-status">Nothing loaded yet</span>
+        <button id="materials-save" type="button" disabled>Save assignment</button>
+        <button id="materials-clear" type="button" disabled>Clear all</button>
+      </div>
+      <div id="materials" class="panel">
+        <section class="panel-section placeholder">
+          <h2>Materials</h2>
+          <p>Every material the scene uses, largest surface first. Set a colour,
+             how metallic or rough it is, and how much it lets through — the
+             file's own values are kept, so <em>From file</em> always puts one
+             back.</p>
+          <p>Assignments are remembered for the file, and
+             <em>Save assignment</em> writes them out as JSON. Drop that file in
+             later — on its own or with the model — to apply it again.</p>
         </section>
       </div>
     </div>
