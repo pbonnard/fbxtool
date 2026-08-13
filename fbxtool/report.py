@@ -7,12 +7,33 @@ from typing import Any, Iterable
 from .analyze import Analysis, SceneNode, SceneObject
 from .model import Document, Node
 
-__all__ = ["render_text", "to_dict", "format_size", "render_tree"]
+__all__ = ["render_text", "to_dict", "format_size", "render_tree", "to_ascii"]
 
 _BRANCH = "├── "
 _LAST = "└── "
 _PIPE = "│   "
 _BLANK = "    "
+
+#: Every non-ASCII character this module can emit, and a plain substitute.
+#: Used when the destination stream cannot represent them — a Windows console
+#: code page such as cp1252 has none of the box-drawing characters, so writing
+#: to a redirected file would otherwise raise ``UnicodeEncodeError``.
+ASCII_FALLBACKS = {
+    "─": "-",
+    "├": "+",
+    "└": "+",
+    "│": "|",
+    "—": "-",
+    "→": "->",
+    "…": "...",
+}
+
+
+def to_ascii(text: str) -> str:
+    """Replace the report's box-drawing and typographic characters with ASCII."""
+    for fancy, plain in ASCII_FALLBACKS.items():
+        text = text.replace(fancy, plain)
+    return text
 
 
 def format_size(num: int) -> str:

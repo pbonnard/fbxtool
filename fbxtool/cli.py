@@ -11,7 +11,7 @@ from . import __version__
 from .analyze import analyze
 from .model import FbxError
 from .reader import read_fbx
-from .report import render_text, to_dict
+from .report import ASCII_FALLBACKS, render_text, to_ascii, to_dict
 
 __all__ = ["main", "build_parser"]
 
@@ -69,7 +69,38 @@ def build_parser() -> argparse.ArgumentParser:
                         help="decode (and inflate) array payloads so values can be shown")
     output.add_argument("--max-array", type=int, default=64, metavar="N",
                         help="keep at most N values per decoded array (0 for all)")
+    output.add_argument("--ascii", dest="ascii_only", action="store_true",
+                        help="draw with plain ASCII instead of box-drawing "
+                             "characters (automatic when the output encoding "
+                             "cannot represent them)")
     return parser
+
+
+def _needs_ascii(stream) -> bool:
+    """True when *stream* cannot encode the characters the report draws with.
+
+    A Windows console writes UTF-8, but a redirected stdout falls back to the
+    active code page (cp1252 and friends), which has no box-drawing characters.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return True
+    probe = "".join(ASCII_FALLBACKS)
+    try:
+        probe.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return True
+    return False
+
+
+def _write(text: str, ascii_only: bool) -> None:
+    if ascii_only:
+        text = to_ascii(text)
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        # Belt and braces: a stream that misreports its own encoding.
+        sys.stdout.write(to_ascii(text))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -108,13 +139,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(text)
         return status
 
+    ascii_only = args.ascii_only or _needs_ascii(sys.stdout)
     for index, (path, item) in enumerate(documents):
         if args.brief:
-            print(_brief(path, item))
+            _write(_brief(path, item) + "\n", ascii_only)
             continue
         if index:
-            print("\n" + "=" * 72)
-        sys.stdout.write(
+            _write("\n" + "=" * 72 + "\n", ascii_only)
+        _write(
             render_text(
                 item,
                 show_tree=args.tree,
@@ -124,7 +156,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 show_connections=args.connections,
                 show_hierarchy=args.hierarchy,
                 max_list=args.max_list,
-            )
+            ),
+            ascii_only,
         )
     return status
 

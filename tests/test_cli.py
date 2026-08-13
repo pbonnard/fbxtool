@@ -182,3 +182,71 @@ def test_unknown_version_is_still_described():
 def test_legacy_layout_flag():
     assert describe(6100).legacy_layout is True
     assert describe(7100).legacy_layout is False
+
+
+class _NarrowStream:
+    """A stdout stand-in limited to a legacy Windows code page."""
+
+    encoding = "cp1252"
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def write(self, text: str) -> int:
+        text.encode(self.encoding)  # raises exactly as the real stream would
+        self.text += text
+        return len(text)
+
+
+def test_ascii_fallback_replaces_every_drawing_character():
+    from fbxtool.report import ASCII_FALLBACKS, to_ascii
+
+    rendered = to_ascii("─├└│—→…")
+    assert rendered == "-++|-->..."
+    assert not any(char in rendered for char in ASCII_FALLBACKS)
+
+
+def test_output_degrades_when_the_stream_cannot_encode(monkeypatch, binary_cube):
+    """A redirected stdout on Windows reports cp1252 and must not crash."""
+    stream = _NarrowStream()
+    monkeypatch.setattr("sys.stdout", stream)
+    assert main([binary_cube]) == 0
+
+    stream.text.encode("cp1252")  # must not raise
+    assert "+-- pCube1" in stream.text
+    assert "7400 (FBX 7.4.0 - FBX 2014 / 2015)" in stream.text
+    assert not any(char in stream.text for char in "─├└│—")
+
+
+def test_brief_output_also_degrades(monkeypatch, binary_cube):
+    stream = _NarrowStream()
+    monkeypatch.setattr("sys.stdout", stream)
+    assert main([binary_cube, "--brief"]) == 0
+    stream.text.encode("cp1252")
+    assert "FBX 7.4.0 - FBX 2014 / 2015" in stream.text
+
+
+def test_ascii_flag_forces_plain_output(capsys, binary_cube):
+    _, out, _ = run(capsys, binary_cube, "--ascii", "--tree", "--depth", "1")
+    assert "+-- FBXHeaderExtension" in out
+    assert not any(char in out for char in "─├└│—")
+
+
+def test_unicode_is_kept_when_the_stream_supports_it(capsys, binary_cube):
+    _, out, _ = run(capsys, binary_cube, "--tree", "--depth", "1")
+    assert "├── FBXHeaderExtension" in out
+    assert "└──" in out
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "UTF-8", "utf8"])
+def test_unicode_encodings_need_no_fallback(encoding):
+    from fbxtool.cli import _needs_ascii
+
+    assert _needs_ascii(type("S", (), {"encoding": encoding})()) is False
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "ascii", "cp437", "latin-1", None, ""])
+def test_narrow_encodings_need_the_fallback(encoding):
+    from fbxtool.cli import _needs_ascii
+
+    assert _needs_ascii(type("S", (), {"encoding": encoding})()) is True

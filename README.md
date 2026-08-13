@@ -56,6 +56,11 @@ python3 -m fbxtool scene.fbx
 
 Python 3.9+; standard library only (`struct`, `zlib`, `mmap`, `json`).
 
+On Windows the report degrades to ASCII box drawing automatically when the
+output encoding cannot represent the Unicode characters — which is what happens
+when you redirect or pipe stdout, since it falls back to the active code page.
+`--ascii` forces the same rendering everywhere.
+
 ## Command line
 
 ```
@@ -77,7 +82,14 @@ output:
   --max-list N        cap listed objects/connections/hierarchy rows (default: 40)
   --decode-arrays     decode (and inflate) array payloads so values can be shown
   --max-array N       keep at most N values per decoded array (0 for all)
+  --ascii             draw with plain ASCII instead of box-drawing characters
 ```
+
+`fbxinfo` is the only entry point — the modules under `fbxtool/` are library
+code, so running one directly (`python fbxtool/binary.py scene.fbx`) fails with
+`ImportError: attempted relative import with no known parent package`. Use
+`python -m fbxtool scene.fbx` from the directory containing the package, or
+install it and use `fbxinfo`.
 
 Examples:
 
