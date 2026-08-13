@@ -721,6 +721,54 @@ def build_textured_cube(version: int = 7400, *, embed: bool = True,
                         version=version)
 
 
+#: The property a 3ds Max / Corona export names its base colour with, and the
+#: image that ends up two links below it.
+VENDOR_PROPERTY = "3dsMax|CoronaMtlPb|texmapDiffuse"
+VENDOR_IMAGE = "Maps/checker.png"
+
+
+def build_vendor_textured(version: int = 7400) -> bytes:
+    """A cube textured the way an exporter with its own renderer writes it.
+
+    Two things differ from the standard shape and both have to be followed:
+    the connection names the renderer's own property rather than
+    ``DiffuseColor``, and the texture bound to the material holds no image —
+    it feeds off another texture, which is the one naming the file.
+    """
+    nodes = textured_cube_nodes(version, embed=False, filename=VENDOR_IMAGE)
+    objects = next(n for n in nodes if n.name == "Objects")
+    connections = next(n for n in nodes if n.name == "Connections")
+
+    texture_uid, video_uid, material_uid = 40, 50, 30
+    inner_uid = 60
+
+    # The texture that names the file becomes the inner one; a new, empty
+    # texture sits between it and the material.
+    for entry in objects.children:
+        if entry.name == "Texture":
+            entry.props = [L(inner_uid), S("inner\x00\x01Texture"), S("")]
+    objects.children.append(
+        N("Texture", [L(texture_uid), S("outer\x00\x01Texture"), S("")], [
+            N("Type", [S("TextureVideoClip")]),
+            N("Version", [I(202)]),
+            N("TextureName", [S("outer\x00\x01Texture")]),
+            # No filename at all: the image is further down the chain.
+            N("RelativeFilename", [S("")]),
+        ]))
+
+    connections.children = [
+        c for c in connections.children
+        if not (c.props[0].value == "OP" and c.props[1].value == texture_uid)
+        and not (c.props[0].value == "OO" and c.props[2].value == texture_uid)
+    ]
+    connections.children += [
+        N("C", [S("OP"), L(texture_uid), L(material_uid), S(VENDOR_PROPERTY)]),
+        N("C", [S("OP"), L(inner_uid), L(texture_uid), S("3dsMax|parameters|map1")]),
+        N("C", [S("OO"), L(video_uid), L(inner_uid)]),
+    ]
+    return build_binary(nodes, version=version)
+
+
 # --------------------------------------------------------------------------
 # .blend fixtures
 #

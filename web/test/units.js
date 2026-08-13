@@ -226,6 +226,20 @@ check('transparency becomes opacity',
 check('opacity is read when transparency is absent',
   FbxAnalyze.materialAppearance({ Opacity: 0.4 }).opacity === 0.4);
 
+console.log('\nanalyze: which property carries the base colour');
+check('standard FBX', FbxAnalyze.drivesBaseColour('DiffuseColor'));
+check('the short form', FbxAnalyze.drivesBaseColour('Diffuse'));
+// What 3ds Max with Corona writes, and what Maya writes.
+check('a vendor property', FbxAnalyze.drivesBaseColour('3dsMax|CoronaMtlPb|texmapDiffuse'));
+check('another vendor property', FbxAnalyze.drivesBaseColour('Maya|baseColor'));
+check('bump maps are not base colour',
+  !FbxAnalyze.drivesBaseColour('3dsMax|CoronaMtlPb|texmapBump'));
+check('nor are glossiness maps',
+  !FbxAnalyze.drivesBaseColour('3dsMax|CoronaMtlPb|texmapReflectGlossiness'));
+check('nor normal maps', !FbxAnalyze.drivesBaseColour('3dsMax|CoronaNormalPb|normalMap'));
+check('nor a missing property', !FbxAnalyze.drivesBaseColour(null)
+  && !FbxAnalyze.drivesBaseColour(undefined) && !FbxAnalyze.drivesBaseColour(''));
+
 console.log('\npalette: colour inputs');
 // A colour input speaks sRGB; shading is linear. Mid grey is the giveaway:
 // 0.5 linear encodes to #bcbcbc, not #808080.

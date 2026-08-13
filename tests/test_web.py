@@ -384,6 +384,12 @@ def test_page_renders_in_a_browser(built):
     scene.write_bytes(fb.build_scene())
     samples.append(str(scene))
 
+    # A texture bound the way an exporter with its own renderer writes it:
+    # a vendor property name, and the image two links down the chain.
+    vendor = Path(tempfile.mkdtemp()) / "vendor.fbx"
+    vendor.write_bytes(fb.build_vendor_textured())
+    samples.append(f"{vendor}+{ROOT / 'samples' / 'checker.png'}")
+
     # A file in the 6.x layout: named objects, mesh on the model, scalar runs.
     legacy = Path(tempfile.mkdtemp()) / "legacy.fbx"
     legacy.write_bytes(fb.build_legacy())

@@ -251,6 +251,19 @@ const FbxAnalyze = (function () {
   }
 
   /**
+   * Does a connection's property name mean "this is the base colour"?
+   *
+   * Standard FBX writes `DiffuseColor`; exporters write their own renderer's
+   * name for the same thing, such as `3dsMax|CoronaMtlPb|texmapDiffuse` or
+   * `Maya|baseColor`, so the vendor prefix is dropped before matching.
+   */
+  const BASE_COLOUR = /^(diffuse|diffusecolor|basecolor|base_color|texmapdiffuse|color)$/i;
+
+  function drivesBaseColour(prop) {
+    return typeof prop === 'string' && BASE_COLOUR.test(prop.split('|').pop().trim());
+  }
+
+  /**
    * What a renderer needs from a material's resolved properties.
    *
    * FBX materials are Lambert or Phong: a diffuse colour and a specular colour,
@@ -594,7 +607,7 @@ const FbxAnalyze = (function () {
   return {
     analyze, describeVersion, splitObjectName, properties, arrayLength, scalarValues,
     child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
-    propertyTemplates, resolvedProperties, materialAppearance,
+    propertyTemplates, resolvedProperties, materialAppearance, drivesBaseColour,
   };
 })();
 

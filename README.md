@@ -279,9 +279,19 @@ name a material directly — it indexes the materials connected to the *model*
 that owns the geometry, in connection order — so the palette is resolved
 through the connection graph.
 
-Diffuse textures are followed from `Material` through the object-to-property
-connection that names `DiffuseColor`, then on to the `Video` clip holding the
-image:
+Textures are followed from `Material` through the object-to-property connection
+that drives its base colour, then down to whatever image is at the end.
+
+Two things make that less simple than it sounds. Exporters name the property
+after their own renderer — `3dsMax|CoronaMtlPb|texmapDiffuse`, `Maya|baseColor`
+— so the vendor prefix is dropped before matching, and only the base colour is
+followed: bump, normal and glossiness maps are recognised as not being it, and
+left alone. And the image is often several links down, with colour corrections
+or mixes in between, so the chain is walked to the first record that names a
+file or carries the bytes. A chain that ends at no image at all is a procedural
+map, and nothing is drawn for it.
+
+The `Video` clip is usually where the filename lives:
 
 - **Embedded** images (a `Content` property of raw bytes) load on their own.
 - **Referenced** images — just a filename, which is what most exporters write —

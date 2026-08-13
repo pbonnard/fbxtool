@@ -408,11 +408,17 @@
     for (const obj of objects) {
       const key = keyOf(obj);
       if (key !== null && key !== '' && !byKey.has(key)) byKey.set(key, obj);
+      // A 6.x name is only unique within its class — one Ferrari has a Video
+      // and a Texture both called BM — so index the class-qualified name too.
+      const qualified = `${obj.name}\u0000\u0001${obj.className || obj.nodeType}`;
+      if (!byKey.has(qualified)) byKey.set(qualified, obj);
     }
     return {
       keyOf,
-      resolve: (value) => byKey.get(typeof value === 'string'
-        ? FbxAnalyze.splitObjectName(value)[0] : value),
+      resolve: (value) => {
+        if (typeof value !== 'string') return byKey.get(value);
+        return byKey.get(value) || byKey.get(FbxAnalyze.splitObjectName(value)[0]);
+      },
     };
   }
 
@@ -718,40 +724,62 @@
     return String(path).split(/[\\/]/).pop().toLowerCase();
   }
 
+  /** A record's own image: embedded bytes, or the file it names. */
+  function imageOf(object) {
+    const node = object.node;
+    const content = node.children.find((c) => c.name === 'Content');
+    const bytes = content && content.props.find((p) => p.value instanceof Uint8Array);
+    if (bytes && bytes.value.length) {
+      return { name: object.displayName, path: '', embedded: bytes.value };
+    }
+    const path = FbxAnalyze.pathValue(node, ['RelativeFilename'])
+      || FbxAnalyze.pathValue(node, ['FileName'])
+      || FbxAnalyze.pathValue(node, ['Filename']);
+    if (typeof path === 'string' && path) {
+      return { name: object.displayName, path, embedded: null };
+    }
+    return null;
+  }
+
   /**
-   * The diffuse texture bound to a material, if any.
+   * Follow a texture down to the image it ends at.
+   *
+   * A Texture may hold the image itself, or name a Video clip that does — and
+   * a 3ds Max export can put several nodes in between, colour-correcting or
+   * mixing one texture into another, with the bitmap several links down.
+   * Anything that ends at no image at all is a procedural map we cannot draw.
+   */
+  function imageBehind(object, resolve, connections, seen) {
+    const found = [];
+    (function walk(node) {
+      if (!node || seen.has(node) || seen.size > 64) return;
+      seen.add(node);
+      const own = imageOf(node);
+      if (own) found.push(own);
+      for (const conn of connections) {
+        if (resolve(conn.dst) === node) walk(resolve(conn.src));
+      }
+    })(object);
+    // A Texture that names a file may still have the bytes on the Video clip
+    // below it, so what is embedded anywhere in the chain wins.
+    return found.find((image) => image.embedded) || found[0] || null;
+  }
+
+  /**
+   * The base colour texture bound to a material, if any.
    *
    * A Texture attaches to a Material through an object-to-property connection
-   * naming the property it drives, so only DiffuseColor is followed here. The
-   * image itself may be embedded in the Texture or in the Video it references.
+   * naming the property it drives; only the base colour is drawn, so the rest
+   * — bump, normal, glossiness — are left alone.
    */
   function diffuseTexture(material, resolve, connections) {
     const link = connections.find((c) => c.kind === 'OP' && resolve(c.dst) === material
-      && (c.prop === 'DiffuseColor' || c.prop === 'Diffuse'));
+      && FbxAnalyze.drivesBaseColour(c.prop));
     if (!link) return null;
-    const texture = resolve(link.src);
-    if (!texture || texture.nodeType !== 'Texture') return null;
-
-    const media = connections
-      .filter((c) => c.kind === 'OO' && resolve(c.dst) === texture)
-      .map((c) => resolve(c.src))
-      .find((o) => o && o.nodeType === 'Video');
-
-    // Embedded media rides along in a Content property as raw bytes.
-    const embedded = [texture.node, media && media.node]
-      .filter(Boolean)
-      .map((node) => {
-        const content = node.children.find((c) => c.name === 'Content');
-        const prop = content && content.props.find((p) => p.value instanceof Uint8Array);
-        return prop && prop.value.length ? prop.value : null;
-      })
-      .find(Boolean) || null;
-
-    const path = FbxAnalyze.pathValue(texture.node, ['RelativeFilename'])
-      || FbxAnalyze.pathValue(texture.node, ['FileName'])
-      || (media && FbxAnalyze.pathValue(media.node, ['RelativeFilename']))
-      || '';
-    return { name: texture.displayName, path, embedded };
+    const bound = resolve(link.src);
+    if (!bound) return null;
+    const image = imageBehind(bound, resolve, connections, new Set());
+    return image ? { ...image, name: bound.displayName } : null;
   }
 
   /** Decode one image, from embedded bytes or a file the user supplied. */
