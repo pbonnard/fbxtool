@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import real_sample
+from conftest import real_sample, real_scene
 from fbxtool import read_fbx
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -218,9 +218,9 @@ def test_gltf_export(built, tmp_path):
              f"{ROOT / 'samples' / 'pyramid.obj'}+{ROOT / 'samples' / 'pyramid.mtl'}"
              f"+{ROOT / 'samples' / 'checker.png'}",
              str(glass)]
-    real = real_sample()
-    if real:
-        files.append(real)
+    for real in (real_sample(), real_scene()):
+        if real:
+            files.append(real)
 
     result = subprocess.run(["node", str(WEB / "test" / "gltf.js"), *files],
                             capture_output=True, text=True, env=_node_env(), timeout=600)
@@ -339,9 +339,9 @@ def test_page_renders_in_a_browser(built):
     glass.write_bytes(fb.build_glass())
     samples.append(str(glass))
 
-    real = real_sample()
-    if real:
-        samples.append(real)
+    for real in (real_sample(), real_scene()):
+        if real:
+            samples.append(real)
 
     result = subprocess.run(["node", str(WEB / "test" / "browser.js"), *samples],
                             capture_output=True, text=True, env=_node_env(), timeout=300)

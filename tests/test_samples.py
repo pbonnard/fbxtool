@@ -91,3 +91,37 @@ def test_scene_sample_instances_one_mesh(sample_scene_path):
     assert root.obj.name == "hub"
     assert root.children[0].obj.name == "arm"
     assert root.children[0].children[0].obj.name == "mirror"
+
+
+def test_shelby_is_the_multi_part_case(real_scene_path):
+    """The scene that made whole-scene assembly necessary.
+
+    Forty-four parts, each in its own space, materials that carry nothing at
+    all, and one mesh instanced by two dozen models.
+    """
+    info = analyze(read_fbx(real_scene_path))
+    assert info.doc.warnings == []
+    assert info.object_counts["Model (Mesh)"] == 44
+    assert info.object_counts["Geometry (Mesh)"] == 44
+    assert info.object_counts["Material"] == 20
+    assert info.object_counts["Model (Camera)"] == 1
+
+    from fbxtool.analyze import resolved_properties
+
+    materials = [o for o in info.objects if o.node_type == "Material"]
+    # Every one carries an empty Properties70 — a container and nothing in it.
+    assert all(len(getattr(o.node.get("Properties70"), "children", [])) == 0
+               for o in materials)
+    # So every colour comes from the template, and they are all the same grey.
+    colours = {tuple(resolved_properties(o, info.templates)["DiffuseColor"])
+               for o in materials}
+    assert colours == {(0.8, 0.8, 0.8)}
+
+    # One geometry is shared by many models, which is what the material list
+    # has to group back together.
+    by_uid = {o.uid: o for o in info.objects if o.uid is not None}
+    slots = [c.src for c in info.connections
+             if c.kind == "OO" and by_uid.get(c.src) is not None
+             and by_uid[c.src].node_type == "Material"
+             and by_uid.get(c.dst) is not None and by_uid[c.dst].node_type == "Model"]
+    assert len(slots) > len(set(slots)), "materials should repeat across parts"

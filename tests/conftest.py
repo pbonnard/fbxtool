@@ -59,6 +59,27 @@ def real_sample() -> str | None:
     return str(checked_in) if checked_in.is_file() else None
 
 
+def real_scene() -> str | None:
+    """A real file of many parts, as opposed to one big mesh."""
+    import os
+
+    candidate = os.environ.get("FBXTOOL_SCENE")
+    if candidate and Path(candidate).is_file():
+        return candidate
+    checked_in = ROOT / "samples" / "Shelby.fbx"
+    return str(checked_in) if checked_in.is_file() else None
+
+
+@pytest.fixture(scope="session")
+def real_scene_path() -> str:
+    """A Blender export of a Shelby Cobra: 44 parts, materials with nothing
+    in them, and one mesh instanced by two dozen models."""
+    candidate = real_scene()
+    if candidate:
+        return candidate
+    pytest.skip("set FBXTOOL_SCENE to a multi-part .fbx to run this test")
+
+
 @pytest.fixture(scope="session")
 def real_fbx_path() -> str:
     """A real exporter's file.

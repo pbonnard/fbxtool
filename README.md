@@ -583,9 +583,15 @@ and SDNA — so the container reader is testable without Blender installed.
 
 The web tests skip cleanly when `clang` or `node` is unavailable.
 
-`samples/Mercedes+Benz+GLS+580.fbx` is a real Blender export — 361,236
-triangles, 23 materials, transparent glass — and the tests that need a file a
-real exporter wrote use it. `FBXTOOL_SAMPLE` points them at a different one;
+Two real Blender exports are checked in, and the tests that need a file a real
+exporter wrote use them:
+
+| | |
+| --- | --- |
+| `samples/Mercedes+Benz+GLS+580.fbx` | one mesh of 361,236 triangles, 23 materials, transparent glass |
+| `samples/Shelby.fbx` | 44 parts in their own spaces, one mesh instanced by 24 models, 20 materials carrying nothing at all |
+
+`FBXTOOL_SAMPLE` and `FBXTOOL_SCENE` point those tests at your own files;
 `FBXTOOL_BLEND` does the same for a `.blend`, of which none is checked in.
 
 `samples/cube_ascii.fbx` is checked in as source; `samples/cube_binary.fbx` and
