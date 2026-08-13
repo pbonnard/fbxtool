@@ -576,6 +576,7 @@ node web/test/transparency.js glass.fbx       # reads pixels through glass
 node web/test/materials.js samples/scene_parts.fbx   # the material list
 node web/test/ground.js samples/scene_parts.fbx      # the floor and its shadow
 node web/test/gltf.js samples/cube_textured.fbx      # export, then validate it
+node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks

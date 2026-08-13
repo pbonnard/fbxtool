@@ -51,6 +51,12 @@
   /** The mesh on screen, kept for the glTF export. */
   let currentMesh = null;
   let lastExport = null;
+  /** The empty state of each panel, as the page was served. */
+  const placeholders = {
+    report: dom.panel.innerHTML,
+    records: dom.tree.innerHTML,
+    materials: dom.materials.innerHTML,
+  };
 
   function setStatus(text, kind = '') {
     dom.status.textContent = text || '';
@@ -98,8 +104,42 @@
     await loadFile(scene);
   }
 
+  /**
+   * Everything on screen describes the file that was open. Put it all back to
+   * empty before reading another one, so nothing that fails to load — or that
+   * loads with nothing in it — leaves the last file's report, records,
+   * materials or mesh sitting there as if they belonged to it.
+   */
+  function clearDocument() {
+    currentDoc = null;
+    currentAnalysis = null;
+    currentGeometry = null;
+    currentMesh = null;
+    currentPalette = [];
+    materialGroups = [];
+    sceneParts = [];
+    uidIndex = new Map();
+    missingTextures = [];
+
+    dom.panel.innerHTML = placeholders.report;
+    dom.tree.innerHTML = placeholders.records;
+    dom.materials.innerHTML = placeholders.materials;
+    dom.materialsStatus.textContent = 'Nothing loaded yet';
+    dom.materialsSave.disabled = true;
+    dom.materialsClear.disabled = true;
+    dom.exportGltf.disabled = true;
+    dom.geometrySelect.innerHTML = '';
+    dom.geometrySelect.disabled = true;
+    dom.meshInfo.textContent = 'no file loaded';
+    if (viewer) {
+      viewer.clear();
+      viewer.setHighlight(-1);
+    }
+  }
+
   async function loadFile(file) {
     setStatus(`Reading ${file.name}…`);
+    clearDocument();
     try {
       const buffer = new Uint8Array(await file.arrayBuffer());
       const started = performance.now();
@@ -741,6 +781,9 @@
     if (!candidates.length) {
       dom.geometrySelect.disabled = true;
       dom.meshInfo.textContent = 'no renderable geometry in this file';
+      // Say so in the materials list too, rather than leaving it looking
+      // like nothing has been opened at all.
+      renderMaterials();
       viewer.clear();
       return;
     }

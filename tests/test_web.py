@@ -194,6 +194,28 @@ def test_wasm_heap_mark_and_release(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_a_new_file_replaces_the_last(built):
+    """Nothing of the previous file may survive opening another one."""
+    try:
+        probe = subprocess.run(["node", "-e", "require('playwright')"],
+                               capture_output=True, text=True, env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = subprocess.run(
+        ["node", str(WEB / "test" / "reload.js"),
+         str(ROOT / "samples" / "cube_textured.fbx"),
+         str(ROOT / "samples" / "scene_parts.fbx")],
+        capture_output=True, text=True, env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_gltf_export(built, tmp_path):
     """Export through the page and take the result apart.
 
