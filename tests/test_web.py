@@ -301,8 +301,10 @@ def test_page_renders_in_a_browser(built):
     glass.write_bytes(fb.build_glass())
     samples.append(str(glass))
 
-    real = os.environ.get("FBXTOOL_SAMPLE")
-    if real and Path(real).is_file():
+    from conftest import real_sample
+
+    real = real_sample()
+    if real:
         samples.append(real)
 
     result = subprocess.run(["node", str(WEB / "test" / "browser.js"), *samples],

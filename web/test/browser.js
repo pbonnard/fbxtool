@@ -57,8 +57,12 @@ async function main() {
   check('WebGL2 context created', webgl);
 
   for (const entry of files) {
-    // "a.fbx+b.png" loads several files together, as a drop would.
-    const group = entry.split('+');
+    // "a.fbx+b.png" loads several files together, as a drop would — but only
+    // when every piece is a file. Real models are called things like
+    // "Mercedes+Benz+GLS+580.fbx".
+    const pieces = entry.split('+');
+    const group = pieces.length > 1 && pieces.every((f) => fs.existsSync(f))
+      ? pieces : [entry];
     const file = group[0];
     const suppliedImage = group.slice(1).some((f) => /\.(png|jpe?g|gif|bmp|webp)$/i.test(f));
     const expectTexture = suppliedImage || /textured/i.test(file);
