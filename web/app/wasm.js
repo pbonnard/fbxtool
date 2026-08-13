@@ -267,8 +267,64 @@ const FbxWasm = (function () {
     'xformOff', 'normalXformOff', 'flipWinding', 'materialBase',
   ];
 
+  /** Field order of the SubdivParams block in fbx.c. */
+  const SUBDIV_FIELDS = [
+    'posOff', 'posCount', 'idxOff', 'idxCount',
+    'nrmOff', 'nrmCount', 'nrmIndexOff', 'nrmIndexCount', 'nrmMapping', 'nrmReference',
+    'uvOff', 'uvCount', 'uvIndexOff', 'uvIndexCount', 'uvMapping', 'uvReference',
+    'matOff', 'matCount', 'levels',
+  ];
+
   const slot = (pair) => (pair ? pair.offset : 0);
   const size = (pair) => (pair ? pair.count : 0);
+
+  /**
+   * Smooth a control mesh, and hand back a spec `buildMesh` can take.
+   *
+   * What comes out is all quads with its normals and UVs written per corner,
+   * so the mapping and reference of the original layers are already resolved.
+   */
+  function subdivide(spec, levels) {
+    const values = {
+      posOff: spec.positions.offset, posCount: spec.positions.count,
+      idxOff: spec.indices.offset, idxCount: spec.indices.count,
+      nrmOff: slot(spec.normals), nrmCount: size(spec.normals),
+      nrmIndexOff: slot(spec.normalIndex), nrmIndexCount: size(spec.normalIndex),
+      nrmMapping: MAPPING[spec.normalMapping] || 0,
+      nrmReference: REFERENCE[spec.normalReference] || 0,
+      uvOff: slot(spec.uvs), uvCount: size(spec.uvs),
+      uvIndexOff: slot(spec.uvIndex), uvIndexCount: size(spec.uvIndex),
+      uvMapping: MAPPING[spec.uvMapping] || 0,
+      uvReference: REFERENCE[spec.uvReference] || 0,
+      matOff: slot(spec.materials), matCount: size(spec.materials),
+      levels: Math.max(0, Math.min(4, levels | 0)),
+    };
+    const block = exports_.fbx_alloc(SUBDIV_FIELDS.length * 4);
+    const params = new Uint32Array(exports_.memory.buffer, block, SUBDIV_FIELDS.length);
+    SUBDIV_FIELDS.forEach((name, i) => { params[i] = values[name] >>> 0; });
+
+    const result = exports_.fbx_subdivide(block);
+    if (!result) throw new Error('subdividing ran out of memory');
+
+    const dv = view();
+    const at = (index) => dv.getUint32(result + index * 4, true);
+    const pair = (offset, count) => (count ? { offset, count } : null);
+    const positions = pair(at(0), at(1));
+    if (!positions) return null;                 // nothing to smooth
+    return {
+      positions,
+      indices: pair(at(2), at(3)),
+      normals: pair(at(4), at(5)),
+      normalMapping: 'byPolygonVertex',
+      normalReference: 'direct',
+      uvs: pair(at(6), at(7)),
+      uvMapping: 'byPolygonVertex',
+      uvReference: 'direct',
+      materials: pair(at(8), at(9)),
+      polygonCount: at(10),
+      levels: at(11),
+    };
+  }
 
   /**
    * Triangulate a mesh.
@@ -336,7 +392,7 @@ const FbxWasm = (function () {
   function release(at) { exports_.fbx_heap_release(at); }
 
   return {
-    init, parseBinary, buildMesh, payloadOffset, asFloat64, asInt32,
+    init, parseBinary, buildMesh, subdivide, payloadOffset, asFloat64, asInt32,
     uploadFloat64, uploadInt32, mark, release,
     get exports() { return exports_; },
     get fileOffset() { return fileOffset; },

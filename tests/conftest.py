@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,11 +9,44 @@ import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
 ROOT = TESTS_DIR.parent
+SOURCE = ROOT / "web" / "src" / "fbx.c"
+LIBRARY = ROOT / "web" / "build" / (
+    "libfbx.dll" if sys.platform == "win32" else "libfbx.so")
 
 # Make ``fbxbuild`` importable and prefer the checkout over any installed copy.
 for entry in (str(TESTS_DIR), str(ROOT)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
+
+
+@pytest.fixture(scope="session")
+def lib():
+    """Compile the C core natively and load it.
+
+    The same source becomes the WebAssembly module, so its DEFLATE decoder can
+    be held against zlib and its geometry against values worked out by hand,
+    with no browser in the way.
+    """
+    if not SOURCE.exists():  # pragma: no cover - the source is checked in
+        pytest.skip("web/src/fbx.c is missing")
+    LIBRARY.parent.mkdir(parents=True, exist_ok=True)
+    if not LIBRARY.exists() or SOURCE.stat().st_mtime > LIBRARY.stat().st_mtime:
+        result = subprocess.run(
+            ["clang", "-DFBX_NATIVE", "-O2", "-shared",
+             "-Wno-unknown-attributes", "-o", str(LIBRARY), str(SOURCE)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"could not build the native test library:\n{result.stderr}")
+
+    handle = ctypes.CDLL(str(LIBRARY))
+    handle.test_inflate_zlib.restype = ctypes.c_int32
+    handle.test_inflate_zlib.argtypes = [
+        ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32
+    ]
+    handle.test_inflate_raw.restype = ctypes.c_int32
+    handle.test_inflate_raw.argtypes = handle.test_inflate_zlib.argtypes
+    return handle
 
 
 @pytest.fixture(scope="session")

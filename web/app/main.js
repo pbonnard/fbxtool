@@ -16,6 +16,7 @@
     meshInfo: $('mesh-info'),
     geometrySelect: $('geometry-select'),
     modeSelect: $('mode-select'),
+    subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
     spinToggle: $('spin-toggle'),
     groundToggle: $('ground-toggle'),
@@ -39,6 +40,12 @@
   let sceneParts = [];
   /** Bumped once a file is fully read, reported and drawn. */
   let loadCount = 0;
+  /** How many rounds of Catmull-Clark to put the mesh through, 0 for none. */
+  let subdivisionLevel = 0;
+  /** Parts that would not fit through it, counted for the one build. */
+  let unsmoothedParts = 0;
+  /** Whether the shading mode on screen is the user's choice or ours. */
+  let modeChosen = false;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
@@ -118,6 +125,7 @@
     currentPalette = [];
     materialGroups = [];
     sceneParts = [];
+    modeChosen = false;
     objectIndex = emptyIndex();
     missingTextures = [];
 
@@ -277,6 +285,7 @@
     const cache = new Map();
     const pieces = [];
     const palette = [];
+    unsmoothedParts = 0;
 
     // Everything a part allocates is scratch once its result is copied out.
     const heapMark = FbxWasm.mark();
@@ -420,6 +429,31 @@
         return byKey.get(value) || byKey.get(FbxAnalyze.splitObjectName(value)[0]);
       },
     };
+  }
+
+  /**
+   * Start a file in the mode that suits it — clay when it has no colours of
+   * its own — but never take the choice back once it has been made, or
+   * smoothing and dropped textures would keep resetting it.
+   */
+  function defaultShadingMode(hasColours) {
+    if (modeChosen) return;
+    dom.modeSelect.value = hasColours ? '0' : '2';
+    viewer.setMode(Number(dom.modeSelect.value));
+  }
+
+  /** Build whatever is on screen again, after a setting that changes the mesh. */
+  function redraw() {
+    if (currentGeometry) return showGeometry(currentGeometry);
+    if (sceneParts.length > 1) return showScene();
+    return Promise.resolve();
+  }
+
+  /** What the viewport should say about smoothing, if anything. */
+  function smoothingNote(mesh) {
+    if (!(subdivisionLevel > 0 && mesh && mesh.triangleCount)) return '';
+    return ` · smoothed ×${subdivisionLevel}`
+      + (unsmoothedParts ? ` · ${unsmoothedParts} too large to smooth` : '');
   }
 
   /** How many of a palette's materials the file marks as see-through. */
@@ -903,8 +937,7 @@
       missingTextures = textures.missing;
       installPalette(built.palette, built.mesh);
       viewer.setTextures(textures.images);
-      dom.modeSelect.value = built.palette.length ? '0' : '2';
-      viewer.setMode(Number(dom.modeSelect.value));
+      defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0;
       applyUpAxis(built.mesh);
 
@@ -912,6 +945,7 @@
       let text = `${built.parts} parts · ${built.mesh.triangleCount.toLocaleString()} `
         + `triangles · ${size.map((v) => v.toFixed(1)).join(' × ')} units · `
         + `${elapsed.toFixed(0)} ms · ${built.palette.length} material colours`;
+      text += smoothingNote(built.mesh);
       text += seeThrough(built.palette);
       if (textures.requested) {
         text += ` · ${textures.images.length}/${textures.requested} textures`;
@@ -1009,20 +1043,32 @@
       }
     }
 
-    return FbxWasm.buildMesh({
+    let spec = {
       positions, indices: polygons,
       normals, normalMapping: mapping, normalReference: normalReference,
       normalIndex,
       uvs, uvIndex, uvMapping, uvReference,
       materials,
-      ...placement,
-    });
+    };
+    // Smoothing happens on the polygons, before anything is triangulated. A
+    // mesh too big to smooth is drawn as it came rather than dropped: one
+    // part of a car at its cage density is better than a hole where it was.
+    if (subdivisionLevel > 0) {
+      try {
+        const smoothed = FbxWasm.subdivide(spec, subdivisionLevel);
+        if (smoothed) spec = smoothed;
+      } catch (error) {
+        unsmoothedParts++;
+      }
+    }
+    return FbxWasm.buildMesh({ ...spec, ...placement });
   }
 
   async function showGeometry(entry) {
     currentGeometry = entry;
     try {
       const started = performance.now();
+      unsmoothedParts = 0;
       const mesh = buildMesh(entry);
       if (!mesh || !mesh.triangleCount) {
         dom.meshInfo.textContent = 'this record has no triangles';
@@ -1037,9 +1083,7 @@
       missingTextures = textures.missing;
       installPalette(palette, mesh);
       viewer.setTextures(textures.images);
-      // Without usable colours the file-colour mode has nothing to show.
-      dom.modeSelect.value = palette.length ? '0' : '2';
-      viewer.setMode(Number(dom.modeSelect.value));
+      defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0;
 
       const chosen = applyUpAxis(mesh);
@@ -1051,6 +1095,7 @@
       text += palette.length
         ? ` · ${palette.length} material colours`
         : ' · no material colours in this file';
+      text += smoothingNote(mesh);
       text += seeThrough(palette);
       if (textures.requested) {
         text += ` · ${textures.images.length}/${textures.requested} textures`;
@@ -1109,7 +1154,14 @@
       const entry = candidates[Number(dom.geometrySelect.value)];
       if (entry) showGeometry(entry);
     });
-    dom.modeSelect.addEventListener('change', () => viewer.setMode(Number(dom.modeSelect.value)));
+    dom.modeSelect.addEventListener('change', () => {
+      modeChosen = true;
+      viewer.setMode(Number(dom.modeSelect.value));
+    });
+    dom.subdivSelect.addEventListener('change', () => {
+      subdivisionLevel = Number(dom.subdivSelect.value) || 0;
+      redraw();
+    });
     dom.upSelect.addEventListener('change', () => viewer.setUpAxis(dom.upSelect.value));
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
     dom.groundToggle.addEventListener('change',

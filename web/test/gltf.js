@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const { launch } = require('./chromium');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PAGE = path.join(ROOT, 'web', 'dist', 'fbxview.html');
@@ -117,10 +118,7 @@ async function main() {
     ? 'Khronos glTF-Validator found\n'
     : 'Khronos glTF-Validator not installed — structural checks only\n');
 
-  const browser = await chromium.launch({
-    executablePath: process.env.CHROMIUM_PATH || undefined,
-    args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
-  });
+  const browser = await launch(chromium);
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(String(error)));

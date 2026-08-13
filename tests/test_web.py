@@ -30,12 +30,21 @@ needs_clang = pytest.mark.skipif(shutil.which("clang") is None, reason="clang is
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
 
 
+def _run(args, **kwargs) -> subprocess.CompletedProcess:
+    """Run a harness and read what it prints as UTF-8.
+
+    The harnesses print "×" and "·"; left to the console's own code page,
+    Windows hands back mojibake and every check on their output fails.
+    """
+    return subprocess.run(args, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", **kwargs)
+
+
 def _node_env() -> dict[str, str]:
     """Node needs to find the globally installed playwright."""
     env = dict(os.environ)
     try:
-        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True,
-                              timeout=60).stdout.strip()
+        root = _run(["npm", "root", "-g"], timeout=60).stdout.strip()
         if root:
             env["NODE_PATH"] = root
     except (OSError, subprocess.SubprocessError):  # pragma: no cover - npm absent
@@ -48,8 +57,7 @@ def built() -> Path:
     """Build the WASM module and the single-file page."""
     if shutil.which("clang") is None:
         pytest.skip("clang is required to build the WebAssembly module")
-    result = subprocess.run(["python3", str(WEB / "build.py")], capture_output=True,
-                            text=True, cwd=str(ROOT))
+    result = _run(["python3", str(WEB / "build.py")], cwd=str(ROOT))
     if result.returncode != 0:
         pytest.fail(f"web build failed:\n{result.stdout}\n{result.stderr}")
     return PAGE
@@ -83,7 +91,7 @@ def test_node_can_instantiate_the_module(built):
         "const i=new WebAssembly.Instance(m,{});"
         "console.log(JSON.stringify(Object.keys(i.exports)));"
     )
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    result = _run(["node", "-e", script])
     assert result.returncode == 0, result.stderr
     exports = json.loads(result.stdout)
     for name in ["fbx_parse", "fbx_alloc", "fbx_inflate", "fbx_build_mesh", "memory"]:
@@ -91,8 +99,7 @@ def test_node_can_instantiate_the_module(built):
 
 
 def _wasm_dump(path: str) -> dict:
-    result = subprocess.run(["node", str(WEB / "test" / "dump.js"), path],
-                            capture_output=True, text=True, env=_node_env())
+    result = _run(["node", str(WEB / "test" / "dump.js"), path], env=_node_env())
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -170,8 +177,7 @@ def test_wasm_reader_handles_both_offset_widths(built, tmp_path, version):
 @needs_node
 def test_javascript_units():
     """Transform maths and PropertyTemplate defaults, checked under Node."""
-    result = subprocess.run(["node", str(WEB / "test" / "units.js")],
-                            capture_output=True, text=True, env=_node_env())
+    result = _run(["node", str(WEB / "test" / "units.js")], env=_node_env())
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -185,8 +191,7 @@ def test_wasm_heap_mark_and_release(built, tmp_path):
 
     path = tmp_path / "cube.fbx"
     path.write_bytes(fb.build_cube())
-    result = subprocess.run(["node", str(WEB / "test" / "heap.js"), str(path)],
-                            capture_output=True, text=True, env=_node_env())
+    result = _run(["node", str(WEB / "test" / "heap.js"), str(path)], env=_node_env())
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -197,18 +202,17 @@ def test_wasm_heap_mark_and_release(built, tmp_path):
 def test_a_new_file_replaces_the_last(built):
     """Nothing of the previous file may survive opening another one."""
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
         pytest.skip("node is unavailable")
 
-    result = subprocess.run(
+    result = _run(
         ["node", str(WEB / "test" / "reload.js"),
          str(ROOT / "samples" / "cube_textured.fbx"),
          str(ROOT / "samples" / "scene_parts.fbx")],
-        capture_output=True, text=True, env=_node_env(), timeout=300)
+        env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -224,8 +228,7 @@ def test_gltf_export(built, tmp_path):
     either way.
     """
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
@@ -244,8 +247,7 @@ def test_gltf_export(built, tmp_path):
         if real:
             files.append(real)
 
-    result = subprocess.run(["node", str(WEB / "test" / "gltf.js"), *files],
-                            capture_output=True, text=True, env=_node_env(), timeout=600)
+    result = _run(["node", str(WEB / "test" / "gltf.js"), *files], env=_node_env(), timeout=600)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -257,8 +259,7 @@ def test_legacy_scene_assembles_in_the_browser(built, tmp_path):
     """FBX 6.x renders too: objects named rather than numbered, the mesh on
     the model, and every number written as its own property."""
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
@@ -268,8 +269,7 @@ def test_legacy_scene_assembles_in_the_browser(built, tmp_path):
 
     legacy = tmp_path / "legacy.fbx"
     legacy.write_bytes(fb.build_legacy())
-    result = subprocess.run(["node", str(WEB / "test" / "browser.js"), str(legacy)],
-                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    result = _run(["node", str(WEB / "test" / "browser.js"), str(legacy)], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
@@ -281,19 +281,52 @@ def test_legacy_scene_assembles_in_the_browser(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_subdivision_through_the_module(built):
+    """The compiled module, driven the way the viewer drives it."""
+    files = [str(WEB / "test" / "subdivide.js")]
+    real = real_sample()
+    if real:
+        files.append(real)
+    result = _run(["node", *files], env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_smoothing_control(built):
+    """Picking a level rebuilds what is on screen, and rounds it."""
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = _run(
+        ["node", str(WEB / "test" / "smoothing.js"),
+         str(ROOT / "samples" / "cube_binary.fbx"),
+         str(ROOT / "samples" / "scene_parts.fbx")],
+        env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_ground_and_shadows(built):
     """The model stands on a floor and drops a shadow onto it."""
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
         pytest.skip("node is unavailable")
 
     scene = ROOT / "samples" / "scene_parts.fbx"
-    result = subprocess.run(["node", str(WEB / "test" / "ground.js"), str(scene)],
-                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    result = _run(["node", str(WEB / "test" / "ground.js"), str(scene)], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -304,16 +337,14 @@ def test_ground_and_shadows(built):
 def test_materials_can_be_assigned(built):
     """Group the palette, edit a material, save it and get it back."""
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
         pytest.skip("node is unavailable")
 
     scene = ROOT / "samples" / "scene_parts.fbx"
-    result = subprocess.run(["node", str(WEB / "test" / "materials.js"), str(scene)],
-                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    result = _run(["node", str(WEB / "test" / "materials.js"), str(scene)], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -324,8 +355,7 @@ def test_materials_can_be_assigned(built):
 def test_transparency_is_drawn(built, tmp_path):
     """A solid core inside a see-through shell has to stay visible."""
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
@@ -335,8 +365,7 @@ def test_transparency_is_drawn(built, tmp_path):
 
     glass = tmp_path / "glass.fbx"
     glass.write_bytes(fb.build_glass())
-    result = subprocess.run(["node", str(WEB / "test" / "transparency.js"), str(glass)],
-                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    result = _run(["node", str(WEB / "test" / "transparency.js"), str(glass)], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -404,8 +433,7 @@ def test_page_renders_in_a_browser(built):
         if real:
             samples.append(real)
 
-    result = subprocess.run(["node", str(WEB / "test" / "browser.js"), *samples],
-                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    result = _run(["node", str(WEB / "test" / "browser.js"), *samples], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
@@ -421,8 +449,7 @@ def test_scene_assembles_in_the_browser(built, tmp_path):
     negative scale on the last part are all handled.
     """
     try:
-        probe = subprocess.run(["node", "-e", "require('playwright')"],
-                               capture_output=True, text=True, env=_node_env())
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
             pytest.skip("playwright is not installed for node")
     except OSError:  # pragma: no cover
@@ -432,8 +459,7 @@ def test_scene_assembles_in_the_browser(built, tmp_path):
 
     scene = tmp_path / "parts.fbx"
     scene.write_bytes(fb.build_scene())
-    result = subprocess.run(["node", str(WEB / "test" / "browser.js"), str(scene)],
-                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    result = _run(["node", str(WEB / "test" / "browser.js"), str(scene)], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 

@@ -22,6 +22,19 @@ typedef float f32;
 
 #define NULL ((void *)0)
 
+/* Exported to the caller: a name in the WebAssembly table, or an ordinary
+ * shared-library export when the same source is compiled natively for the
+ * tests — which on Windows has to be asked for. */
+#ifdef FBX_NATIVE
+#  ifdef _WIN32
+#    define FBX_EXPORT(name) __declspec(dllexport)
+#  else
+#    define FBX_EXPORT(name)
+#  endif
+#else
+#  define FBX_EXPORT(name) __attribute__((export_name(name)))
+#endif
+
 #ifdef FBX_NATIVE
 #include <stdlib.h>
 static void *heap_base_ptr = NULL;
@@ -92,7 +105,10 @@ static void mem_copy(void *dst, const void *src, u32 n) {
     while (n--) *d++ = *s++;
 }
 
-/* clang may lower struct assignments and loops to these. */
+/* clang may lower struct assignments and loops to these. Freestanding there is
+ * nothing to call, so they are defined here; a native build gets them from the
+ * C library, which will not tolerate a second definition. */
+#ifndef FBX_NATIVE
 void *memset(void *dst, int c, unsigned long n) {
     u8 *d = (u8 *)dst;
     while (n--) *d++ = (u8)c;
@@ -103,6 +119,7 @@ void *memcpy(void *dst, const void *src, unsigned long n) {
     mem_copy(dst, src, (u32)n);
     return dst;
 }
+#endif
 
 /* ----------------------------------------------------------------- inflate */
 
@@ -608,7 +625,7 @@ static void read_footer(u32 pos) {
 }
 
 /* Returns 1 on success, 0 when the data is not a binary FBX file. */
-__attribute__((export_name("fbx_parse"))) int fbx_parse(u32 file_off, u32 len) {
+FBX_EXPORT("fbx_parse") int fbx_parse(u32 file_off, u32 len) {
     /* The file buffer already lives in the heap, so the heap is left alone;
      * call fbx_reset() before uploading a new file. */
     g_nodes = NULL;
@@ -652,7 +669,7 @@ __attribute__((export_name("fbx_parse"))) int fbx_parse(u32 file_off, u32 len) {
     return 1;
 }
 
-__attribute__((export_name("fbx_alloc"))) u32 fbx_alloc(u32 n) {
+FBX_EXPORT("fbx_alloc") u32 fbx_alloc(u32 n) {
     if (!heap_ptr) heap_reset();
     void *p = heap_alloc(n);
     return p ? to_off(p) : 0;
@@ -662,12 +679,12 @@ __attribute__((export_name("fbx_alloc"))) u32 fbx_alloc(u32 n) {
  * high-water point and rewind to it once each result has been copied out.
  * Without that, a scene of many parts grows linear memory repeatedly, and each
  * growth copies everything already in it. */
-__attribute__((export_name("fbx_heap_mark"))) u32 fbx_heap_mark(void) {
+FBX_EXPORT("fbx_heap_mark") u32 fbx_heap_mark(void) {
     if (!heap_ptr) heap_reset();
     return heap_ptr;
 }
 
-__attribute__((export_name("fbx_heap_release"))) void fbx_heap_release(u32 mark) {
+FBX_EXPORT("fbx_heap_release") void fbx_heap_release(u32 mark) {
     if (!(mark >= heap_start && mark <= heap_ptr)) return;
     /* Anything above the mark is gone, including the inflate tables if they
      * happened to be allocated there; drop the pointers so they are rebuilt
@@ -677,7 +694,7 @@ __attribute__((export_name("fbx_heap_release"))) void fbx_heap_release(u32 mark)
     heap_ptr = mark;
 }
 
-__attribute__((export_name("fbx_reset"))) void fbx_reset(void) {
+FBX_EXPORT("fbx_reset") void fbx_reset(void) {
     heap_reset();
     huff_scratch_lit = NULL;
     huff_scratch_dist = NULL;
@@ -686,21 +703,21 @@ __attribute__((export_name("fbx_reset"))) void fbx_reset(void) {
     huff_scratch_ready();
 }
 
-__attribute__((export_name("fbx_version"))) u32 fbx_version(void) { return g_version; }
-__attribute__((export_name("fbx_wide"))) int fbx_wide(void) { return g_wide; }
-__attribute__((export_name("fbx_has_footer"))) int fbx_has_footer(void) { return g_has_footer; }
-__attribute__((export_name("fbx_footer_version"))) u32 fbx_footer_version(void) { return g_footer_version; }
-__attribute__((export_name("fbx_node_count"))) u32 fbx_node_count(void) { return g_node_count; }
-__attribute__((export_name("fbx_prop_count"))) u32 fbx_prop_count(void) { return g_prop_count; }
-__attribute__((export_name("fbx_nodes_ptr"))) u32 fbx_nodes_ptr(void) { return to_off(g_nodes); }
-__attribute__((export_name("fbx_props_ptr"))) u32 fbx_props_ptr(void) { return to_off(g_props); }
-__attribute__((export_name("fbx_warning_count"))) u32 fbx_warning_count(void) { return g_warning_count; }
-__attribute__((export_name("fbx_warnings_ptr"))) u32 fbx_warnings_ptr(void) { return to_off(g_warnings); }
-__attribute__((export_name("fbx_node_stride"))) u32 fbx_node_stride(void) { return NODE_STRIDE; }
-__attribute__((export_name("fbx_prop_stride"))) u32 fbx_prop_stride(void) { return PROP_STRIDE; }
+FBX_EXPORT("fbx_version") u32 fbx_version(void) { return g_version; }
+FBX_EXPORT("fbx_wide") int fbx_wide(void) { return g_wide; }
+FBX_EXPORT("fbx_has_footer") int fbx_has_footer(void) { return g_has_footer; }
+FBX_EXPORT("fbx_footer_version") u32 fbx_footer_version(void) { return g_footer_version; }
+FBX_EXPORT("fbx_node_count") u32 fbx_node_count(void) { return g_node_count; }
+FBX_EXPORT("fbx_prop_count") u32 fbx_prop_count(void) { return g_prop_count; }
+FBX_EXPORT("fbx_nodes_ptr") u32 fbx_nodes_ptr(void) { return to_off(g_nodes); }
+FBX_EXPORT("fbx_props_ptr") u32 fbx_props_ptr(void) { return to_off(g_props); }
+FBX_EXPORT("fbx_warning_count") u32 fbx_warning_count(void) { return g_warning_count; }
+FBX_EXPORT("fbx_warnings_ptr") u32 fbx_warnings_ptr(void) { return to_off(g_warnings); }
+FBX_EXPORT("fbx_node_stride") u32 fbx_node_stride(void) { return NODE_STRIDE; }
+FBX_EXPORT("fbx_prop_stride") u32 fbx_prop_stride(void) { return PROP_STRIDE; }
 
 /* Inflate an array payload into a fresh heap block; returns its offset, or 0. */
-__attribute__((export_name("fbx_inflate"))) u32 fbx_inflate(u32 src_off, u32 src_len,
+FBX_EXPORT("fbx_inflate") u32 fbx_inflate(u32 src_off, u32 src_len,
                                                             u32 out_len) {
     u8 *dst = (u8 *)heap_alloc(out_len ? out_len : 1);
     if (!dst) return 0;
@@ -793,7 +810,406 @@ static u32 attribute_slot(u32 mapping, u32 reference, const i32 *index,
     return raw;
 }
 
-__attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off) {
+/* ---------------------------------------------------------- subdivision */
+
+/* Catmull-Clark, for the cages modelling packages ship.
+ *
+ * A subdivision modifier lives in the scene file of the package that made it,
+ * not in the FBX, so what an exporter writes is the control mesh: mostly
+ * quads, and angular where the surface it stands for is smooth. One round
+ * turns every n-sided polygon into n quads, placing
+ *
+ *   a face point at the centroid of each polygon,
+ *   an edge point between the two ends of an edge and the faces beside it,
+ *   and each original vertex where its neighbours pull it,
+ *
+ * which is the shape the modelling package would have rendered. Per-corner
+ * data — normals and UVs — is subdivided linearly instead, so seams and hard
+ * edges stay exactly where the file put them.
+ */
+
+typedef struct {
+    u32 pos_off, pos_count;         /* f64 triples */
+    u32 idx_off, idx_count;         /* i32 polygon vertex indices */
+    u32 nrm_off, nrm_count;
+    u32 nrm_index_off, nrm_index_count;
+    u32 nrm_mapping, nrm_reference;
+    u32 uv_off, uv_count;
+    u32 uv_index_off, uv_index_count;
+    u32 uv_mapping, uv_reference;
+    u32 mat_off, mat_count;         /* i32, one per polygon or one overall */
+    u32 levels;
+} SubdivParams;
+
+typedef struct {
+    u32 pos_off, pos_count;         /* f64 triples */
+    u32 idx_off, idx_count;         /* i32, quads, last index of each negated */
+    u32 nrm_off, nrm_count;         /* f64 triples, one per corner */
+    u32 uv_off, uv_count;           /* f64 pairs, one per corner */
+    u32 mat_off, mat_count;         /* i32, one per polygon */
+    u32 polygon_count;
+    u32 levels_done;
+} SubdivOut;
+
+/* One edge of the cage, and where its edge point ended up. */
+typedef struct {
+    u32 v0, v1;                     /* endpoints, low first */
+    u32 faces;                      /* how many polygons share it */
+    f64 face_sum[3];                /* their face points, summed */
+} Edge;
+
+static u32 round_up_pow2(u32 n) {
+    u32 p = 16;
+    while (p < n && p < (1u << 30)) p <<= 1;
+    return p;
+}
+
+/* Open addressing: edges are looked up once per corner, twice over. */
+static u32 edge_slot(const Edge *edges, u32 *table, u32 mask, u32 a, u32 b) {
+    u32 lo = a < b ? a : b, hi = a < b ? b : a;
+    u32 hash = (lo * 2654435761u) ^ (hi * 2246822519u);
+    u32 at = hash & mask;
+    for (;;) {
+        u32 slot = table[at];
+        if (slot == 0xffffffffu) return at;
+        if (edges[slot].v0 == lo && edges[slot].v1 == hi) return at;
+        at = (at + 1) & mask;
+    }
+}
+
+/* Everything one round needs, allocated once and handed on to the next. */
+typedef struct {
+    f64 *positions;
+    u32 vertex_count;
+    i32 *indices;
+    u32 corner_count;
+    f64 *normals;                   /* per corner, or NULL */
+    f64 *uvs;                       /* per corner, or NULL */
+    i32 *materials;                 /* per polygon */
+    u32 polygon_count;
+} Cage;
+
+static int subdivide_once(const Cage *in, Cage *out) {
+    const u32 nv = in->vertex_count, nc = in->corner_count, np = in->polygon_count;
+    if (!nv || !nc || !np) return 0;
+
+    /* Where each polygon's corners start, so faces can be walked twice. */
+    u32 *face_start = (u32 *)heap_alloc((np + 1) * sizeof(u32));
+    f64 *face_point = (f64 *)heap_alloc(np * 3 * sizeof(f64));
+    if (!face_start || !face_point) return 0;
+    mem_zero(face_point, np * 3 * sizeof(f64));
+
+    u32 face = 0, start = 0;
+    for (u32 i = 0; i < nc; i++) {
+        if (in->indices[i] >= 0 && i + 1 != nc) continue;
+        face_start[face] = start;
+        u32 end = i + 1;
+        u32 n = end - start;
+        for (u32 c = start; c < end; c++) {
+            i32 raw = in->indices[c];
+            u32 v = (u32)(raw < 0 ? ~raw : raw);
+            if (v >= nv) return 0;
+            for (u32 k = 0; k < 3; k++) face_point[face * 3 + k] += in->positions[v * 3 + k];
+        }
+        for (u32 k = 0; k < 3; k++) face_point[face * 3 + k] /= (f64)n;
+        start = end;
+        if (++face > np) return 0;
+    }
+    face_start[np] = nc;
+    if (face != np) return 0;
+
+    /* Every corner names an edge to the next corner of its polygon. */
+    u32 capacity = round_up_pow2(nc * 2);
+    u32 mask = capacity - 1;
+    u32 *table = (u32 *)heap_alloc(capacity * sizeof(u32));
+    Edge *edges = (Edge *)heap_alloc(nc * sizeof(Edge));
+    if (!table || !edges) return 0;
+    for (u32 i = 0; i < capacity; i++) table[i] = 0xffffffffu;
+
+    u32 *corner_edge = (u32 *)heap_alloc(nc * sizeof(u32));
+    if (!corner_edge) return 0;
+    u32 edge_count = 0;
+
+    for (u32 f = 0; f < np; f++) {
+        u32 from = face_start[f], to = face_start[f + 1];
+        u32 n = to - from;
+        for (u32 c = 0; c < n; c++) {
+            i32 rawA = in->indices[from + c];
+            i32 rawB = in->indices[from + (c + 1) % n];
+            u32 a = (u32)(rawA < 0 ? ~rawA : rawA);
+            u32 b = (u32)(rawB < 0 ? ~rawB : rawB);
+            u32 at = edge_slot(edges, table, mask, a, b);
+            u32 slot = table[at];
+            if (slot == 0xffffffffu) {
+                slot = edge_count++;
+                table[at] = slot;
+                edges[slot].v0 = a < b ? a : b;
+                edges[slot].v1 = a < b ? b : a;
+                edges[slot].faces = 0;
+                for (u32 k = 0; k < 3; k++) edges[slot].face_sum[k] = 0.0;
+            }
+            edges[slot].faces++;
+            for (u32 k = 0; k < 3; k++) edges[slot].face_sum[k] += face_point[f * 3 + k];
+            corner_edge[from + c] = slot;
+        }
+    }
+
+    /* Edge points, and what each vertex is pulled towards. */
+    f64 *edge_point = (f64 *)heap_alloc(edge_count * 3 * sizeof(f64));
+    f64 *vertex_out = (f64 *)heap_alloc(nv * 3 * sizeof(f64));
+    f64 *edge_sum = (f64 *)heap_alloc(nv * 3 * sizeof(f64));
+    f64 *face_sum = (f64 *)heap_alloc(nv * 3 * sizeof(f64));
+    f64 *border_sum = (f64 *)heap_alloc(nv * 3 * sizeof(f64));
+    u32 *valence = (u32 *)heap_alloc(nv * sizeof(u32));
+    u32 *border = (u32 *)heap_alloc(nv * sizeof(u32));
+    if (!edge_point || !vertex_out || !edge_sum || !face_sum || !border_sum
+        || !valence || !border) return 0;
+    mem_zero(edge_sum, nv * 3 * sizeof(f64));
+    mem_zero(face_sum, nv * 3 * sizeof(f64));
+    mem_zero(border_sum, nv * 3 * sizeof(f64));
+    mem_zero(valence, nv * sizeof(u32));
+    mem_zero(border, nv * sizeof(u32));
+
+    for (u32 e = 0; e < edge_count; e++) {
+        const u32 a = edges[e].v0, b = edges[e].v1;
+        for (u32 k = 0; k < 3; k++) {
+            f64 pa = in->positions[a * 3 + k], pb = in->positions[b * 3 + k];
+            f64 mid = (pa + pb) * 0.5;
+            /* An edge with one polygon beside it is a border: its point is the
+             * midpoint, and its ends are held near the border rather than
+             * pulled inwards. */
+            edge_point[e * 3 + k] = edges[e].faces < 2
+                ? mid
+                : (pa + pb + (edges[e].face_sum[k] / (f64)edges[e].faces) * 2.0) * 0.25;
+            edge_sum[a * 3 + k] += mid;
+            edge_sum[b * 3 + k] += mid;
+            if (edges[e].faces < 2) {
+                border_sum[a * 3 + k] += pb;
+                border_sum[b * 3 + k] += pa;
+            }
+        }
+        valence[a]++;
+        valence[b]++;
+        if (edges[e].faces < 2) {
+            border[a]++;
+            border[b]++;
+        }
+    }
+
+    for (u32 f = 0; f < np; f++) {
+        for (u32 c = face_start[f]; c < face_start[f + 1]; c++) {
+            i32 raw = in->indices[c];
+            u32 v = (u32)(raw < 0 ? ~raw : raw);
+            for (u32 k = 0; k < 3; k++) face_sum[v * 3 + k] += face_point[f * 3 + k];
+        }
+    }
+
+    for (u32 v = 0; v < nv; v++) {
+        u32 n = valence[v];
+        for (u32 k = 0; k < 3; k++) {
+            f64 p = in->positions[v * 3 + k];
+            if (!n) {
+                vertex_out[v * 3 + k] = p;                       /* loose vertex */
+            } else if (border[v] >= 2) {
+                /* Along a border the surface follows the border curve alone. */
+                vertex_out[v * 3 + k] = (p * 6.0 + border_sum[v * 3 + k]) / 8.0;
+            } else {
+                f64 f_avg = face_sum[v * 3 + k] / (f64)n;
+                f64 r_avg = edge_sum[v * 3 + k] / (f64)n;
+                vertex_out[v * 3 + k] = (f_avg + r_avg * 2.0 + p * (f64)(n - 3)) / (f64)n;
+            }
+        }
+    }
+
+    /* Lay the new mesh out: original vertices, then edge points, then face
+     * points, so an index says which it is. */
+    u32 out_vertices = nv + edge_count + np;
+    u32 out_polygons = nc;                       /* one quad per corner */
+    u32 out_corners = out_polygons * 4;
+    f64 *positions = (f64 *)heap_alloc(out_vertices * 3 * sizeof(f64));
+    i32 *indices = (i32 *)heap_alloc(out_corners * sizeof(i32));
+    i32 *materials = (i32 *)heap_alloc(out_polygons * sizeof(i32));
+    f64 *normals = in->normals ? (f64 *)heap_alloc(out_corners * 3 * sizeof(f64)) : NULL;
+    f64 *uvs = in->uvs ? (f64 *)heap_alloc(out_corners * 2 * sizeof(f64)) : NULL;
+    if (!positions || !indices || !materials) return 0;
+    if ((in->normals && !normals) || (in->uvs && !uvs)) return 0;
+
+    for (u32 i = 0; i < nv * 3; i++) positions[i] = vertex_out[i];
+    for (u32 i = 0; i < edge_count * 3; i++) positions[nv * 3 + i] = edge_point[i];
+    for (u32 i = 0; i < np * 3; i++) positions[(nv + edge_count) * 3 + i] = face_point[i];
+
+    u32 write = 0, quad = 0;
+    for (u32 f = 0; f < np; f++) {
+        u32 from = face_start[f], n = face_start[f + 1] - from;
+        u32 face_index = nv + edge_count + f;
+        i32 material = in->materials ? in->materials[f] : 0;
+
+        /* The face's own averages, for the corner that lands at its centre. */
+        f64 mid_normal[3] = {0.0, 0.0, 0.0};
+        f64 mid_uv[2] = {0.0, 0.0};
+        if (normals) {
+            for (u32 c = 0; c < n; c++) {
+                for (u32 k = 0; k < 3; k++) mid_normal[k] += in->normals[(from + c) * 3 + k];
+            }
+            for (u32 k = 0; k < 3; k++) mid_normal[k] /= (f64)n;
+        }
+        if (uvs) {
+            for (u32 c = 0; c < n; c++) {
+                for (u32 k = 0; k < 2; k++) mid_uv[k] += in->uvs[(from + c) * 2 + k];
+            }
+            for (u32 k = 0; k < 2; k++) mid_uv[k] /= (f64)n;
+        }
+
+        for (u32 c = 0; c < n; c++) {
+            u32 previous = (c + n - 1) % n;
+            i32 raw = in->indices[from + c];
+            u32 v = (u32)(raw < 0 ? ~raw : raw);
+            u32 next_edge = nv + corner_edge[from + c];
+            u32 prev_edge = nv + corner_edge[from + previous];
+
+            indices[write + 0] = (i32)v;
+            indices[write + 1] = (i32)next_edge;
+            indices[write + 2] = (i32)face_index;
+            indices[write + 3] = ~(i32)prev_edge;      /* FBX ends a polygon so */
+
+            if (normals) {
+                const f64 *a = &in->normals[(from + c) * 3];
+                const f64 *b = &in->normals[(from + (c + 1) % n) * 3];
+                const f64 *d = &in->normals[(from + previous) * 3];
+                for (u32 k = 0; k < 3; k++) {
+                    normals[(write + 0) * 3 + k] = a[k];
+                    normals[(write + 1) * 3 + k] = (a[k] + b[k]) * 0.5;
+                    normals[(write + 2) * 3 + k] = mid_normal[k];
+                    normals[(write + 3) * 3 + k] = (d[k] + a[k]) * 0.5;
+                }
+            }
+            if (uvs) {
+                const f64 *a = &in->uvs[(from + c) * 2];
+                const f64 *b = &in->uvs[(from + (c + 1) % n) * 2];
+                const f64 *d = &in->uvs[(from + previous) * 2];
+                for (u32 k = 0; k < 2; k++) {
+                    uvs[(write + 0) * 2 + k] = a[k];
+                    uvs[(write + 1) * 2 + k] = (a[k] + b[k]) * 0.5;
+                    uvs[(write + 2) * 2 + k] = mid_uv[k];
+                    uvs[(write + 3) * 2 + k] = (d[k] + a[k]) * 0.5;
+                }
+            }
+            materials[quad++] = material;
+            write += 4;
+        }
+    }
+
+    out->positions = positions;
+    out->vertex_count = out_vertices;
+    out->indices = indices;
+    out->corner_count = out_corners;
+    out->normals = normals;
+    out->uvs = uvs;
+    out->materials = materials;
+    out->polygon_count = out_polygons;
+    return 1;
+}
+
+/** Subdivide a mesh, and hand back one shaped like the mesh builder wants. */
+FBX_EXPORT("fbx_subdivide") u32 fbx_subdivide(u32 params_off) {
+    const SubdivParams *p = (const SubdivParams *)at_off(params_off);
+    SubdivOut *out = (SubdivOut *)heap_alloc(sizeof(SubdivOut));
+    if (!out) return 0;
+    mem_zero(out, sizeof(SubdivOut));
+
+    Cage cage;
+    cage.positions = (f64 *)at_off(p->pos_off);
+    cage.vertex_count = p->pos_count / 3;
+    cage.indices = (i32 *)at_off(p->idx_off);
+    cage.corner_count = p->idx_count;
+    cage.normals = NULL;
+    cage.uvs = NULL;
+    cage.materials = NULL;
+
+    u32 polygons = 0, run = 0;
+    for (u32 i = 0; i < cage.corner_count; i++) {
+        run++;
+        if (cage.indices[i] < 0) { polygons++; run = 0; }
+    }
+    if (run) polygons++;                       /* a polygon with no terminator */
+    cage.polygon_count = polygons;
+    if (!polygons || !cage.vertex_count) return to_off(out);
+
+    /* Attributes are read however the file mapped them and written out per
+     * corner, which is the only shape the subdivided mesh keeps. */
+    const f64 *src_normals = p->nrm_off ? (const f64 *)at_off(p->nrm_off) : NULL;
+    const i32 *nrm_index = p->nrm_index_off ? (const i32 *)at_off(p->nrm_index_off) : NULL;
+    const f64 *src_uvs = p->uv_off ? (const f64 *)at_off(p->uv_off) : NULL;
+    const i32 *uv_index = p->uv_index_off ? (const i32 *)at_off(p->uv_index_off) : NULL;
+    const i32 *src_materials = p->mat_off ? (const i32 *)at_off(p->mat_off) : NULL;
+
+    if (src_normals && p->nrm_mapping != MAP_NONE) {
+        cage.normals = (f64 *)heap_alloc(cage.corner_count * 3 * sizeof(f64));
+        if (!cage.normals) return 0;
+        mem_zero(cage.normals, cage.corner_count * 3 * sizeof(f64));
+    }
+    if (src_uvs && p->uv_mapping != MAP_NONE) {
+        cage.uvs = (f64 *)heap_alloc(cage.corner_count * 2 * sizeof(f64));
+        if (!cage.uvs) return 0;
+        mem_zero(cage.uvs, cage.corner_count * 2 * sizeof(f64));
+    }
+    cage.materials = (i32 *)heap_alloc(polygons * sizeof(i32));
+    if (!cage.materials) return 0;
+
+    u32 poly = 0;
+    for (u32 c = 0; c < cage.corner_count; c++) {
+        i32 raw = cage.indices[c];
+        u32 v = (u32)(raw < 0 ? ~raw : raw);
+        if (cage.normals) {
+            u32 slot = attribute_slot(p->nrm_mapping, p->nrm_reference, nrm_index,
+                                      p->nrm_index_count, c, v);
+            if (slot != 0xffffffffu && slot * 3 + 2 < p->nrm_count) {
+                for (u32 k = 0; k < 3; k++) cage.normals[c * 3 + k] = src_normals[slot * 3 + k];
+            }
+        }
+        if (cage.uvs) {
+            u32 slot = attribute_slot(p->uv_mapping, p->uv_reference, uv_index,
+                                      p->uv_index_count, c, v);
+            if (slot != 0xffffffffu && slot * 2 + 1 < p->uv_count) {
+                for (u32 k = 0; k < 2; k++) cage.uvs[c * 2 + k] = src_uvs[slot * 2 + k];
+            }
+        }
+        if (raw < 0) {
+            /* One material per polygon: AllSame files write a single value. */
+            i32 value = 0;
+            if (src_materials && p->mat_count) {
+                value = src_materials[p->mat_count == 1 ? 0
+                    : (poly < p->mat_count ? poly : p->mat_count - 1)];
+            }
+            if (poly < polygons) cage.materials[poly] = value;
+            poly++;
+        }
+    }
+    while (poly < polygons) cage.materials[poly++] = 0;
+
+    u32 levels = p->levels > 4 ? 4 : p->levels;
+    for (u32 level = 0; level < levels; level++) {
+        Cage next;
+        if (!subdivide_once(&cage, &next)) return 0;
+        cage = next;
+        out->levels_done++;
+    }
+
+    out->pos_off = to_off(cage.positions);
+    out->pos_count = cage.vertex_count * 3;
+    out->idx_off = to_off(cage.indices);
+    out->idx_count = cage.corner_count;
+    out->nrm_off = cage.normals ? to_off(cage.normals) : 0;
+    out->nrm_count = cage.normals ? cage.corner_count * 3 : 0;
+    out->uv_off = cage.uvs ? to_off(cage.uvs) : 0;
+    out->uv_count = cage.uvs ? cage.corner_count * 2 : 0;
+    out->mat_off = to_off(cage.materials);
+    out->mat_count = cage.polygon_count;
+    out->polygon_count = cage.polygon_count;
+    return to_off(out);
+}
+
+FBX_EXPORT("fbx_build_mesh") u32 fbx_build_mesh(u32 params_off) {
     const MeshParams *p = (const MeshParams *)at_off(params_off);
     const f64 *positions = (const f64 *)at_off(p->pos_off);
     const i32 *indices = (const i32 *)at_off(p->idx_off);
@@ -977,21 +1393,21 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off
 
 #ifdef FBX_NATIVE
 /* Test-harness entry points, compiled only for the native build. */
-i32 test_inflate_zlib(const u8 *src, u32 src_len, u8 *dst, u32 cap) {
+FBX_EXPORT(0) i32 test_inflate_zlib(const u8 *src, u32 src_len, u8 *dst, u32 cap) {
     if (!heap_ptr) heap_reset();
     huff_scratch_lit = NULL;
     huff_scratch_dist = NULL;
     return inflate_zlib(src, src_len, dst, cap);
 }
 
-i32 test_inflate_raw(const u8 *src, u32 src_len, u8 *dst, u32 cap) {
+FBX_EXPORT(0) i32 test_inflate_raw(const u8 *src, u32 src_len, u8 *dst, u32 cap) {
     if (!heap_ptr) heap_reset();
     huff_scratch_lit = NULL;
     huff_scratch_dist = NULL;
     return inflate_raw(src, src_len, dst, cap);
 }
 
-void *test_heap_base(void) {
+FBX_EXPORT(0) void *test_heap_base(void) {
     if (!heap_ptr) heap_reset();
     return heap_base_ptr;
 }

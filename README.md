@@ -269,6 +269,37 @@ by several models — four wheels from one wheel — is drawn once per model.
 instanced by a chain of three models, the last of them mirrored. Any single
 record can still be picked from the dropdown to see it on its own.
 
+### Smoothing a cage
+
+A model can look faceted not because the viewer is dropping detail but because
+the file holds a **control mesh**: the subdivision modifier lives in the
+modelling package's own scene file, and what the FBX exporter writes is the
+cage it was applied to. The same model exported to OBJ often has the modifier
+baked in, which is why one looks smooth and the other angular — a Smart Brabus
+that prompted this carries 217,930 vertices in its FBX and 1,912,893 in its
+OBJ, across the same 164 objects.
+
+**Smooth ×1** and **×2** run Catmull-Clark over the polygons, before anything
+is triangulated:
+
+```
+a face point at the centroid of each polygon,
+an edge point between the two ends of an edge and the faces beside it,
+each original vertex moved to where its neighbours pull it,
+and every n-sided polygon replaced by n quads.
+```
+
+An open border is smoothed as a curve on its own, so two meshes that share an
+edge do not part company. Normals and UVs are subdivided linearly rather than
+smoothed, which keeps hard edges and texture seams exactly where the file put
+them; materials follow the polygon they came from.
+
+Each round turns every corner into a quad, so the triangle count comes to
+twice the corners that went in — quads quadruple, triangles sextuple. The
+Smart's 383,811 triangles become 1,619,562 in about 350 ms. Level 2 multiplies
+again and can run out of memory on a large mesh; a part that will not fit is
+drawn as it came rather than dropped, and the viewport says how many.
+
 ### Materials and textures
 
 Surfaces are drawn in the file's own `DiffuseColor`, falling back to the
@@ -607,6 +638,8 @@ node web/test/transparency.js glass.fbx       # reads pixels through glass
 node web/test/materials.js samples/scene_parts.fbx   # the material list
 node web/test/ground.js samples/scene_parts.fbx      # the floor and its shadow
 node web/test/gltf.js samples/cube_textured.fbx      # export, then validate it
+node web/test/subdivide.js model.fbx                 # smoothing through the module
+node web/test/smoothing.js samples/cube_binary.fbx samples/scene_parts.fbx
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 ```
 

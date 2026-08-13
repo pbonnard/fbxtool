@@ -13,6 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { chromium } = require('playwright');
+const { launch } = require('./chromium');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PAGE = path.join(ROOT, 'web', 'dist', 'fbxview.html');
@@ -59,10 +60,7 @@ async function main() {
   const notAModel = path.join(scratch, 'notes.txt');
   fs.writeFileSync(notAModel, 'this is not a model at all\n');
 
-  const browser = await chromium.launch({
-    executablePath: process.env.CHROMIUM_PATH || undefined,
-    args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
-  });
+  const browser = await launch(chromium);
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(String(error)));

@@ -1,9 +1,10 @@
 """Tests for the C core that becomes the WASM module.
 
-The same source is compiled natively as a shared library so its DEFLATE
-decoder can be checked against Python's zlib, and its mesh builder against a
-reference implementation written here.  ``tests/test_web.py`` then exercises
-the compiled ``.wasm`` in Node and the page in a browser.
+The same source is compiled natively as a shared library — the ``lib`` fixture
+in ``conftest.py`` — so its DEFLATE decoder can be checked against Python's
+zlib, and its mesh builder against a reference implementation written here.
+``tests/test_web.py`` then exercises the compiled ``.wasm`` in Node and the
+page in a browser.
 """
 
 from __future__ import annotations
@@ -11,40 +12,12 @@ from __future__ import annotations
 import ctypes
 import random
 import struct
-import subprocess
 import zlib
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "web" / "src" / "fbx.c"
-LIBRARY = ROOT / "web" / "build" / "libfbx.so"
-
-
-@pytest.fixture(scope="session")
-def lib():
-    """Compile the C core natively and load it."""
-    if not SOURCE.exists():  # pragma: no cover - the source is checked in
-        pytest.skip("web/src/fbx.c is missing")
-    LIBRARY.parent.mkdir(parents=True, exist_ok=True)
-    if not LIBRARY.exists() or SOURCE.stat().st_mtime > LIBRARY.stat().st_mtime:
-        result = subprocess.run(
-            ["clang", "-DFBX_NATIVE", "-O2", "-fPIC", "-shared",
-             "-Wno-unknown-attributes", "-o", str(LIBRARY), str(SOURCE)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            pytest.fail(f"could not build the native test library:\n{result.stderr}")
-
-    handle = ctypes.CDLL(str(LIBRARY))
-    handle.test_inflate_zlib.restype = ctypes.c_int32
-    handle.test_inflate_zlib.argtypes = [
-        ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32
-    ]
-    handle.test_inflate_raw.restype = ctypes.c_int32
-    handle.test_inflate_raw.argtypes = handle.test_inflate_zlib.argtypes
-    return handle
 
 
 def inflate(lib, compressed: bytes, expected_len: int, raw: bool = False) -> bytes:
