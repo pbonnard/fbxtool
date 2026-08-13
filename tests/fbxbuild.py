@@ -486,6 +486,106 @@ def build_glass(version: int = 7400, *, deflate: bool = True) -> bytes:
 
 
 # --------------------------------------------------------------------------
+# legacy 6.x fixture
+
+
+#: The 6.x scene: two cubes, the second moved 5 along x and scaled by two, so
+#: the pair spans -1..7 across and ±2 the other ways.
+LEGACY_SIZE = (8.0, 4.0, 4.0)
+LEGACY_PARTS = 2
+LEGACY_TRIANGLES = 24
+LEGACY_DIFFUSE = (0.1, 0.45, 0.8)
+
+
+def legacy_nodes(version: int = 6100) -> list[N]:
+    """A scene written the way FBX 6.x wrote them.
+
+    Three things differ from 7.x and every one of them has to be handled:
+    objects are addressed by name rather than by UID, the mesh lives on the
+    Model instead of in its own Geometry record, and the numbers are written
+    one property at a time rather than as arrays.
+    """
+    def scalars(name: str, code: str, values) -> N:
+        return N(name, [Prop(code, v) for v in values])
+
+    def p60(name: str, type_name: str, *values) -> N:
+        # 6.x names these records "Property" and writes three strings before
+        # the value, where 7.x writes "P" and four.
+        return N("Property", [S(name), S(type_name), S("")] + list(values))
+
+    def model(label: str, translation, scale) -> N:
+        return N("Model", [S(f"{label}\x00\x01Model"), S("Mesh")], [
+            N("Version", [I(232)]),
+            N("Properties60", [], [
+                p60("RotationOrder", "enum", I(0)),
+                p60("Lcl Translation", "Lcl Translation", *[D(v) for v in translation]),
+                p60("Lcl Rotation", "Lcl Rotation", D(0.0), D(0.0), D(0.0)),
+                p60("Lcl Scaling", "Lcl Scaling", *[D(v) for v in scale]),
+            ]),
+            N("MultiLayer", [I(0)]),
+            N("Shading", [C(True)]),
+            N("Culling", [S("CullingOff")]),
+            scalars("Vertices", "D", CUBE_VERTICES),
+            scalars("PolygonVertexIndex", "I", CUBE_POLYGONS),
+            N("GeometryVersion", [I(124)]),
+            N("LayerElementMaterial", [I(0)], [
+                N("Version", [I(101)]),
+                N("Name", [S("")]),
+                N("MappingInformationType", [S("AllSame")]),
+                N("ReferenceInformationType", [S("IndexToDirect")]),
+                scalars("Materials", "I", [0]),
+            ]),
+            N("Layer", [I(0)], [N("Version", [I(100)])]),
+        ])
+
+    objects = N("Objects", [], [
+        model("partA", (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+        model("partB", (5.0, 0.0, 0.0), (2.0, 2.0, 2.0)),
+        N("Material", [S("paint\x00\x01Material"), S("")], [
+            N("Version", [I(102)]),
+            N("ShadingModel", [S("phong")]),
+            N("MultiLayer", [I(0)]),
+            N("Properties60", [], [
+                p60("ShadingModel", "KString", S("phong")),
+                p60("DiffuseColor", "ColorRGB", *[D(v) for v in LEGACY_DIFFUSE]),
+                p60("SpecularColor", "ColorRGB", D(0.1), D(0.1), D(0.1)),
+                p60("ShininessExponent", "double", D(40.0)),
+            ]),
+        ]),
+    ])
+
+    connections = N("Connections", [], [
+        N("Connect", [S("OO"), S("partA\x00\x01Model"), S("Scene\x00\x01Model")]),
+        N("Connect", [S("OO"), S("partB\x00\x01Model"), S("Scene\x00\x01Model")]),
+        N("Connect", [S("OO"), S("paint\x00\x01Material"), S("partA\x00\x01Model")]),
+        N("Connect", [S("OO"), S("paint\x00\x01Material"), S("partB\x00\x01Model")]),
+    ])
+
+    return [
+        N("FBXHeaderExtension", [], [
+            N("FBXHeaderExtensionVersion", [I(1003)]),
+            N("FBXVersion", [I(version)]),
+            N("Creator", [S("fbxtool test fixture")]),
+        ]),
+        N("Creator", [S("fbxtool test fixture")]),
+        N("Definitions", [], [
+            N("Version", [I(100)]),
+            N("Count", [I(3)]),
+            N("ObjectType", [S("Model")], [N("Count", [I(2)])]),
+            N("ObjectType", [S("Material")], [N("Count", [I(1)])]),
+        ]),
+        objects,
+        connections,
+        N("Version5", [], [N("AmbientRenderSettings", [], [])]),
+    ]
+
+
+def build_legacy(version: int = 6100) -> bytes:
+    """A complete binary FBX file in the 6.x layout."""
+    return build_binary(legacy_nodes(version), version=version)
+
+
+# --------------------------------------------------------------------------
 # textured fixtures
 
 

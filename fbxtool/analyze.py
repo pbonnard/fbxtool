@@ -21,6 +21,7 @@ __all__ = [
     "SceneNode",
     "analyze",
     "property_templates",
+    "scalar_values",
     "resolved_properties",
     "split_object_name",
 ]
@@ -249,7 +250,8 @@ def _properties(node: Node | None) -> dict[str, Any]:
         if not values or not isinstance(values[0], str):
             continue
         key = values[0]
-        # 7.x: name, type, subtype, flags, value...   6.x: name, type, flags, value...
+        # 7.x writes P: name, type, subtype, flags, value...
+        # 6.x writes Property: name, type, flags, value...
         payload = values[4:] if entry.name == "P" else values[3:]
         if not payload:
             payload = values[1:]
@@ -442,11 +444,31 @@ def _describe_object(entry: Node, obj: SceneObject) -> str:
     return ""
 
 
-def _array_length(node: Node | None) -> int | None:
-    """Element count of an array record, in either encoding.
+def scalar_values(node: Node | None) -> list[float] | None:
+    """The numbers a record holds one property at a time.
 
-    Binary files store the array directly on the record; ASCII files write the
-    count as ``*N`` and put the values in a nested ``a:`` record.
+    FBX 6.x writes vertices, polygon indices and layer data as long runs of
+    single typed properties rather than as one array. Returns ``None`` when the
+    record carries a real array, which callers should read directly.
+    """
+    if node is None or not node.props:
+        return None
+    out: list[float] = []
+    for prop in node.props:
+        if prop.array is not None:
+            return None
+        if not isinstance(prop.value, (int, float)) or isinstance(prop.value, bool):
+            return None
+        out.append(prop.value)
+    return out
+
+
+def _array_length(node: Node | None) -> int | None:
+    """Element count of an array record, in any layout.
+
+    Binary 7.x files store the array directly on the record; ASCII files write
+    the count as ``*N`` and put the values in a nested ``a:`` record; 6.x files
+    write one property per number.
     """
     if node is None:
         return None
@@ -458,7 +480,8 @@ def _array_length(node: Node | None) -> int | None:
     values = node.get("a")
     if values is not None and values.props and values.props[0].array is not None:
         return values.props[0].array.length
-    return None
+    scalars = scalar_values(node)
+    return len(scalars) if scalars else None
 
 
 def _describe_mesh(entry: Node) -> str:

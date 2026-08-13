@@ -372,3 +372,60 @@ def test_glass_fixture_marks_one_material_see_through():
     assert looks["paint"].get("Opacity") is None
     assert looks["glass"]["Opacity"] == pytest.approx(fb.GLASS_OPACITY)
     assert looks["glass"]["TransparencyFactor"] == pytest.approx(1 - fb.GLASS_OPACITY)
+
+
+# ------------------------------------------------------------------ 6.x files
+
+
+def test_legacy_layout_is_read():
+    """FBX 6.x: names instead of UIDs, meshes on the model, scalar runs."""
+    from fbxtool.analyze import scalar_values
+
+    info = analyze(parse_bytes(fb.build_legacy()))
+    assert info.doc.version == 6100
+    assert info.doc.warnings == []
+    assert info.version.legacy_layout is True
+
+    # Objects are addressed by name; there are no UIDs at all.
+    assert [o.uid for o in info.objects] == [None, None, None]
+    assert {o.name for o in info.objects} == {"partA", "partB", "paint"}
+
+    # The mesh sits on the Model, and its numbers are one property each.
+    model = next(o for o in info.objects if o.name == "partB")
+    assert model.node.get("Vertices").props[0].array is None
+    assert len(scalar_values(model.node.get("Vertices"))) == len(fb.CUBE_VERTICES)
+    assert "8 vertices" in model.detail
+
+    # Connections carry names, with the class after the separator.
+    kinds = {(c.kind, c.src, c.dst) for c in info.connections}
+    assert ("OO", "paint\x00\x01Material", "partA\x00\x01Model") in kinds
+
+
+def test_legacy_properties_use_the_older_layout():
+    """A 6.x Property record writes one fewer string before its value."""
+    from fbxtool.analyze import _properties
+
+    info = analyze(parse_bytes(fb.build_legacy()))
+    model = next(o for o in info.objects if o.name == "partB")
+    props = _properties(model.node)
+    assert props["Lcl Translation"] == [5.0, 0.0, 0.0]
+    assert props["Lcl Scaling"] == [2.0, 2.0, 2.0]
+
+    material = next(o for o in info.objects if o.node_type == "Material")
+    assert _properties(material.node)["DiffuseColor"] == list(fb.LEGACY_DIFFUSE)
+    assert _properties(material.node)["ShininessExponent"] == 40.0
+
+
+def test_scalar_values_only_reads_runs_of_numbers():
+    from fbxtool.analyze import scalar_values
+    from fbxtool.model import Node, Property
+
+    assert scalar_values(None) is None
+    assert scalar_values(Node(name="Empty")) is None
+    assert scalar_values(Node(name="Mixed", props=[Property("D", 1.0),
+                                                   Property("S", "no")])) is None
+    assert scalar_values(Node(name="Run", props=[Property("D", 1.5),
+                                                 Property("I", 2)])) == [1.5, 2]
+    # A real array is left to the caller to read the fast way.
+    doc = parse_bytes(fb.build_cube())
+    assert scalar_values(doc.root.path("Objects", "Geometry", "Vertices")) is None

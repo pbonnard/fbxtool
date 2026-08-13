@@ -89,9 +89,31 @@ const FbxAnalyze = (function () {
       if (entry.name !== 'P' && entry.name !== 'Property') continue;
       const values = entry.props.map((p) => p.value);
       if (!values.length || typeof values[0] !== 'string') continue;
+      // 7.x writes P: name, type, subtype, flags, value...
+      // 6.x writes Property: name, type, flags, value...
       let payload = entry.name === 'P' ? values.slice(4) : values.slice(3);
       if (!payload.length) payload = values.slice(1);
       out[values[0]] = payload.length === 1 ? payload[0] : payload;
+    }
+    return out;
+  }
+
+  /**
+   * The numbers a record holds when they are written one property at a time
+   * rather than as a single array — which is how FBX 6.x stores vertices,
+   * polygon indices and layer data. Returns null when the record carries an
+   * array instead, which the caller should read the fast way.
+   */
+  function scalarValues(node) {
+    if (!node || !node.props.length) return null;
+    const out = new Array(node.props.length);
+    for (let i = 0; i < node.props.length; i++) {
+      const prop = node.props[i];
+      if (prop.array) return null;
+      const value = prop.value;
+      if (typeof value === 'number') out[i] = value;
+      else if (typeof value === 'bigint') out[i] = Number(value);
+      else return null;
     }
     return out;
   }
@@ -104,7 +126,9 @@ const FbxAnalyze = (function () {
     }
     const values = child(node, 'a');
     if (values && values.props[0] && values.props[0].array) return values.props[0].array.length;
-    return null;
+    // A run of scalars is still a list of numbers, and 6.x files are full of them.
+    const scalars = scalarValues(node);
+    return scalars ? scalars.length : null;
   }
 
   function countRecords(node) {
@@ -568,7 +592,7 @@ const FbxAnalyze = (function () {
   }
 
   return {
-    analyze, describeVersion, splitObjectName, properties, arrayLength,
+    analyze, describeVersion, splitObjectName, properties, arrayLength, scalarValues,
     child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
     propertyTemplates, resolvedProperties, materialAppearance,
   };

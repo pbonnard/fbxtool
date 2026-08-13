@@ -226,6 +226,27 @@ disagrees with the declared `UpAxis`, which happens in practice: a model
 resting on a ground plane has its minimum at zero along the up axis. The
 choice is shown, and can be overridden.
 
+### Legacy 6.x files
+
+FBX 6.x — anything the SDK still writes as version 6100, and plenty of models
+in the wild — is not a slightly older 7.x. Three things differ, and the viewer
+handles all three:
+
+| | 7.x | 6.x |
+| --- | --- | --- |
+| objects are addressed by | UID | name, with the class after a separator |
+| the mesh lives in | its own `Geometry` record | the `Model` itself |
+| numbers are written as | one array property | one property each |
+
+That last one is why such a file can parse cleanly, report its 31,280 records
+and its whole object table, and still draw nothing: `Vertices` is not an array
+at all, it is 700 separate doubles in a row. Records are read as either now,
+and a 6.x scene assembles part by part like any other — the Ferrari 250 that
+prompted this is 94 models, 485,888 triangles, addressed entirely by name.
+
+Property blocks differ too: 7.x writes `P` records with four strings before the
+value, 6.x writes `Property` records with three.
+
 ### Whole scenes
 
 A mesh is stored in its model's local space, so a file of many parts is a heap

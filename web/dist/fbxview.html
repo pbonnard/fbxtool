@@ -2251,9 +2251,31 @@ const FbxAnalyze = (function () {
       if (entry.name !== 'P' && entry.name !== 'Property') continue;
       const values = entry.props.map((p) => p.value);
       if (!values.length || typeof values[0] !== 'string') continue;
+      // 7.x writes P: name, type, subtype, flags, value...
+      // 6.x writes Property: name, type, flags, value...
       let payload = entry.name === 'P' ? values.slice(4) : values.slice(3);
       if (!payload.length) payload = values.slice(1);
       out[values[0]] = payload.length === 1 ? payload[0] : payload;
+    }
+    return out;
+  }
+
+  /**
+   * The numbers a record holds when they are written one property at a time
+   * rather than as a single array — which is how FBX 6.x stores vertices,
+   * polygon indices and layer data. Returns null when the record carries an
+   * array instead, which the caller should read the fast way.
+   */
+  function scalarValues(node) {
+    if (!node || !node.props.length) return null;
+    const out = new Array(node.props.length);
+    for (let i = 0; i < node.props.length; i++) {
+      const prop = node.props[i];
+      if (prop.array) return null;
+      const value = prop.value;
+      if (typeof value === 'number') out[i] = value;
+      else if (typeof value === 'bigint') out[i] = Number(value);
+      else return null;
     }
     return out;
   }
@@ -2266,7 +2288,9 @@ const FbxAnalyze = (function () {
     }
     const values = child(node, 'a');
     if (values && values.props[0] && values.props[0].array) return values.props[0].array.length;
-    return null;
+    // A run of scalars is still a list of numbers, and 6.x files are full of them.
+    const scalars = scalarValues(node);
+    return scalars ? scalars.length : null;
   }
 
   function countRecords(node) {
@@ -2730,7 +2754,7 @@ const FbxAnalyze = (function () {
   }
 
   return {
-    analyze, describeVersion, splitObjectName, properties, arrayLength,
+    analyze, describeVersion, splitObjectName, properties, arrayLength, scalarValues,
     child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
     propertyTemplates, resolvedProperties, materialAppearance,
   };
@@ -4855,7 +4879,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     currentPalette = [];
     materialGroups = [];
     sceneParts = [];
-    uidIndex = new Map();
+    objectIndex = emptyIndex();
     missingTextures = [];
 
     dom.panel.innerHTML = placeholders.report;
@@ -4911,8 +4935,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       currentAnalysis = FbxAnalyze.analyze(doc);
       // Whatever was assigned to this file last time it was open.
       materialOverrides = FbxPalette.load(doc.fileName);
-      uidIndex = new Map(currentAnalysis.objects
-        .filter((o) => o.uid !== null).map((o) => [o.uid, o]));
+      objectIndex = buildObjectIndex(currentAnalysis.objects);
 
       dom.panel.innerHTML = FbxReport.render(currentAnalysis);
       dom.tree.innerHTML = FbxReport.recordTree(doc.root);
@@ -4950,55 +4973,68 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   function collectParts() {
     const info = currentAnalysis;
     if (!info) return [];
-    const byUid = new Map(info.objects.filter((o) => o.uid !== null).map((o) => [o.uid, o]));
+    const { keyOf, resolve } = objectIndex;
 
     // Keyed by model, not by geometry: one mesh is often shared by several
     // models — four wheels from one wheel — and each of those is its own part.
-    const parts = new Map();          // model uid -> part
-    for (const conn of info.connections) {
-      if (conn.kind !== 'OO') continue;
-      const geometry = byUid.get(conn.src);
-      const model = byUid.get(conn.dst);
-      if (!geometry || geometry.nodeType !== 'Geometry') continue;
-      if (!model || model.nodeType !== 'Model' || parts.has(model.uid)) continue;
-      parts.set(model.uid, {
+    const parts = new Map();          // model key -> part
+    const add = (model, geometry) => {
+      const key = keyOf(model);
+      if (key === null || parts.has(key)) return;
+      parts.set(key, {
+        key,
         model,
         geometry,
         materials: [],
         parent: null,
         properties: FbxAnalyze.resolvedProperties(model, info.templates),
       });
+    };
+
+    // 7.x keeps the mesh in a Geometry record connected to the Model.
+    for (const conn of info.connections) {
+      if (conn.kind !== 'OO') continue;
+      const geometry = resolve(conn.src);
+      const model = resolve(conn.dst);
+      if (geometry && geometry.nodeType === 'Geometry'
+        && model && model.nodeType === 'Model') add(model, geometry);
+    }
+    // 6.x puts it on the Model itself, so every mesh-bearing model is a part.
+    for (const obj of info.objects) {
+      if (obj.nodeType === 'Model' && FbxAnalyze.child(obj.node, 'Vertices')) add(obj, obj);
     }
 
     for (const conn of info.connections) {
       if (conn.kind !== 'OO') continue;
-      const part = parts.get(conn.dst);
-      const source = byUid.get(conn.src);
+      const source = resolve(conn.src);
+      const target = resolve(conn.dst);
+      const part = target ? parts.get(keyOf(target)) : null;
       if (part && source && source.nodeType === 'Material') part.materials.push(source);
       // Model-to-model parenting, for the transform chain.
-      const child = parts.get(conn.src);
-      if (child && byUid.get(conn.dst) && byUid.get(conn.dst).nodeType === 'Model') {
-        child.parent = conn.dst;
+      const child = source ? parts.get(keyOf(source)) : null;
+      if (child && target && target !== source && target.nodeType === 'Model') {
+        child.parent = keyOf(target);
       }
     }
-    return [...parts.entries()].map(([uid, part]) => ({ uid, ...part }));
+    return [...parts.values()];
   }
 
   /** A part's world matrix, composed up the parent chain. */
-  function worldMatrix(part, byUid, cache) {
-    if (cache.has(part.uid)) return cache.get(part.uid);
+  function worldMatrix(part, byKey, cache) {
+    if (cache.has(part.key)) return cache.get(part.key);
+    // Guard against a cycle in a malformed file: claim the identity first.
+    cache.set(part.key, FbxTransform.identity());
     let matrix = FbxTransform.localMatrix(part.properties);
-    if (part.parent !== null && byUid.has(part.parent)) {
-      const parent = byUid.get(part.parent);
-      matrix = FbxTransform.multiply(worldMatrix(parent, byUid, cache), matrix);
+    if (part.parent !== null && byKey.has(part.parent)) {
+      matrix = FbxTransform.multiply(worldMatrix(byKey.get(part.parent), byKey, cache), matrix);
     }
-    cache.set(part.uid, matrix);
+    cache.set(part.key, matrix);
     return matrix;
   }
 
   /** Build every part, placed in world space, as one combined mesh. */
   function buildScene(parts) {
-    const byUid = new Map(parts.map((p) => [p.uid, p]));
+    const byKey = new Map(parts.map((p) => [p.key, p]));
     const cache = new Map();
     const pieces = [];
     const palette = [];
@@ -5006,7 +5042,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     // Everything a part allocates is scratch once its result is copied out.
     const heapMark = FbxWasm.mark();
     for (const part of parts) {
-      const world = worldMatrix(part, byUid, cache);
+      const world = worldMatrix(part, byKey, cache);
       const geometric = FbxTransform.geometricMatrix(part.properties);
       const placement = geometric ? FbxTransform.multiply(world, geometric) : world;
       const materialBase = palette.length;
@@ -5114,8 +5150,32 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
 
   /* ------------------------------------------------------------- materials */
 
-  /** Objects by UID, rebuilt only when a new file is analysed. */
-  let uidIndex = new Map();
+  /**
+   * How to find an object a connection names, rebuilt with each file.
+   *
+   * FBX 7.x addresses objects by UID and 6.x by name, with the class after a
+   * separator, so connections carry numbers in one and strings in the other.
+   */
+  let objectIndex = emptyIndex();
+
+  function emptyIndex() {
+    return { keyOf: () => null, resolve: () => undefined };
+  }
+
+  function buildObjectIndex(objects) {
+    const byKey = new Map();
+    const keyOf = (obj) => (obj && obj.uid !== null && obj.uid !== undefined
+      ? obj.uid : (obj ? obj.name : null));
+    for (const obj of objects) {
+      const key = keyOf(obj);
+      if (key !== null && key !== '' && !byKey.has(key)) byKey.set(key, obj);
+    }
+    return {
+      keyOf,
+      resolve: (value) => byKey.get(typeof value === 'string'
+        ? FbxAnalyze.splitObjectName(value)[0] : value),
+    };
+  }
 
   /** How many of a palette's materials the file marks as see-through. */
   function seeThrough(palette) {
@@ -5377,7 +5437,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         opacity: look.opacity,
         metallic: typeof props.Metallic === 'number' ? props.Metallic : 0,
       },
-      texture: diffuseTexture(material, uidIndex, currentAnalysis.connections),
+      texture: diffuseTexture(material, objectIndex.resolve, currentAnalysis.connections),
       layer: -1,
     };
   }
@@ -5393,21 +5453,21 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   function materialPalette(entry) {
     const info = currentAnalysis;
     if (!info || !info.connections.length) return [];
-    const byUid = new Map(info.objects.filter((o) => o.uid !== null).map((o) => [o.uid, o]));
-    const uid = entry.props.map((p) => p.value).find((v) => typeof v === 'number');
-    if (uid === undefined) return [];               // legacy 6.x files have no UIDs
+    const { resolve } = objectIndex;
+    let model = info.objects.find((o) => o.node === entry);
+    if (!model) return [];
 
     // A Model may hold its own geometry; otherwise walk Geometry -> Model.
-    let modelUid = uid;
-    if (entry.name !== 'Model') {
-      const link = info.connections.find((c) => c.kind === 'OO' && c.src === uid);
-      if (!link) return [];
-      modelUid = link.dst;
+    if (model.nodeType !== 'Model') {
+      const geometry = model;
+      const link = info.connections.find((c) => c.kind === 'OO' && resolve(c.src) === geometry);
+      model = link ? resolve(link.dst) : null;
+      if (!model) return [];
     }
 
     return info.connections
-      .filter((c) => c.kind === 'OO' && c.dst === modelUid)
-      .map((c) => byUid.get(c.src))
+      .filter((c) => c.kind === 'OO' && resolve(c.dst) === model)
+      .map((c) => resolve(c.src))
       .filter((o) => o && o.nodeType === 'Material')
       .map(materialEntry);
   }
@@ -5426,16 +5486,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    * naming the property it drives, so only DiffuseColor is followed here. The
    * image itself may be embedded in the Texture or in the Video it references.
    */
-  function diffuseTexture(material, byUid, connections) {
-    const link = connections.find((c) => c.kind === 'OP' && c.dst === material.uid
+  function diffuseTexture(material, resolve, connections) {
+    const link = connections.find((c) => c.kind === 'OP' && resolve(c.dst) === material
       && (c.prop === 'DiffuseColor' || c.prop === 'Diffuse'));
     if (!link) return null;
-    const texture = byUid.get(link.src);
+    const texture = resolve(link.src);
     if (!texture || texture.nodeType !== 'Texture') return null;
 
     const media = connections
-      .filter((c) => c.kind === 'OO' && c.dst === texture.uid)
-      .map((c) => byUid.get(c.src))
+      .filter((c) => c.kind === 'OO' && resolve(c.dst) === texture)
+      .map((c) => resolve(c.src))
       .find((o) => o && o.nodeType === 'Video');
 
     // Embedded media rides along in a Content property as raw bytes.
@@ -5601,28 +5661,39 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
 
+  /**
+   * A record's numbers, in WebAssembly memory, however the file stored them.
+   *
+   * Binary 7.x holds one array property, which is inflated in place; ASCII
+   * decodes its array while parsing, so it is copied in; and 6.x writes one
+   * property per number, which is gathered and copied in as well.
+   */
+  function upload(node, asFloat) {
+    if (!node) return null;
+    const direct = node.props.find((p) => p.array);
+    const inner = direct || (node.children.find((c) => c.name === 'a') || { props: [] })
+      .props.find((p) => p.array);
+    if (inner) {
+      if (inner.values) {
+        return asFloat ? FbxWasm.uploadFloat64(inner.values) : FbxWasm.uploadInt32(inner.values);
+      }
+      return asFloat ? FbxWasm.asFloat64(inner) : FbxWasm.asInt32(inner);
+    }
+    const scalars = FbxAnalyze.scalarValues(node);
+    if (!scalars) return null;
+    return asFloat ? FbxWasm.uploadFloat64(scalars) : FbxWasm.uploadInt32(scalars);
+  }
+
+  const floatsOf = (node) => upload(node, true);
+  const intsOf = (node) => upload(node, false);
+
   /** Pull the arrays a geometry record needs and hand them to the WASM core. */
   function buildMesh(entry, placement = {}) {
     const child = (name) => entry.children.find((c) => c.name === name);
-    const nestedArray = (node) => {
-      if (!node) return null;
-      const direct = node.props.find((p) => p.array);
-      if (direct) return direct;
-      const inner = node.children.find((c) => c.name === 'a');
-      return inner ? inner.props.find((p) => p.array) : null;
-    };
 
-    const vertices = nestedArray(child('Vertices'));
-    const indices = nestedArray(child('PolygonVertexIndex'));
-    if (!vertices || !indices) return null;
-
-    // ASCII arrays arrive already decoded, so they are copied in; binary ones
-    // are inflated in place inside WebAssembly memory.
-    const toF64 = (prop) => (prop.values ? FbxWasm.uploadFloat64(prop.values) : FbxWasm.asFloat64(prop));
-    const toI32 = (prop) => (prop.values ? FbxWasm.uploadInt32(prop.values) : FbxWasm.asInt32(prop));
-
-    const positions = toF64(vertices);
-    const polygons = toI32(indices);
+    const positions = floatsOf(child('Vertices'));
+    const polygons = intsOf(child('PolygonVertexIndex'));
+    if (!positions || !polygons) return null;
 
     let normals = null;
     let normalIndex = null;
@@ -5630,24 +5701,17 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     let normalReference = 'direct';
     const normalLayer = entry.children.find((c) => c.name === 'LayerElementNormal');
     if (normalLayer) {
-      const prop = nestedArray(normalLayer.children.find((c) => c.name === 'Normals'));
       const mapType = FbxAnalyze.pathValue(normalLayer, ['MappingInformationType']);
       const refType = String(FbxAnalyze.pathValue(normalLayer, ['ReferenceInformationType']) || 'Direct');
       if (mapType === 'ByPolygonVertex') mapping = 'byPolygonVertex';
       else if (mapType === 'ByVertice' || mapType === 'ByVertex') mapping = 'byVertex';
-      if (prop && mapping !== 'none') {
-        normals = toF64(prop);
-        if (refType.startsWith('IndexToDirect') || refType === 'Index') {
-          const indexProp = nestedArray(
-            normalLayer.children.find((c) => c.name === 'NormalsIndex'
-              || c.name === 'NormalIndex'),
-          );
-          if (indexProp) {
-            normalIndex = toI32(indexProp);
-            normalReference = 'indexToDirect';
-          } else {
-            normals = null;                // indexed but no index array; use faces
-          }
+      if (mapping !== 'none') {
+        normals = floatsOf(normalLayer.children.find((c) => c.name === 'Normals'));
+        if (normals && (refType.startsWith('IndexToDirect') || refType === 'Index')) {
+          normalIndex = intsOf(normalLayer.children.find((c) => c.name === 'NormalsIndex'
+            || c.name === 'NormalIndex'));
+          if (normalIndex) normalReference = 'indexToDirect';
+          else normals = null;             // indexed but no index array; use faces
         }
       }
     }
@@ -5655,8 +5719,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     let materials = null;
     const materialLayer = entry.children.find((c) => c.name === 'LayerElementMaterial');
     if (materialLayer) {
-      const prop = nestedArray(materialLayer.children.find((c) => c.name === 'Materials'));
-      if (prop) materials = toI32(prop);
+      materials = intsOf(materialLayer.children.find((c) => c.name === 'Materials'));
     }
 
     let uvs = null;
@@ -5665,21 +5728,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     let uvReference = 'direct';
     const uvLayer = entry.children.find((c) => c.name === 'LayerElementUV');
     if (uvLayer) {
-      const prop = nestedArray(uvLayer.children.find((c) => c.name === 'UV'));
       const mapType = FbxAnalyze.pathValue(uvLayer, ['MappingInformationType']);
       const refType = String(FbxAnalyze.pathValue(uvLayer, ['ReferenceInformationType']) || 'Direct');
       if (mapType === 'ByPolygonVertex') uvMapping = 'byPolygonVertex';
       else if (mapType === 'ByVertice' || mapType === 'ByVertex') uvMapping = 'byVertex';
-      if (prop && uvMapping !== 'none') {
-        uvs = toF64(prop);
-        if (refType.startsWith('IndexToDirect') || refType === 'Index') {
-          const indexProp = nestedArray(uvLayer.children.find((c) => c.name === 'UVIndex'));
-          if (indexProp) {
-            uvIndex = toI32(indexProp);
-            uvReference = 'indexToDirect';
-          } else {
-            uvs = null;                    // indexed but no index array to follow
-          }
+      if (uvMapping !== 'none') {
+        uvs = floatsOf(uvLayer.children.find((c) => c.name === 'UV'));
+        if (uvs && (refType.startsWith('IndexToDirect') || refType === 'Index')) {
+          uvIndex = intsOf(uvLayer.children.find((c) => c.name === 'UVIndex'));
+          if (uvIndex) uvReference = 'indexToDirect';
+          else uvs = null;                 // indexed but no index array to follow
         }
       }
     }
