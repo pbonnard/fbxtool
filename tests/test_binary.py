@@ -181,3 +181,51 @@ def test_hierarchy_is_rebuilt_from_connections():
     assert [node.obj.name for node in top] == ["pCube1"]
     attached = {item.node_type for item in top[0].attachments}
     assert attached == {"Geometry", "Material"}
+
+
+# The exact 16 bytes that end every binary FBX file written by real exporters,
+# verified against a Blender 2.83 export. The final three bytes were wrong in
+# the first release, which made every genuine file report as truncated.
+REAL_FOOTER_MAGIC = bytes.fromhex("f85a8c6adef5d97eece90ce3758f290b")
+
+
+def test_footer_magic_matches_real_exporter_output():
+    from fbxtool.binary import FOOTER_MAGIC
+
+    assert FOOTER_MAGIC == REAL_FOOTER_MAGIC
+
+
+def test_real_world_footer_is_recognised():
+    """A footer laid out exactly as an exporter writes it."""
+    data = fb.build_cube(version=7400)
+    assert data.endswith(REAL_FOOTER_MAGIC)
+
+    doc = parse_binary(data)
+    assert doc.has_footer
+    assert doc.footer_version == 7400
+    assert doc.warnings == []
+
+
+def test_version_sits_124_bytes_before_the_footer_magic():
+    data = fb.build_cube(version=7400)
+    magic_at = data.rindex(REAL_FOOTER_MAGIC)
+    assert struct.unpack_from("<I", data, magic_at - 124)[0] == 7400
+    assert set(data[magic_at - 120 : magic_at]) == {0}
+
+
+def test_a_variant_footer_tail_is_not_read_as_truncation():
+    """Only the leading bytes are matched, so an odd tail is still a footer."""
+    data = bytearray(fb.build_cube())
+    data[-3:] = b"\x01\x02\x03"
+    doc = parse_binary(bytes(data))
+    assert doc.has_footer
+    assert doc.footer_version == 7400
+    assert not any("truncated" in warning for warning in doc.warnings)
+
+
+def test_a_corrupt_footer_prefix_is_reported():
+    data = bytearray(fb.build_cube())
+    data[-16:-13] = b"\x00\x00\x00"  # damage the part we match on
+    doc = parse_binary(bytes(data))
+    assert not doc.has_footer
+    assert any("truncated" in warning for warning in doc.warnings)

@@ -46,6 +46,10 @@ _UNITS = {
 #: One FBX time unit is 1/46186158000 of a second.
 FBX_TIME_UNIT = 46186158000
 
+#: Object types that ``Definitions`` counts but that are not written into the
+#: ``Objects`` section.
+_TYPES_OUTSIDE_OBJECTS = {"GlobalSettings"}
+
 
 def split_object_name(raw: Any) -> tuple[str, str]:
     """Split an FBX object name into ``(name, class)``.
@@ -117,6 +121,8 @@ class Analysis:
     global_settings: dict[str, Any] = field(default_factory=dict)
     definitions: list[dict[str, Any]] = field(default_factory=list)
     definitions_count: int | None = None
+    #: Declared objects that live outside the ``Objects`` section.
+    definitions_outside_objects: int = 0
     objects: list[SceneObject] = field(default_factory=list)
     object_counts: Counter = field(default_factory=Counter)
     connections: list[Connection] = field(default_factory=list)
@@ -134,6 +140,18 @@ class Analysis:
     @property
     def object_count(self) -> int:
         return len(self.objects)
+
+    @property
+    def expected_object_count(self) -> int | None:
+        """How many records ``Definitions`` implies the ``Objects`` section holds.
+
+        ``GlobalSettings`` is declared as an object type but written as a
+        top-level record, so the raw declared count is legitimately one higher
+        than the number of entries in ``Objects``.
+        """
+        if self.definitions_count is None:
+            return None
+        return self.definitions_count - self.definitions_outside_objects
 
 
 def analyze(doc: Document) -> Analysis:
@@ -312,6 +330,11 @@ def _read_definitions(root: Node, analysis: Analysis) -> None:
         analysis.definitions_count = int(count)
     for entry in node.get_all("ObjectType"):
         template = entry.get("PropertyTemplate")
+        if entry.value(0, "") in _TYPES_OUTSIDE_OBJECTS:
+            count = entry.path_value("Count", default=0)
+            analysis.definitions_outside_objects += (
+                int(count) if isinstance(count, (int, float)) else 0
+            )
         analysis.definitions.append(
             {
                 "type": entry.value(0, ""),

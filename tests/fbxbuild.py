@@ -13,7 +13,7 @@ import zlib
 MAGIC = b"Kaydara FBX Binary  \x00\x1a\x00"
 FOOTER_MAGIC = bytes(
     (0xF8, 0x5A, 0x8C, 0x6A, 0xDE, 0xF5, 0xD9, 0x7E,
-     0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x05, 0x0F, 0x23)
+     0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x8F, 0x29, 0x0B)
 )
 
 
@@ -189,7 +189,7 @@ def cube_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
 
     definitions = N("Definitions", [], [
         N("Version", [I(100)]),
-        N("Count", [I(4)]),
+        N("Count", [I(5)]),  # four Objects entries plus GlobalSettings
         N("ObjectType", [S("GlobalSettings")], [N("Count", [I(1)])]),
         N("ObjectType", [S("Geometry")], [
             N("Count", [I(1)]),

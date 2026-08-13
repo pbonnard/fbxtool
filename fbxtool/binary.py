@@ -47,8 +47,14 @@ _HEADER_SIZE = len(MAGIC) + len(_MAGIC_TAIL) + 4  # 27
 
 FOOTER_MAGIC = bytes(
     (0xF8, 0x5A, 0x8C, 0x6A, 0xDE, 0xF5, 0xD9, 0x7E,
-     0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x05, 0x0F, 0x23)
+     0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x8F, 0x29, 0x0B)
 )
+
+#: The footer is located by this prefix rather than the whole magic.  Every
+#: writer seen so far agrees on these bytes; matching on them means a variant
+#: tail is not mistaken for a truncated file.  The match is confirmed by the
+#: version stamp, which must sit 124 bytes earlier.
+_FOOTER_PREFIX = FOOTER_MAGIC[:13]
 
 _MAX_DEPTH = 256
 
@@ -310,9 +316,10 @@ def _read_footer(ctx: _Context, pos: int) -> None:
     """Record what we can about the trailing footer block."""
     doc = ctx.doc
     data = ctx.data
-    tail_start = max(pos - 8, len(data) - 256, 0)
+    # Start early enough to cover the whole footer whichever end is nearer.
+    tail_start = max(0, min(pos - 8, len(data) - 256))
     tail = bytes(data[tail_start:])
-    index = tail.rfind(FOOTER_MAGIC)
+    index = tail.rfind(_FOOTER_PREFIX)
     if index < 0:
         doc.warn("footer magic not found; the file may be truncated")
         return

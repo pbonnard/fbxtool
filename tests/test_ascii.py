@@ -156,7 +156,8 @@ def test_analysis_of_ascii_sample(sample_ascii_path):
     assert info.global_settings["up_axis"] == "+Y"
     assert info.global_settings["units"] == "centimetres"
     assert info.global_settings["original_unit_scale"] == 2.54
-    assert info.definitions_count == 5
+    assert info.definitions_count == 6
+    assert info.expected_object_count == 5  # GlobalSettings is not in Objects
     assert info.object_counts["Model (Mesh)"] == 2
     assert len(info.connections) == 5
     assert info.doc.warnings == []

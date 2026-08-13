@@ -264,10 +264,12 @@ def _render_object_summary(out: _Out, analysis: Analysis) -> None:
     if not analysis.objects:
         return
     out.heading("Objects")
-    declared = analysis.definitions_count
+    expected = analysis.expected_object_count
     line = f"  {analysis.object_count:,} object records"
-    if declared is not None and declared != analysis.object_count:
-        line += f" (Definitions declares {declared:,})"
+    if expected is not None and expected != analysis.object_count:
+        line += (f" — Definitions implies {expected:,}, "
+                 f"so {abs(expected - analysis.object_count):,} "
+                 f"{'are missing' if expected > analysis.object_count else 'are extra'}")
     out.line(line)
     out.line()
     width = max(len(kind) for kind in analysis.object_counts)
@@ -490,6 +492,7 @@ def to_dict(analysis: Analysis, *, include_tree: bool = False,
         },
         "definitions": {
             "declared_count": analysis.definitions_count,
+            "expected_in_objects": analysis.expected_object_count,
             "object_types": analysis.definitions,
         },
         "objects": {

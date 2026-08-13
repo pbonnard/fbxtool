@@ -67,7 +67,7 @@ GlobalSettings:  {
 
 Definitions:  {
 	Version: 100
-	Count: 5
+	Count: 6
 	ObjectType: "GlobalSettings" {
 		Count: 1
 	}
@@ -81,7 +81,7 @@ Definitions:  {
 		}
 	}
 	ObjectType: "Model" {
-		Count: 1
+		Count: 2
 	}
 	ObjectType: "Material" {
 		Count: 1
