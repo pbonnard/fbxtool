@@ -21,6 +21,7 @@
     groundToggle: $('ground-toggle'),
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
+    exportGltf: $('export-gltf'),
     tabs: document.querySelectorAll('.tab'),
     tree: $('tree'),
     stage: $('stage'),
@@ -47,6 +48,9 @@
   let currentPalette = [];
   let materialGroups = [];
   let materialOverrides = {};
+  /** The mesh on screen, kept for the glTF export. */
+  let currentMesh = null;
+  let lastExport = null;
 
   function setStatus(text, kind = '') {
     dom.status.textContent = text || '';
@@ -362,6 +366,8 @@
    */
   function installPalette(palette, mesh) {
     currentPalette = palette;
+    currentMesh = mesh;
+    dom.exportGltf.disabled = !mesh || !mesh.triangleCount;
     materialGroups = FbxPalette.groups(palette, trianglesPerSlot(mesh, palette.length));
     FbxPalette.apply(palette, materialOverrides);
     viewer.setPalette(palette);
@@ -437,10 +443,9 @@
     renderMaterials();
   }
 
-  function saveAssignment() {
-    const text = FbxPalette.serialise(materialOverrides);
-    const name = `${(currentDoc && currentDoc.fileName) || 'model'}.materials.json`;
-    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  /** Hand the browser a file to save. */
+  function download(blob, name) {
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = name;
@@ -448,6 +453,72 @@
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function saveAssignment() {
+    download(new Blob([FbxPalette.serialise(materialOverrides)], { type: 'application/json' }),
+      `${(currentDoc && currentDoc.fileName) || 'model'}.materials.json`);
+  }
+
+  /* ------------------------------------------------------------- exporting */
+
+  /** glTF embeds PNG and JPEG only, so the bytes have to say which they are. */
+  function imageType(bytes) {
+    if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50
+      && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+    if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
+    return null;
+  }
+
+  /** Each material's base colour image, as the bytes the file carried. */
+  async function textureBytes(palette) {
+    const out = new Map();
+    for (const entry of palette) {
+      if (!entry.texture || out.has(entry.name)) continue;
+      let bytes = entry.texture.embedded;
+      if (!bytes) {
+        const file = suppliedImages.get(baseName(entry.texture.path));
+        if (file) bytes = new Uint8Array(await file.arrayBuffer());
+      }
+      const mimeType = bytes && imageType(bytes);
+      if (mimeType) out.set(entry.name, { bytes, mimeType });
+    }
+    return out;
+  }
+
+  async function exportGltf() {
+    if (!currentMesh) return;
+    try {
+      dom.exportGltf.disabled = true;
+      setStatus('Writing glTF…');
+      await nextFrame();
+      const images = await textureBytes(currentPalette);
+      const settings = (currentAnalysis && currentAnalysis.globalSettings) || {};
+      // FBX counts centimetres per unit; glTF counts metres.
+      const centimetres = typeof settings.unitScale === 'number' ? settings.unitScale : 1;
+      const stem = ((currentDoc && currentDoc.fileName) || 'scene').replace(/\.[^.]+$/, '');
+      const started = performance.now();
+      const { glb, stats } = FbxGltf.build({
+        name: stem,
+        mesh: currentMesh,
+        palette: currentPalette,
+        images,
+        upAxis: dom.upSelect.value,
+        unitScale: centimetres / 100,
+      });
+      download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
+      lastExport = stats;
+      setStatus(`Exported ${stats.triangles.toLocaleString()} triangles as `
+        + `${stats.primitives} primitive(s), ${stats.vertices.toLocaleString()} vertices, `
+        + `${(stats.bytes / 1048576).toFixed(1)} MiB`
+        + `${stats.images ? ` with ${stats.images} image(s)` : ''} · `
+        + `${(performance.now() - started).toFixed(0)} ms`, 'ok');
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not write the glTF: ${error.message}`, 'error');
+    } finally {
+      dom.exportGltf.disabled = !currentMesh;
+    }
   }
 
   /** Mark on the model whichever material the pointer or the open row names. */
@@ -518,12 +589,16 @@
       specular: look.specular,
       roughness: look.roughness,
       opacity: look.opacity,
+      // A .blend states metalness; FBX and OBJ leave it to be inferred, and
+      // nothing infers it, so those export as dielectrics.
+      metallic: typeof props.Metallic === 'number' ? props.Metallic : 0,
       // Kept so an assignment can always be undone back to the file itself.
       fromFile: {
         colour: look.colour.slice(),
         specular: look.specular.slice(),
         roughness: look.roughness,
         opacity: look.opacity,
+        metallic: typeof props.Metallic === 'number' ? props.Metallic : 0,
       },
       texture: diffuseTexture(material, uidIndex, currentAnalysis.connections),
       layer: -1,
@@ -937,6 +1012,7 @@
     dom.textureToggle.addEventListener('change',
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());
+    dom.exportGltf.addEventListener('click', exportGltf);
 
     bindMaterials();
 
@@ -973,6 +1049,9 @@
       get missingTextures() { return missingTextures; },
       get loadCount() { return loadCount; },
       get palette() { return currentPalette; },
+      get lastExport() { return lastExport; },
+      exportMesh: () => currentMesh,
+      exportGltf,
       get materials() { return materialGroups; },
       get overrides() { return materialOverrides; },
       loadFile,

@@ -305,6 +305,36 @@ returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before
 being encoded back to sRGB. Highlights roll off instead of clipping.
 
+### Exporting glTF
+
+**Export glTF** writes what is on screen as a `.glb`: the assembled scene, with
+whatever materials you have assigned, in one self-contained binary file.
+
+What the viewer holds is already most of a glTF — one combined mesh with a
+material index per vertex, and a palette of resolved materials — so the work is
+in the three places the formats disagree:
+
+- a glTF primitive has exactly one material, so the mesh is split into one
+  primitive per material, and materials covering no triangles are dropped (the
+  Mercedes' 23 become 17);
+- triangles arrive unindexed, three vertices each however many they share, so
+  each primitive is welded: the Mercedes' 1,083,708 corners come out as 245,514
+  vertices, which is what makes it 9.8 MiB instead of 35;
+- glTF is Y-up in metres while these files are often Z-up in centimetres, so
+  that difference goes on the root node's matrix rather than into the vertex
+  data — the geometry is written exactly as the file holds it.
+
+Materials map onto metallic-roughness directly: base colour and opacity,
+roughness, metalness, `BLEND` when the material is see-through, and
+`KHR_materials_specular` when a dielectric's reflectance is not the 4% glTF
+assumes. Textures are embedded as the original PNG or JPEG bytes, not
+re-encoded.
+
+The export is checked against the **Khronos glTF-Validator**
+(`npm i -g gltf-validator`) on every sample, alongside checks that the model
+that comes out is the one that went in — same triangle count, same bounds, and
+on small meshes every triangle compared corner by corner.
+
 ### Ground contact
 
 A model floating on nothing reads as a render however well it is lit, so the
@@ -518,7 +548,8 @@ raises (`ParseError` / `UnsupportedFormatError`, both subclasses of
 
 ## Limitations
 
-- This reports on files; it does not write or convert them.
+- Nothing here writes FBX, OBJ or `.blend`. The web viewer exports glTF, and
+  that is the only file it produces.
 - Mesh detail is read from the record structure (counts, layer elements). The
   Python side evaluates no geometry — no triangulation, transforms or bounding
   boxes; that happens in the web viewer.
@@ -544,6 +575,7 @@ node web/test/browser.js samples/*.fbx        # the built page in Chromium
 node web/test/transparency.js glass.fbx       # reads pixels through glass
 node web/test/materials.js samples/scene_parts.fbx   # the material list
 node web/test/ground.js samples/scene_parts.fbx      # the floor and its shadow
+node web/test/gltf.js samples/cube_textured.fbx      # export, then validate it
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks

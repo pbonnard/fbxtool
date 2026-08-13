@@ -15,6 +15,7 @@ const T = require(path.join(APP, 'transform.js'));
 const FbxAscii = require(path.join(APP, 'ascii.js'));
 const FbxAnalyze = require(path.join(APP, 'analyze.js'));
 const FbxPalette = require(path.join(APP, 'palette.js'));
+const FbxGltf = require(path.join(APP, 'gltf.js'));
 
 let failures = 0;
 
@@ -301,6 +302,121 @@ for (const junk of ['not json at all', '{}', '{"materials":{}}', '[]', 'null']) 
   try { FbxPalette.parse(junk); } catch (error) { refused = true; }
   check(`refuses ${JSON.stringify(junk).slice(0, 24)}`, refused);
 }
+
+console.log('\ngltf: welding');
+// A square as two triangles: four corners, two of them shared.
+const square = {
+  positions: new Float32Array([
+    0, 0, 0, 1, 0, 0, 0, 1, 0,
+    1, 0, 0, 1, 1, 0, 0, 1, 0,
+  ]),
+  normals: new Float32Array(Array.from({ length: 18 }, (_, i) => (i % 3 === 2 ? 1 : 0))),
+  uvs: new Float32Array(12),
+};
+const welded = FbxGltf.weld([0, 1], square, false);
+check('shared corners are merged', welded.positions.length / 3 === 4,
+  `${welded.positions.length / 3} vertices from 6 corners`);
+check('the triangles still point at the right corners', welded.index.length === 6
+  && Array.from(welded.index).every((i) => i < 4), Array.from(welded.index).join(','));
+check('the bounds come out of the data', nearAll(welded.min, [0, 0, 0])
+  && nearAll(welded.max, [1, 1, 0]));
+
+// Vertices that differ in any component are not the same vertex.
+const split = {
+  positions: square.positions,
+  normals: new Float32Array(Array.from({ length: 18 }, (_, i) => (i % 3 === 0 ? 1 : 0))),
+  uvs: square.uvs,
+};
+const bothNormals = FbxGltf.weld([0, 1], {
+  positions: square.positions,
+  normals: new Float32Array([...square.normals.slice(0, 9), ...split.normals.slice(9)]),
+  uvs: square.uvs,
+}, false);
+check('a different normal makes a different vertex',
+  bothNormals.positions.length / 3 === 6, `${bothNormals.positions.length / 3} vertices`);
+
+console.log('\ngltf: the root matrix');
+check('a Y-up scene only scales',
+  nearAll(FbxGltf.rootMatrix('y', 0.01), [0.01, 0, 0, 0, 0, 0.01, 0, 0, 0, 0, 0.01, 0, 0, 0, 0, 1]));
+// Z up: the mesh's +Z has to come out as glTF's +Y.
+const zUp = FbxGltf.rootMatrix('z', 1);
+const applied = (m, p) => [0, 1, 2].map((r) => m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2]);
+check('a Z-up scene is turned upright', nearAll(applied(zUp, [0, 0, 1]), [0, 1, 0])
+  && nearAll(applied(zUp, [0, 1, 0]), [0, 0, -1]), show(applied(zUp, [0, 0, 1])));
+
+console.log('\ngltf: materials');
+const asGltf = (entry) => FbxGltf.material(Object.assign({
+  name: 'm', colour: [0.5, 0.25, 0.1], specular: [0.04, 0.04, 0.04], roughness: 0.4, opacity: 1,
+}, entry), -1);
+check('a plain material keeps its colour and roughness', (() => {
+  const m = asGltf({});
+  return nearAll(m.pbrMetallicRoughness.baseColorFactor, [0.5, 0.25, 0.1, 1])
+    && m.pbrMetallicRoughness.roughnessFactor === 0.4
+    && m.pbrMetallicRoughness.metallicFactor === 0
+    && m.alphaMode === 'OPAQUE';
+})());
+check('a see-through material is blended', (() => {
+  const m = asGltf({ opacity: 0.3 });
+  return m.alphaMode === 'BLEND' && m.pbrMetallicRoughness.baseColorFactor[3] === 0.3;
+})());
+check('a metal carries its reflectance as its base colour', (() => {
+  const m = asGltf({ colour: [0, 0, 0], specular: [0.9, 0.8, 0.5], metallic: 1 });
+  return nearAll(m.pbrMetallicRoughness.baseColorFactor, [0.9, 0.8, 0.5, 1])
+    && m.pbrMetallicRoughness.metallicFactor === 1;
+})());
+check('an unusual reflectance uses the specular extension', (() => {
+  const m = asGltf({ specular: [0.16, 0.16, 0.16] });
+  return m.extensions && m.extensions.KHR_materials_specular.specularFactor === 1;
+})());
+check('an ordinary dielectric does not need it', asGltf({}).extensions === undefined);
+
+console.log('\ngltf: the container');
+const built = FbxGltf.build({
+  name: 'square',
+  mesh: {
+    triangleCount: 2,
+    hasUv: false,
+    positions: square.positions,
+    normals: square.normals,
+    uvs: square.uvs,
+    materials: new Float32Array([0, 0, 0, 1, 1, 1]),
+    min: [0, 0, 0],
+    max: [1, 1, 0],
+  },
+  palette: [
+    { name: 'a', group: 0, colour: [1, 0, 0], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+    { name: 'b', group: 1, colour: [0, 0, 1], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+  ],
+});
+const glb = new Uint8Array(built.glb);
+const dv = new DataView(built.glb);
+check('it starts with the glTF magic', dv.getUint32(0, true) === 0x46546c67);
+check('the header length matches the file', dv.getUint32(8, true) === glb.length,
+  `${dv.getUint32(8, true)} against ${glb.length}`);
+const jsonLength = dv.getUint32(12, true);
+check('the JSON chunk is aligned and tagged',
+  jsonLength % 4 === 0 && dv.getUint32(16, true) === 0x4e4f534a);
+check('the binary chunk is aligned and tagged',
+  dv.getUint32(20 + jsonLength + 4, true) === 0x004e4942
+  && dv.getUint32(20 + jsonLength, true) % 4 === 0);
+const gltf = JSON.parse(new TextDecoder().decode(glb.subarray(20, 20 + jsonLength)));
+check('one primitive per material', gltf.meshes[0].primitives.length === 2
+  && gltf.materials.length === 2, `${gltf.meshes[0].primitives.length} primitives`);
+check('the buffer is as long as the chunk says',
+  gltf.buffers[0].byteLength === dv.getUint32(20 + jsonLength, true));
+check('every accessor sits inside its bufferView', gltf.accessors.every((a) => {
+  const view = gltf.bufferViews[a.bufferView];
+  const size = { SCALAR: 1, VEC2: 2, VEC3: 3 }[a.type] * (a.componentType === 5125 ? 4 : 4);
+  return a.count * size <= view.byteLength && ((view.byteOffset || 0) % 4) === 0;
+}));
+check('an empty scene is refused', (() => {
+  try {
+    FbxGltf.build({ mesh: { triangleCount: 0 } });
+    return false;
+  } catch (error) {
+    return /no geometry/.test(error.message);
+  }
+})());
 
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

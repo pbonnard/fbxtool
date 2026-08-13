@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import real_sample
 from fbxtool import read_fbx
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -193,6 +194,43 @@ def test_wasm_heap_mark_and_release(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_gltf_export(built, tmp_path):
+    """Export through the page and take the result apart.
+
+    The Khronos glTF-Validator is used when it is installed
+    (``npm i -g gltf-validator``); the structural and semantic checks run
+    either way.
+    """
+    try:
+        probe = subprocess.run(["node", "-e", "require('playwright')"],
+                               capture_output=True, text=True, env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    glass = tmp_path / "glass.fbx"
+    glass.write_bytes(fb.build_glass())
+    files = [str(ROOT / "samples" / "cube_textured.fbx"),
+             str(ROOT / "samples" / "scene_parts.fbx"),
+             f"{ROOT / 'samples' / 'pyramid.obj'}+{ROOT / 'samples' / 'pyramid.mtl'}"
+             f"+{ROOT / 'samples' / 'checker.png'}",
+             str(glass)]
+    real = real_sample()
+    if real:
+        files.append(real)
+
+    result = subprocess.run(["node", str(WEB / "test" / "gltf.js"), *files],
+                            capture_output=True, text=True, env=_node_env(), timeout=600)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_ground_and_shadows(built):
     """The model stands on a floor and drops a shadow onto it."""
     try:
@@ -300,8 +338,6 @@ def test_page_renders_in_a_browser(built):
     glass = Path(tempfile.mkdtemp()) / "glass.fbx"
     glass.write_bytes(fb.build_glass())
     samples.append(str(glass))
-
-    from conftest import real_sample
 
     real = real_sample()
     if real:

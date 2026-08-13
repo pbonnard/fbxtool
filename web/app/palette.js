@@ -111,12 +111,14 @@ const FbxPalette = (function () {
         entry.specular = entry.fromFile.specular.slice();
         entry.roughness = entry.fromFile.roughness;
         entry.opacity = entry.fromFile.opacity;
+        entry.metallic = entry.fromFile.metallic || 0;
         continue;
       }
       const base = set.colour || entry.fromFile.colour;
       const metallic = typeof set.metallic === 'number' ? set.metallic : 0;
       entry.colour = base.map((c) => c * (1 - metallic));
       entry.specular = base.map((c) => 0.04 * (1 - metallic) + c * metallic);
+      entry.metallic = metallic;
       entry.roughness = typeof set.roughness === 'number'
         ? set.roughness : entry.fromFile.roughness;
       entry.opacity = typeof set.opacity === 'number' ? set.opacity : entry.fromFile.opacity;
