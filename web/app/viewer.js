@@ -777,8 +777,14 @@ ${SHADOW_LOOKUP}
       this.dirty = true;
     }
 
-    /** Upload a mesh. Buffers are copied, so WASM memory may be reused after. */
-    setMesh(mesh) {
+    /**
+     * Upload a mesh. Buffers are copied, so WASM memory may be reused after.
+     *
+     * `keepCamera` is for rebuilding what is already on screen — smoothing it,
+     * say — where being thrown back to the default view would lose the very
+     * thing the user was looking at.
+     */
+    setMesh(mesh, { keepCamera = false } = {}) {
       const gl = this.gl;
       gl.bindVertexArray(this.vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
@@ -795,7 +801,8 @@ ${SHADOW_LOOKUP}
       this.triangleCount = mesh.triangleCount;
       this.meshMin = mesh.min.slice();
       this.meshMax = mesh.max.slice();
-      this.frame(mesh.min, mesh.max);
+      if (keepCamera) this.measure(mesh.min, mesh.max);
+      else this.frame(mesh.min, mesh.max);
       // The sun's view of the scene only changes when the scene does.
       this.shadowStale = true;
       this.dirty = true;
@@ -808,14 +815,20 @@ ${SHADOW_LOOKUP}
     }
 
     /** Point the camera at a bounding box. */
-    frame(min, max) {
-      const centre = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
+    /** Where the model is and how big it is — which the floor and the sun's
+     *  view need whether or not the camera moves. */
+    measure(min, max) {
+      this.modelCentre = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
       const size = [0, 1, 2].map((i) => Math.abs(max[i] - min[i]));
-      const radius = Math.max(Math.hypot(size[0], size[1], size[2]) / 2, 1e-4);
-      this.modelCentre = centre;
-      this.radius = radius;
+      this.radius = Math.max(Math.hypot(size[0], size[1], size[2]) / 2, 1e-4);
+      this.dirty = true;
+    }
+
+    /** Point the camera at a bounding box. */
+    frame(min, max) {
+      this.measure(min, max);
       this.target = [0, 0, 0];
-      this.distance = radius * 2.6;
+      this.distance = this.radius * 2.6;
       this.yaw = 0.9;
       this.pitch = 0.28;
       this.dirty = true;

@@ -444,8 +444,9 @@
 
   /** Build whatever is on screen again, after a setting that changes the mesh. */
   function redraw() {
-    if (currentGeometry) return showGeometry(currentGeometry);
-    if (sceneParts.length > 1) return showScene();
+    // Whatever is on screen is rebuilt where the camera already is.
+    if (currentGeometry) return showGeometry(currentGeometry, { keepCamera: true });
+    if (sceneParts.length > 1) return showScene({ keepCamera: true });
     return Promise.resolve();
   }
 
@@ -916,7 +917,7 @@
   });
 
   /** Render every part of the scene, each placed by its model's transform. */
-  async function showScene() {
+  async function showScene({ keepCamera = false } = {}) {
     currentGeometry = null;
     try {
       dom.meshInfo.textContent = `assembling ${sceneParts.length} parts…`;
@@ -931,7 +932,7 @@
         return;
       }
       const elapsed = performance.now() - started;
-      viewer.setMesh(built.mesh);
+      viewer.setMesh(built.mesh, { keepCamera });
 
       const textures = await resolveTextures(built.palette);
       missingTextures = textures.missing;
@@ -1064,7 +1065,7 @@
     return FbxWasm.buildMesh({ ...spec, ...placement });
   }
 
-  async function showGeometry(entry) {
+  async function showGeometry(entry, { keepCamera = false } = {}) {
     currentGeometry = entry;
     try {
       const started = performance.now();
@@ -1076,7 +1077,7 @@
         return;
       }
       const elapsed = performance.now() - started;
-      viewer.setMesh(mesh);
+      viewer.setMesh(mesh, { keepCamera });
 
       const palette = materialPalette(entry);
       const textures = await resolveTextures(palette);

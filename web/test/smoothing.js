@@ -106,6 +106,34 @@ async function main() {
   check('turning it off gives the cage back',
     back.triangles === 12 && !/smoothed/.test(back.info), `${back.triangles} triangles`);
 
+  console.log('\nthe view while smoothing');
+  // Move somewhere deliberate, as anyone comparing two levels would.
+  const wanted = await page.evaluate(() => {
+    const viewer = window.fbxtool.viewer;
+    viewer.yaw = 2.1;
+    viewer.pitch = 0.55;
+    viewer.distance = viewer.radius * 1.3;
+    viewer.dirty = true;
+    return { yaw: viewer.yaw, pitch: viewer.pitch, distance: viewer.distance };
+  });
+  await setLevel(page, 1);
+  const kept = await page.evaluate(() => {
+    const viewer = window.fbxtool.viewer;
+    return { yaw: viewer.yaw, pitch: viewer.pitch, distance: viewer.distance };
+  });
+  check('smoothing leaves the camera where it was',
+    Math.abs(kept.yaw - wanted.yaw) < 1e-9 && Math.abs(kept.pitch - wanted.pitch) < 1e-9
+    && Math.abs(kept.distance - wanted.distance) < 1e-9,
+    `yaw ${kept.yaw.toFixed(2)}, distance ${kept.distance.toFixed(1)}`);
+
+  // Reset view is still the way back.
+  await page.click('#reset-view');
+  await page.waitForTimeout(300);
+  const reset = await page.evaluate(() => window.fbxtool.viewer.yaw);
+  check('and Reset view still frames it afresh', Math.abs(reset - 0.9) < 1e-9,
+    `yaw ${reset.toFixed(2)}`);
+  await setLevel(page, 0);
+
   console.log('\na scene of several parts');
   const parts = await load(sceneFile);
   check('the setting does not survive a new file',
