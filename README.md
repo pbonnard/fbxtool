@@ -1,8 +1,18 @@
 # fbxtool
 
-Inspect FBX files and report what version they are and what is inside them —
-both the **binary** and the **ASCII** encodings, with **no dependencies** and
-without the Autodesk FBX SDK.
+Inspect model files and report what version they are and what is inside them,
+with **no dependencies** and without the Autodesk FBX SDK.
+
+| Format | Support |
+| --- | --- |
+| **FBX** binary and ASCII | full — inspect and render |
+| **Wavefront OBJ** (+ `.mtl`) | full — inspect and render |
+| **Blender `.blend`** | container only — version, file-blocks, SDNA, datablocks |
+
+OBJ is normalised into the same record tree as FBX, so every option and the
+viewer apply to it unchanged. A `.blend` is a dump of Blender's own memory
+rather than an interchange format; its container and SDNA are read, but no
+geometry is extracted — see [Blender files](#blender-files) for why.
 
 ```
 $ fbxinfo samples/cube_binary.fbx
@@ -91,6 +101,36 @@ code, so running one directly (`python fbxtool/binary.py scene.fbx`) fails with
 `python -m fbxtool scene.fbx` from the directory containing the package, or
 install it and use `fbxinfo`.
 
+### Wavefront OBJ
+
+`fbxinfo model.obj` reads any `.mtl` the file names from the same directory and
+produces the same report as for FBX: `v`/`vn`/`vt` become vertex, normal and UV
+arrays, `f` becomes the polygon index run, `usemtl` becomes a per-polygon
+material layer, and `map_Kd` becomes a texture reference. Face indices may be
+given in any of the five OBJ syntaxes, including negative (relative) ones.
+
+### Blender files
+
+`fbxinfo scene.blend` reports the container: Blender version, pointer size,
+endianness, compression, file-block counts by code, the SDNA (structs, types
+and field names) and every datablock with its name and type.
+
+Datablock names are located by computing the offset of `ID.name` **from the
+file's own SDNA**, so they are found wherever a given release puts them rather
+than at a hard-coded offset.
+
+No geometry is extracted. A `.blend` is Blender's internal memory image, not an
+interchange format: the layout of a mesh changed substantially at 2.8, again
+across 3.x as attributes became generic, and again at 4.0. Writing an extractor
+against those layouts without a corpus of real files to check it on would
+produce something that appears to work and silently misreads other versions.
+Export to FBX or OBJ to see the geometry.
+
+Files saved with Blender's **Compress** option are wrapped — gzip up to 2.9x,
+Zstandard from 3.0. Gzip is unwrapped automatically; Zstandard is detected and
+reported rather than guessed at, since decompressing it would mean shipping a
+second decompressor.
+
 Examples:
 
 ```sh
@@ -161,12 +201,13 @@ CDN and no network. Open it and drop a file in; nothing is uploaded anywhere.
 | Layer | Where it runs |
 | --- | --- |
 | DEFLATE, binary record walking, polygon triangulation, normal generation | WebAssembly (`web/src/fbx.c`, freestanding, no libc, **no imports**) |
-| ASCII reading, scene analysis, report | JavaScript — text and structure work with no hot loop |
+| ASCII FBX, OBJ and .blend reading, scene analysis, report | JavaScript — text and structure work with no hot loop |
 | Rendering | WebGL2 with an orbit camera and per-material shading |
 
-The two readers produce the same record tree, so the analysis and the geometry
-pipeline do not care which one ran; ASCII meshes are triangulated by the same
-WebAssembly code.
+Every reader produces the same record tree, so the analysis and the geometry
+pipeline do not care which one ran; ASCII FBX and OBJ meshes are triangulated
+by the same WebAssembly code. Drop an `.obj` with its `.mtl` — together or
+afterwards — exactly as you would with a texture.
 
 Both readers are held to the Python implementation record for record —
 `tests/test_web.py` runs the WASM module under Node and compares the whole
@@ -363,6 +404,9 @@ pytest                          # no dependencies beyond pytest itself
 python3 tools/make_samples.py   # regenerate samples/cube_binary.fbx
 python3 web/build.py            # rebuild web/dist/fbxview.html
 ```
+
+`tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks
+and SDNA — so the container reader is testable without Blender installed.
 
 The web tests skip cleanly when `clang` or `node` is unavailable. Point
 `FBXTOOL_SAMPLE` at a real exporter's `.fbx` to also run the tests that need

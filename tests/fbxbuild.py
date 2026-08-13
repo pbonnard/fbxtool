@@ -396,3 +396,127 @@ def build_textured_cube(version: int = 7400, *, embed: bool = True,
                         filename: str = "checker.png") -> bytes:
     return build_binary(textured_cube_nodes(version, embed=embed, filename=filename),
                         version=version)
+
+
+# --------------------------------------------------------------------------
+# .blend fixtures
+#
+# A .blend is a dump of Blender's memory plus an SDNA block describing the C
+# structs it contains. This writes a small but structurally faithful one, so
+# the container and SDNA reader can be tested without Blender installed.
+
+BLEND_MAGIC = b"BLENDER"
+
+
+def _sdna_block(pointer_size: int, endian: str = "<") -> bytes:
+    """An SDNA describing an ID struct and a few datablock types."""
+    names = ["*next", "*prev", "*newid", "*lib", "name[66]", "flag", "id", "*data"]
+    types = ["void", "ID", "Library", "char", "short", "Object", "Mesh", "Material"]
+    # ID: two void pointers, an ID pointer, a Library pointer, name[66], flag.
+    id_length = pointer_size * 4 + 66 + 2
+    lengths = [0, id_length, 0, 1, 2, id_length + pointer_size,
+               id_length + pointer_size, id_length]
+
+    def index_of(collection, value):
+        return collection.index(value)
+
+    id_fields = [
+        (index_of(types, "void"), index_of(names, "*next")),
+        (index_of(types, "void"), index_of(names, "*prev")),
+        (index_of(types, "ID"), index_of(names, "*newid")),
+        (index_of(types, "Library"), index_of(names, "*lib")),
+        (index_of(types, "char"), index_of(names, "name[66]")),
+        (index_of(types, "short"), index_of(names, "flag")),
+    ]
+    # Every datablock struct opens with an embedded ID, which is what lets the
+    # reader find names without knowing the struct.
+    def with_id(extra=True):
+        fields = [(index_of(types, "ID"), index_of(names, "id"))]
+        if extra:
+            fields.append((index_of(types, "void"), index_of(names, "*data")))
+        return fields
+
+    structs = [
+        (index_of(types, "ID"), id_fields),
+        (index_of(types, "Object"), with_id()),
+        (index_of(types, "Mesh"), with_id()),
+        (index_of(types, "Material"), with_id(extra=False)),
+    ]
+
+    def strings(tag, items):
+        out = bytearray(tag)
+        out += struct.pack(f"{endian}I", len(items))
+        for item in items:
+            out += item.encode("ascii") + b"\x00"
+        while len(out) % 4:
+            out += b"\x00"
+        return bytes(out)
+
+    body = bytearray(b"SDNA")
+    body += strings(b"NAME", names)
+    body += strings(b"TYPE", types)
+
+    tlen = bytearray(b"TLEN")
+    tlen += struct.pack(f"{endian}{len(lengths)}H", *lengths)
+    while len(tlen) % 4:
+        tlen += b"\x00"
+    body += tlen
+
+    strc = bytearray(b"STRC")
+    strc += struct.pack(f"{endian}I", len(structs))
+    for type_index, fields in structs:
+        strc += struct.pack(f"{endian}HH", type_index, len(fields))
+        for field in fields:
+            strc += struct.pack(f"{endian}HH", *field)
+    body += strc
+    return bytes(body)
+
+
+#: Struct index within _sdna_block, by datablock code.
+_BLEND_STRUCT = {"OB": 1, "ME": 2, "MA": 3}
+
+
+def _id_payload(code: str, name: str, pointer_size: int) -> bytes:
+    """An ID struct whose name field holds the code-prefixed datablock name."""
+    payload = bytearray(pointer_size * 4)        # next, prev, newid, lib
+    field = (code + name).encode("utf-8")[:65]
+    payload += field + b"\x00" * (66 - len(field))
+    payload += struct.pack("<h", 0)              # flag
+    payload += b"\x00" * pointer_size            # trailing data pointer
+    return bytes(payload)
+
+
+def build_blend(version: int = 293, *, pointer_size: int = 8,
+                datablocks=(("OB", "Cube"), ("ME", "Cube"), ("MA", "Red")),
+                compress: bool = False, truncated: bool = False) -> bytes:
+    """A small but structurally valid .blend file."""
+    endian = "<"
+    out = bytearray(BLEND_MAGIC)
+    out += b"-" if pointer_size == 8 else b"_"
+    out += b"v"
+    out += f"{version:03d}".encode("ascii")
+
+    pointer_format = "Q" if pointer_size == 8 else "I"
+    header = struct.Struct(f"{endian}4sI{pointer_format}II")
+    address = 0x1000
+
+    def block(code: str, payload: bytes, sdna_index: int = 0, count: int = 1):
+        nonlocal address
+        address += 0x100
+        return header.pack(code.encode("ascii").ljust(4, b"\x00"), len(payload),
+                           address, sdna_index, count) + payload
+
+    out += block("GLOB", b"\x00" * 32)
+    for code, name in datablocks:
+        out += block(code, _id_payload(code, name, pointer_size),
+                     sdna_index=_BLEND_STRUCT.get(code, 0))
+    out += block("DATA", b"\x00" * 64)
+    out += block("DNA1", _sdna_block(pointer_size, endian))
+    if not truncated:
+        out += header.pack(b"ENDB", 0, 0, 0, 0)
+
+    data = bytes(out)
+    if compress:
+        import gzip as _gzip
+        data = _gzip.compress(data)
+    return data

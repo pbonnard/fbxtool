@@ -29,8 +29,11 @@
   let currentDoc = null;
   let currentAnalysis = null;
   let currentGeometry = null;
+  let lastSceneFile = null;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
+  /** Material libraries the user supplied, keyed by lowercased basename. */
+  const suppliedMaterials = new Map();
   let missingTextures = [];
 
   function setStatus(text, kind = '') {
@@ -44,17 +47,24 @@
   async function loadFiles(files) {
     const list = Array.from(files);
     const images = list.filter((f) => /\.(png|jpe?g|gif|bmp|webp|tga)$/i.test(f.name));
+    const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
     for (const image of images) suppliedImages.set(image.name.toLowerCase(), image);
+    for (const library of libraries) {
+      suppliedMaterials.set(library.name.toLowerCase(), await library.text());
+    }
 
-    const scene = list.find((f) => !images.includes(f));
+    const companions = new Set([...images, ...libraries]);
+    const scene = list.find((f) => !companions.has(f));
     if (!scene) {
-      if (!currentGeometry) {
-        setStatus(`Added ${images.length} image(s) — now open an .fbx file.`);
+      const added = companions.size;
+      if (!currentDoc) {
+        setStatus(`Added ${added} companion file(s) — now open a model.`);
         return;
       }
-      // Images arriving after the scene: re-resolve so they appear.
-      setStatus(`Added ${images.length} image(s), applying…`);
-      await showGeometry(currentGeometry);
+      // Companions arriving after the scene: reload so they take effect.
+      setStatus(`Added ${added} companion file(s), applying…`);
+      if (lastSceneFile && libraries.length) await loadFile(lastSceneFile);
+      else if (currentGeometry) await showGeometry(currentGeometry);
       return;
     }
     await loadFile(scene);
@@ -66,19 +76,28 @@
       const buffer = new Uint8Array(await file.arrayBuffer());
       const started = performance.now();
 
-      let doc = FbxWasm.parseBinary(buffer);
+      let doc = null;
+      if (FbxBlend.looksLikeBlend(buffer)) {
+        doc = FbxBlend.parse(buffer);
+      } else {
+        doc = FbxWasm.parseBinary(buffer);
+      }
       if (!doc) {
-        // Not binary — try ASCII.
+        // Not binary — try the text formats.
         const text = new TextDecoder('utf-8').decode(buffer);
-        if (!FbxAscii.looksLikeAscii(text)) {
-          setStatus(`${file.name} is not an FBX file — no binary magic and no `
-            + 'recognisable ASCII records.', 'error');
+        if (FbxAscii.looksLikeAscii(text)) {
+          doc = FbxAscii.parse(text);
+        } else if (FbxObj.looksLikeObj(text)) {
+          doc = FbxObj.parse(text, { materials: suppliedMaterials });
+        } else {
+          setStatus(`${file.name} is not a model we recognise — not FBX `
+            + '(binary or ASCII), OBJ or .blend.', 'error');
           return;
         }
-        doc = FbxAscii.parse(text);
-      } else {
+      } else if (doc.format !== 'blend') {
         doc.versionSource = 'header';
       }
+      lastSceneFile = file;
       doc.fileName = file.name;
       doc.fileSize = file.size;
       doc.parseMilliseconds = performance.now() - started;
@@ -91,8 +110,10 @@
       document.body.classList.add('loaded');
 
       populateGeometry(doc);
-      const label = `${doc.encoding} · FBX ${doc.version || '?'} · `
-        + `${currentAnalysis.totalRecords.toLocaleString()} records · `
+      const what = doc.format === 'obj' ? 'Wavefront OBJ'
+        : doc.format === 'blend' ? `Blender ${doc.extra.blenderVersionText || '?'}`
+        : `FBX ${doc.version || '?'} ${doc.encoding}`;
+      const label = `${what} · ${currentAnalysis.totalRecords.toLocaleString()} records · `
         + `${doc.parseMilliseconds.toFixed(0)} ms`;
       setStatus(label, doc.warnings.length ? 'warn' : 'ok');
     } catch (error) {

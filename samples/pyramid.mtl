@@ -1,0 +1,11 @@
+# fbxtool sample material library
+newmtl Sides
+Kd 0.85 0.35 0.20
+Ks 0.90 0.90 0.90
+Ns 60
+map_Kd checker.png
+
+newmtl Base
+Kd 0.20 0.35 0.75
+Ks 0.10 0.10 0.10
+Ns 8

@@ -193,6 +193,15 @@ def test_page_renders_in_a_browser(built):
     external.write_bytes(fb.build_textured_cube(embed=False, filename="art/checker.png"))
     samples.append(f"{external}+{ROOT / 'samples' / 'checker.png'}")
 
+    # OBJ needs its material library alongside, the same way textures do.
+    samples.append(f"{ROOT / 'samples' / 'pyramid.obj'}"
+                   f"+{ROOT / 'samples' / 'pyramid.mtl'}"
+                   f"+{ROOT / 'samples' / 'checker.png'}")
+
+    blend = Path(tempfile.mkdtemp()) / "scene.blend"
+    blend.write_bytes(fb.build_blend())
+    samples.append(str(blend))
+
     real = os.environ.get("FBXTOOL_SAMPLE")
     if real and Path(real).is_file():
         samples.append(real)

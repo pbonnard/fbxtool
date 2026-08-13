@@ -25,6 +25,11 @@ def sample_binary_path() -> str:
 
 
 @pytest.fixture(scope="session")
+def sample_obj_path() -> str:
+    return str(ROOT / "samples" / "pyramid.obj")
+
+
+@pytest.fixture(scope="session")
 def sample_textured_path() -> str:
     return str(ROOT / "samples" / "cube_textured.fbx")
 

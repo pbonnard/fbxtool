@@ -8,9 +8,11 @@ from typing import BinaryIO
 
 from .ascii import is_ascii_fbx, parse_ascii
 from .binary import MAGIC, is_binary_fbx, parse_binary
+from .blend import is_blend, parse_blend
 from .model import Document, UnsupportedFormatError
+from .obj import is_obj, parse_obj
 
-__all__ = ["detect_format", "read_fbx", "parse_bytes"]
+__all__ = ["detect_format", "read_fbx", "read_model", "parse_bytes"]
 
 _SNIFF_SIZE = 8192
 # Above this, binary files are mapped rather than read into memory.
@@ -18,12 +20,23 @@ _MMAP_THRESHOLD = 8 * 1024 * 1024
 
 
 def detect_format(data: bytes) -> str:
-    """Return ``"binary"``, ``"ascii"``, or ``"unknown"`` for a file head."""
+    """Identify a file from its head.
+
+    Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"blend"``, or
+    ``"unknown"``. The FBX names are kept as they were so existing callers
+    continue to work.
+    """
     if is_binary_fbx(data[: len(MAGIC)]):
         return "binary"
+    if is_blend(data):
+        return "blend"
     text = _decode(data)
-    if text is not None and is_ascii_fbx(text):
+    if text is None:
+        return "unknown"
+    if is_ascii_fbx(text):
         return "ascii"
+    if is_obj(text):
+        return "obj"
     return "unknown"
 
 
@@ -37,17 +50,31 @@ def _decode(data: bytes) -> str | None:
     return None
 
 
-def read_fbx(
+def read_model(
     path: str | os.PathLike[str],
     *,
     load_arrays: bool = False,
     max_array_values: int | None = None,
 ) -> Document:
-    """Read the FBX file at *path*, choosing the reader by content sniffing."""
+    """Read the model file at *path*, choosing the reader by content sniffing.
+
+    Handles FBX (binary and ASCII), Wavefront OBJ and Blender .blend files.
+    """
     path = os.fspath(path)
     with open(path, "rb") as handle:
         head = handle.read(_SNIFF_SIZE)
         kind = detect_format(head)
+        if kind == "blend":
+            handle.seek(0)
+            return parse_blend(handle.read(), path=path)
+        if kind == "obj":
+            handle.seek(0)
+            raw = handle.read()
+            text = _decode(raw) or ""
+            doc = parse_obj(text, path=path, load_arrays=load_arrays,
+                            materials=_sibling_mtl(path, text))
+            doc.file_size = len(raw)
+            return doc
         if kind == "binary":
             return _read_binary(
                 handle, path, load_arrays=load_arrays, max_array_values=max_array_values
@@ -67,8 +94,38 @@ def read_fbx(
             doc.file_size = len(raw)
             return doc
     raise UnsupportedFormatError(
-        f"{path}: not an FBX file (no binary magic and no recognisable ASCII records)"
+        f"{path}: unrecognised format — not FBX (binary or ASCII), OBJ or .blend"
     )
+
+
+#: Kept as the original name; it now reads any supported format.
+read_fbx = read_model
+
+
+def _sibling_mtl(path: str, text: str) -> dict[str, str]:
+    """Load the .mtl libraries an OBJ names, from beside the file.
+
+    Only files in the OBJ's own directory are read, and the name is reduced to
+    its basename first, so a library recorded with an absolute path from
+    another machine still resolves.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    libraries: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("mtllib"):
+            continue
+        for name in stripped.split()[1:]:
+            base = os.path.basename(name.replace("\\", "/"))
+            candidate = os.path.join(directory, base)
+            if base in libraries or not os.path.isfile(candidate):
+                continue
+            try:
+                with open(candidate, "rb") as handle:
+                    libraries[base] = _decode(handle.read()) or ""
+            except OSError:
+                continue
+    return libraries
 
 
 def _read_binary(
@@ -105,6 +162,13 @@ def parse_bytes(
 ) -> Document:
     """Parse an in-memory FBX file of either encoding."""
     kind = detect_format(data[:_SNIFF_SIZE])
+    if kind == "blend":
+        return parse_blend(data, path=path)
+    if kind == "obj":
+        text = _decode(data) or ""
+        doc = parse_obj(text, path=path, load_arrays=load_arrays)
+        doc.file_size = len(data)
+        return doc
     if kind == "binary":
         return parse_binary(
             data, path=path, load_arrays=load_arrays, max_array_values=max_array_values
@@ -119,5 +183,5 @@ def parse_bytes(
         doc.file_size = len(data)
         return doc
     raise UnsupportedFormatError(
-        "not an FBX file (no binary magic and no recognisable ASCII records)"
+        "unrecognised format — not FBX (binary or ASCII), OBJ or .blend"
     )

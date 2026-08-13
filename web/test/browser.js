@@ -60,7 +60,8 @@ async function main() {
     // "a.fbx+b.png" loads several files together, as a drop would.
     const group = entry.split('+');
     const file = group[0];
-    const expectTexture = group.length > 1 || /textured/i.test(file);
+    const suppliedImage = group.slice(1).some((f) => /\.(png|jpe?g|gif|bmp|webp)$/i.test(f));
+    const expectTexture = suppliedImage || /textured/i.test(file);
     const name = group.map((f) => path.basename(f)).join(' + ');
     console.log(`${name}`);
     const started = Date.now();
@@ -93,6 +94,7 @@ async function main() {
       }
       return {
         encoding: doc.encoding,
+        format: doc.format || 'fbx',
         version: doc.version,
         records: analysis.totalRecords,
         objects: analysis.objects.length,
@@ -114,13 +116,25 @@ async function main() {
       };
     });
 
-    check('parsed', result.records > 0, `${result.encoding}, FBX ${result.version}`);
+    check('parsed', result.records > 0,
+      `${result.format}${result.version ? `, version ${result.version}` : ''}`);
     check('records found', result.records > 0, `${result.records.toLocaleString()} records`);
-    check('report rendered', result.reportSections >= 5, `${result.reportSections} sections`);
+    // A .blend reports its container only, so it has fewer sections.
+    const minimumSections = result.format === 'blend' ? 2 : 5;
+    check('report rendered', result.reportSections >= minimumSections,
+      `${result.reportSections} sections`);
     check('record tree rendered', result.treeItems > 0, `${result.treeItems} nodes shown`);
-    check('triangles built', result.triangles > 0, `${result.triangles.toLocaleString()} triangles`);
-    check('pixels drawn', result.litSamples > 100,
-      `${result.litSamples} lit samples, ${result.distinctColours} distinct colours`);
+    // A .blend is reported, not rendered, so it is not expected to draw.
+    const expectMesh = result.format !== 'blend';
+    if (expectMesh) {
+      check('triangles built', result.triangles > 0,
+        `${result.triangles.toLocaleString()} triangles`);
+      check('pixels drawn', result.litSamples > 100,
+        `${result.litSamples} lit samples, ${result.distinctColours} distinct colours`);
+    } else {
+      check('container described', /Blender/.test(result.reportText),
+        `${result.reportSections} sections`);
+    }
     check('no warnings', result.warnings.length === 0,
       result.warnings.length ? result.warnings.join('; ') : 'clean');
     if (expectTexture) {

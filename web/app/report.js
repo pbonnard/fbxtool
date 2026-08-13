@@ -41,15 +41,56 @@ const FbxReport = (function () {
     return parts;
   }
 
+  const FORMAT_NAMES = { fbx: 'Autodesk FBX', obj: 'Wavefront OBJ', blend: 'Blender' };
+
+  function objRows(doc, pairs) {
+    const e = doc.extra || {};
+    pairs.push(['Encoding', 'text']);
+    if (e.objects && e.objects.length) pairs.push(['Objects (o)', e.objects.join(', ')]);
+    if (e.groups && e.groups.length) pairs.push(['Groups (g)', e.groups.join(', ')]);
+    if (e.libraries && e.libraries.length) {
+      pairs.push(['Material libraries', e.libraries.join(', ')]);
+      pairs.push(['Materials resolved', e.materialsResolved
+        ? `${e.materialsResolved} from the .mtl`
+        : 'none — drop the .mtl in to colour this model']);
+    }
+    if (e.smoothingGroups) pairs.push(['Smoothing groups', e.smoothingGroups]);
+  }
+
+  function blendRows(doc, pairs) {
+    const e = doc.extra || {};
+    pairs.push(['Blender version', e.blenderVersionText || 'unknown']);
+    pairs.push(['Compression', e.compression || 'none']);
+    if (e.compression && e.compression !== 'none') return;
+    pairs.push(['Pointer size', `${e.pointerSize} bytes`]);
+    pairs.push(['Endianness', e.endianness]);
+    pairs.push(['File blocks', number(e.blockCount || 0)]);
+    pairs.push(['Datablocks', number(e.datablocks || 0)]);
+    pairs.push(['DNA', `${number(e.structCount || 0)} structs, `
+      + `${number(e.typeCount || 0)} types, ${number(e.nameCount || 0)} field names`]);
+  }
+
   function fileSection(info) {
     const doc = info.doc;
     const version = info.version;
     const pairs = [
       ['Name', doc.fileName || '—'],
       ['Size', formatSize(doc.fileSize)],
-      ['Encoding', doc.encoding === 'binary' ? 'binary' : 'ASCII text'],
-      ['Version', version ? version.label : 'unknown'],
+      ['Format', FORMAT_NAMES[doc.format] || doc.format || 'Autodesk FBX'],
     ];
+    if (doc.format === 'obj') {
+      objRows(doc, pairs);
+      if (doc.parseMilliseconds !== undefined) {
+        pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
+      }
+      return section('File', rows(pairs));
+    }
+    if (doc.format === 'blend') {
+      blendRows(doc, pairs);
+      return section('File', rows(pairs));
+    }
+    pairs.push(['Encoding', doc.encoding === 'binary' ? 'binary' : 'ASCII text']);
+    pairs.push(['Version', version ? version.label : 'unknown']);
     if (version && version.notes) pairs.push(['Version note', version.notes]);
     if (doc.versionSource) pairs.push(['Version read from', doc.versionSource]);
     if (doc.encoding === 'binary') {

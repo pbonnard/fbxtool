@@ -30,6 +30,8 @@ OUTPUT = DIST / "fbxview.html"
 SCRIPTS = [
     "wasm.js",
     "ascii.js",
+    "obj.js",
+    "blend.js",
     "analyze.js",
     "report.js",
     "viewer.js",

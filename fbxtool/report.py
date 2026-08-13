@@ -109,14 +109,33 @@ def render_text(
     return out.text()
 
 
+FORMAT_NAMES = {
+    "fbx": "Autodesk FBX",
+    "obj": "Wavefront OBJ",
+    "blend": "Blender",
+}
+
+
 def _render_file(out: _Out, analysis: Analysis) -> None:
     doc = analysis.doc
     out.heading("File")
     rows: list[tuple[str, Any]] = [
         ("Path", doc.path or "<memory>"),
         ("Size", format_size(doc.file_size)),
-        ("Encoding", "binary" if doc.encoding == "binary" else "ASCII text"),
+        ("Format", FORMAT_NAMES.get(doc.format, doc.format)),
     ]
+
+    if doc.format == "obj":
+        rows.append(("Encoding", "text"))
+        _render_obj_rows(rows, doc)
+        out.pairs(rows)
+        return
+    if doc.format == "blend":
+        _render_blend_rows(rows, doc)
+        out.pairs(rows)
+        return
+
+    rows.append(("Encoding", "binary" if doc.encoding == "binary" else "ASCII text"))
     version = analysis.version
     if version is not None:
         rows.append(("Version", version.label))
@@ -141,6 +160,42 @@ def _render_file(out: _Out, analysis: Analysis) -> None:
     if version is not None and version.legacy_layout:
         rows.append(("Layout", "legacy 6.x (objects addressed by name, not UID)"))
     out.pairs(rows)
+
+
+def _render_obj_rows(rows: list[tuple[str, Any]], doc) -> None:
+    extra = doc.extra
+    if extra.get("objects"):
+        rows.append(("Objects (o)", ", ".join(extra["objects"][:8])
+                     + (" …" if len(extra["objects"]) > 8 else "")))
+    if extra.get("groups"):
+        rows.append(("Groups (g)", ", ".join(extra["groups"][:8])
+                     + (" …" if len(extra["groups"]) > 8 else "")))
+    if extra.get("libraries"):
+        rows.append(("Material libraries", ", ".join(extra["libraries"])))
+        resolved = extra.get("materials_resolved", 0)
+        rows.append(("Materials resolved", f"{resolved} from the .mtl"
+                     if resolved else "none — the .mtl was not found beside the file"))
+    if extra.get("smoothing_groups"):
+        rows.append(("Smoothing groups", extra["smoothing_groups"]))
+    if extra.get("line_or_point_statements"):
+        rows.append(("Line/point statements", f"{extra['line_or_point_statements']}"
+                                              " (not rendered)"))
+
+
+def _render_blend_rows(rows: list[tuple[str, Any]], doc) -> None:
+    extra = doc.extra
+    rows.append(("Blender version", extra.get("blender_version_text", "unknown")))
+    compression = extra.get("compression", "none")
+    rows.append(("Compression", compression if compression != "none" else "none"))
+    if compression == "zstd":
+        return
+    rows.append(("Pointer size", f"{extra.get('pointer_size', '?')} bytes"))
+    rows.append(("Endianness", extra.get("endianness", "?")))
+    rows.append(("File blocks", f"{extra.get('block_count', 0):,}"))
+    rows.append(("Datablocks", f"{extra.get('datablocks', 0):,}"))
+    rows.append(("DNA", f"{extra.get('struct_count', 0):,} structs, "
+                        f"{extra.get('type_count', 0):,} types, "
+                        f"{extra.get('name_count', 0):,} field names"))
 
 
 def _render_metadata(out: _Out, analysis: Analysis) -> None:
@@ -469,6 +524,7 @@ def to_dict(analysis: Analysis, *, include_tree: bool = False,
         "file": {
             "path": doc.path,
             "size_bytes": doc.file_size,
+            "format": doc.format,
             "encoding": doc.encoding,
             "version": doc.version,
             "version_dotted": version.dotted if version else None,
@@ -523,6 +579,7 @@ def to_dict(analysis: Analysis, *, include_tree: bool = False,
         "unparented_models": [obj.display_name for obj in analysis.orphans],
         "warnings": doc.warnings,
         "media": analysis.media,
+        "format_details": doc.extra,
     }
     if include_tree:
         data["records"] = _node_dict(doc.root, tree_depth, 0)

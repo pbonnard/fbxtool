@@ -122,12 +122,14 @@ def test_missing_file_reports_an_error(capsys, tmp_path):
     assert "nope.fbx" in err
 
 
-def test_non_fbx_file_reports_an_error(capsys, tmp_path):
+def test_unrecognised_file_reports_an_error(capsys, tmp_path):
     path = tmp_path / "notes.txt"
     path.write_text("just some prose, nothing structured at all\n")
     status, _, err = run(capsys, str(path))
     assert status == 1
-    assert "not an FBX file" in err
+    assert "unrecognised format" in err
+    # The path should appear once, not twice.
+    assert err.count(str(path)) == 1
 
 
 def test_one_bad_file_does_not_stop_the_others(capsys, binary_cube, tmp_path):

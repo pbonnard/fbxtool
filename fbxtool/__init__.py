@@ -26,7 +26,9 @@ from .model import (
     Property,
     UnsupportedFormatError,
 )
-from .reader import detect_format, parse_bytes, read_fbx
+from .blend import parse_blend
+from .obj import parse_mtl, parse_obj
+from .reader import detect_format, parse_bytes, read_fbx, read_model
 from .report import render_text, render_tree, to_dict
 from .versions import KNOWN_VERSIONS, VersionInfo, describe
 
@@ -53,7 +55,11 @@ __all__ = [
     "parse_ascii",
     "parse_binary",
     "parse_bytes",
+    "parse_blend",
+    "parse_mtl",
+    "parse_obj",
     "read_fbx",
+    "read_model",
     "render_text",
     "render_tree",
     "to_dict",

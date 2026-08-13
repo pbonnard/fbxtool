@@ -236,7 +236,9 @@ class Document:
     """A parsed FBX file."""
 
     root: Node
-    encoding: str  # "binary" or "ascii"
+    encoding: str  # "binary", "ascii" or "obj"
+    #: Which family the file belongs to: "fbx", "obj" or "blend".
+    format: str = "fbx"
     version: int | None = None
     path: str | None = None
     file_size: int = 0
@@ -248,6 +250,8 @@ class Document:
     #: Where the version came from ("header", "FBXHeaderExtension", "comment").
     version_source: str | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Format-specific facts that do not fit the FBX-shaped fields.
+    extra: dict = field(default_factory=dict)
 
     @property
     def top_level(self) -> Sequence[Node]:

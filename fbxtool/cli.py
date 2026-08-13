@@ -18,10 +18,18 @@ __all__ = ["main", "build_parser"]
 _EPILOG = """\
 examples:
   fbxinfo scene.fbx                     summary: version, settings, objects, hierarchy
+  fbxinfo model.obj                     the same report for a Wavefront OBJ
+  fbxinfo scene.blend                   Blender container: version, blocks, DNA
   fbxinfo scene.fbx --tree --depth 3    the record tree, three levels deep
   fbxinfo scene.fbx --objects --props   every object plus full property values
   fbxinfo scene.fbx --json > scene.json machine-readable output
-  fbxinfo *.fbx --brief                 one line per file
+  fbxinfo *.fbx *.obj --brief           one line per file
+
+An .obj is read with any .mtl it names from the same directory, and is
+normalised into the same record tree as FBX, so every option below applies.
+A .blend is reported as a container — version, file-blocks and SDNA — since
+its struct layouts are Blender's internal business and change between
+releases; no geometry is extracted from one.
 """
 
 
@@ -29,13 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fbxinfo",
         description=(
-            "Report the format version and object structure of FBX files, "
-            "in both the ASCII and binary encodings."
+            "Report the format version and object structure of model files: "
+            "FBX (binary and ASCII), Wavefront OBJ, and Blender .blend."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("files", metavar="FILE", nargs="+", help="FBX file(s) to inspect")
+    parser.add_argument("files", metavar="FILE", nargs="+",
+                        help="model file(s) to inspect: .fbx, .obj or .blend")
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -119,7 +128,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             doc = read_fbx(path, load_arrays=load_arrays, max_array_values=max_array)
         except FbxError as exc:
-            print(f"fbxinfo: {path}: {exc}", file=sys.stderr)
+            # Reader errors already carry the path.
+            message = str(exc)
+            if not message.startswith(path):
+                message = f"{path}: {message}"
+            print(f"fbxinfo: {message}", file=sys.stderr)
             status = 1
             continue
         except OSError as exc:
@@ -163,13 +176,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _brief(path: str, analysis) -> str:
-    version = analysis.version
-    version_text = version.label if version else "version unknown"
     doc = analysis.doc
+    if doc.format == "obj":
+        descriptor = "Wavefront OBJ"
+    elif doc.format == "blend":
+        descriptor = f"Blender {doc.extra.get('blender_version_text', '?')}"
+    else:
+        version = analysis.version
+        descriptor = f"{doc.encoding}  |  " + (version.label if version
+                                               else "version unknown")
     parts = [
         path,
-        doc.encoding,
-        version_text,
+        descriptor,
         f"{analysis.total_records:,} records",
         f"{analysis.object_count:,} objects",
         f"{len(analysis.connections):,} connections",
