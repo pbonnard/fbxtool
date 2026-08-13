@@ -63,6 +63,85 @@ const FbxViewer = (function () {
     return mix(low, high, step(vec3(0.0031308), c));
   }`;
 
+  /* Shared by the model and the ground: how much sun reaches a point.
+   *
+   * The map is rendered once per mesh from the sun's direction, so orbiting
+   * the camera costs nothing. Comparison sampling gives 2x2 filtering in the
+   * hardware, and four taps around the point soften the edge further. */
+  const SHADOW_LOOKUP = `
+  uniform highp sampler2DShadow uShadowMap;
+  uniform mat4 uShadowMatrix;
+  uniform float uShadowTexel;   // one texel in shadow-map space
+  uniform int uShadowReady;
+
+  float sunlight(vec3 worldPosition, float slope) {
+    if (uShadowReady == 0) return 1.0;
+    vec4 shadowPosition = uShadowMatrix * vec4(worldPosition, 1.0);
+    vec3 coord = shadowPosition.xyz / shadowPosition.w * 0.5 + 0.5;
+    // Nothing outside the map is in shadow: it simply was not drawn.
+    if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0
+        || coord.z > 1.0) return 1.0;
+    // A surface facing away from the sun needs more slack against its own depth.
+    coord.z -= mix(0.0015, 0.006, clamp(slope, 0.0, 1.0));
+    float sum = 0.0;
+    for (int y = -1; y <= 1; y += 2) {
+      for (int x = -1; x <= 1; x += 2) {
+        vec2 at = coord.xy + vec2(float(x), float(y)) * uShadowTexel;
+        sum += texture(uShadowMap, vec3(at, coord.z));
+      }
+    }
+    return sum * 0.25;
+  }`;
+
+  /* Depth only, from the sun's point of view. */
+  const SHADOW_VERTEX = `#version 300 es
+  precision highp float;
+  layout(location = 0) in vec3 aPosition;
+  uniform mat4 uShadowMatrix;
+  uniform mat4 uModel;
+  void main() {
+    gl_Position = uShadowMatrix * uModel * vec4(aPosition, 1.0);
+  }`;
+
+  const SHADOW_FRAGMENT = `#version 300 es
+  precision highp float;
+  void main() {}`;
+
+  /* The floor the model stands on: a disc under the scene, fading out. */
+  const GROUND_VERTEX = `#version 300 es
+  precision highp float;
+  layout(location = 0) in vec2 aCorner;
+  uniform mat4 uModelView;
+  uniform mat4 uProjection;
+  uniform float uRadius;
+  uniform float uHeight;
+  out vec3 vWorld;
+  void main() {
+    vWorld = vec3(aCorner.x * uRadius, uHeight, aCorner.y * uRadius);
+    gl_Position = uProjection * uModelView * vec4(vWorld, 1.0);
+  }`;
+
+  const GROUND_FRAGMENT = `#version 300 es
+  precision highp float;
+  in vec3 vWorld;
+  uniform float uRadius;
+  out vec4 fragColour;
+${ENVIRONMENT}
+${SHADOW_LOOKUP}
+
+  void main() {
+    // Lit by the sky above it, darkened where the model blocks the sun.
+    float shadow = sunlight(vWorld, 0.0);
+    vec3 sky = mix(ENV_HORIZON, ENV_ZENITH, 0.55) + ENV_SOFTBOX * 0.06;
+    vec3 albedo = vec3(0.06);
+    vec3 lit = albedo * (sky + SUN_COLOUR * max(SUN_DIR.y, 0.0) * shadow * 0.45);
+
+    // A pool of floor around the model rather than a room: solid under it,
+    // gone a few radii out, with no edge anywhere to give it away.
+    float fade = 1.0 - smoothstep(0.08, 0.5, length(vWorld.xz) / uRadius);
+    fragColour = vec4(encodeSrgb(toneMap(lit)), fade);
+  }`;
+
   /* A full-screen triangle showing the environment behind the model. */
   const BACKGROUND_VERTEX = `#version 300 es
   precision highp float;
@@ -96,15 +175,20 @@ ${ENVIRONMENT}
   uniform mat4 uModelView;
   uniform mat4 uProjection;
   uniform mat3 uNormalMatrix;
+  uniform mat4 uModel;
 
   out vec3 vNormal;
   out vec3 vViewPosition;
+  out vec3 vWorld;
   out float vMaterial;
   out vec2 vUv;
 
   void main() {
     vec4 viewPosition = uModelView * vec4(aPosition, 1.0);
     vViewPosition = viewPosition.xyz;
+    // The same space the environment and the shadow map are in: the model
+    // placed and turned the right way up, before the camera.
+    vWorld = (uModel * vec4(aPosition, 1.0)).xyz;
     vNormal = uNormalMatrix * aNormal;
     vMaterial = aMaterial;
     vUv = aUv;
@@ -116,6 +200,7 @@ ${ENVIRONMENT}
 
   in vec3 vNormal;
   in vec3 vViewPosition;
+  in vec3 vWorld;
   in float vMaterial;
   in vec2 vUv;
 
@@ -133,6 +218,7 @@ ${ENVIRONMENT}
 
   out vec4 fragColour;
 ${ENVIRONMENT}
+${SHADOW_LOOKUP}
 
   const float PI = 3.141592653589793;
 
@@ -254,7 +340,9 @@ ${ENVIRONMENT}
     if (nol > 0.0) {
       vec3 specular = fresnelSchlick(f0, voh)
         * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a));
-      direct = (diffuseColour / PI + specular) * SUN_COLOUR * nol;
+      // Whatever the model puts between this point and the sun.
+      float shadow = sunlight(vWorld, 1.0 - nol);
+      direct = (diffuseColour / PI + specular) * SUN_COLOUR * nol * shadow;
     }
 
     // The environment, which is what makes a curved surface read as a surface.
@@ -277,6 +365,25 @@ ${ENVIRONMENT}
 
   function identity() {
     return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  }
+
+  /** The sun, matching SUN_DIR in the shaders. */
+  const SUN = (() => {
+    const v = [0.35, 0.85, 0.40];
+    const length = Math.hypot(...v);
+    return v.map((c) => c / length);
+  })();
+
+  /** A symmetric box, for the sun's view of the scene. */
+  function orthographic(radius, depth) {
+    const near = 0.01;
+    const out = new Float32Array(16);
+    out[0] = 1 / radius;
+    out[5] = 1 / radius;
+    out[10] = -2 / (depth - near);
+    out[14] = -(depth + near) / (depth - near);
+    out[15] = 1;
+    return out;
   }
 
   function perspective(fovY, aspect, near, far) {
@@ -390,6 +497,7 @@ ${ENVIRONMENT}
 
       this._initProgram();
       this._initBuffers();
+      this._initGround();
       this._bindInput();
 
       const gl = this.gl;
@@ -453,6 +561,93 @@ ${ENVIRONMENT}
       };
       // A vertex array is still required to draw, even with no attributes.
       this.backgroundVao = gl.createVertexArray();
+
+      this.shadowProgram = this._link(SHADOW_VERTEX, SHADOW_FRAGMENT, 'shadow');
+      this.shadowUniforms = {
+        shadowMatrix: gl.getUniformLocation(this.shadowProgram, 'uShadowMatrix'),
+        model: gl.getUniformLocation(this.shadowProgram, 'uModel'),
+      };
+
+      this.groundProgram = this._link(GROUND_VERTEX, GROUND_FRAGMENT, 'ground');
+      this.groundUniforms = {
+        modelView: gl.getUniformLocation(this.groundProgram, 'uModelView'),
+        projection: gl.getUniformLocation(this.groundProgram, 'uProjection'),
+        radius: gl.getUniformLocation(this.groundProgram, 'uRadius'),
+        height: gl.getUniformLocation(this.groundProgram, 'uHeight'),
+      };
+      this.uniforms.model = gl.getUniformLocation(program, 'uModel');
+      for (const [name, uniforms] of [[this.groundProgram, this.groundUniforms],
+        [program, this.uniforms]]) {
+        Object.assign(uniforms, {
+          shadowMap: gl.getUniformLocation(name, 'uShadowMap'),
+          shadowMatrix: gl.getUniformLocation(name, 'uShadowMatrix'),
+          shadowTexel: gl.getUniformLocation(name, 'uShadowTexel'),
+          shadowReady: gl.getUniformLocation(name, 'uShadowReady'),
+        });
+      }
+    }
+
+    _link(vertexSource, fragmentSource, label) {
+      const gl = this.gl;
+      const program = gl.createProgram();
+      gl.attachShader(program, this._compile(gl.VERTEX_SHADER, vertexSource));
+      gl.attachShader(program, this._compile(gl.FRAGMENT_SHADER, fragmentSource));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(`${label} program failed to link: ${gl.getProgramInfoLog(program)}`);
+      }
+      return program;
+    }
+
+    /** A depth buffer rendered from the sun, and a quad for the floor. */
+    _initGround() {
+      const gl = this.gl;
+      this.shadowSize = 2048;
+      this.shadowTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, this.shadowSize,
+        this.shadowSize, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+      // Comparison sampling: the hardware filters the depth test itself.
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+
+      this.shadowBuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowBuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D,
+        this.shadowTexture, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this.shadowReady = false;
+      this.shadowStale = true;
+      this.showGround = true;
+      this.shadowRenders = 0;
+
+      this.groundVao = gl.createVertexArray();
+      gl.bindVertexArray(this.groundVao);
+      this.groundBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.groundBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER,
+        new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+    }
+
+    /**
+     * The sun's view of the scene: an orthographic box just large enough to
+     * hold the model, so the depth map spends its resolution on the model.
+     */
+    _shadowMatrix() {
+      const radius = Math.max(this.radius, 1e-4) * 1.15;
+      const distance = radius * 3;
+      const eye = SUN.map((v) => v * distance);
+      const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
+      const projection = orthographic(radius, radius * 4);
+      return multiply(projection, view);
     }
 
     _initBuffers() {
@@ -598,12 +793,17 @@ ${ENVIRONMENT}
       this.hasUv = mesh.hasUv;
 
       this.triangleCount = mesh.triangleCount;
+      this.meshMin = mesh.min.slice();
+      this.meshMax = mesh.max.slice();
       this.frame(mesh.min, mesh.max);
+      // The sun's view of the scene only changes when the scene does.
+      this.shadowStale = true;
       this.dirty = true;
     }
 
     clear() {
       this.triangleCount = 0;
+      this.shadowReady = false;
       this.dirty = true;
     }
 
@@ -630,8 +830,15 @@ ${ENVIRONMENT}
       this.dirty = true;
     }
     setShowTextures(on) { this.showTextures = on; this.dirty = true; }
-    setUpAxis(axis) { this.upAxis = axis; this.dirty = true; }
+    setUpAxis(axis) {
+      if (axis === this.upAxis) return;
+      this.upAxis = axis;
+      // Turning the model turns it under the sun as well.
+      this.shadowStale = true;
+      this.dirty = true;
+    }
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
+    setShowGround(on) { this.showGround = on !== false; this.dirty = true; }
 
     resetView() {
       this.yaw = 0.9;
@@ -711,6 +918,50 @@ ${ENVIRONMENT}
       requestAnimationFrame(this._loop);
     }
 
+    /** Where the floor sits: under the model, along whichever axis is up. */
+    _groundHeight() {
+      if (!this.meshMin) return 0;
+      const axis = this.upAxis === 'z' ? 2 : 1;
+      // The model matrix centres the mesh, so its lowest point ends up here.
+      return -(this.meshMax[axis] - this.meshMin[axis]) / 2;
+    }
+
+    /** Draw the model into the depth buffer, seen from the sun. */
+    _renderShadowMap(model, shadowMatrix) {
+      const gl = this.gl;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowBuffer);
+      gl.viewport(0, 0, this.shadowSize, this.shadowSize);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.useProgram(this.shadowProgram);
+      gl.uniformMatrix4fv(this.shadowUniforms.shadowMatrix, false, shadowMatrix);
+      gl.uniformMatrix4fv(this.shadowUniforms.model, false, model);
+      // Only back faces go in the map, which keeps a surface from shadowing
+      // itself along every edge it faces the sun with.
+      gl.cullFace(gl.FRONT);
+      gl.bindVertexArray(this.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
+      gl.bindVertexArray(null);
+      gl.cullFace(gl.BACK);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // The map is a different size from the canvas, so put the viewport back.
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      this.shadowReady = true;
+      this.shadowStale = false;
+      this.shadowRenders++;
+    }
+
+    /** Hand a program the shadow map and where to look in it. */
+    _bindShadow(uniforms, shadowMatrix, on) {
+      const gl = this.gl;
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture);
+      gl.uniform1i(uniforms.shadowMap, 2);
+      gl.uniformMatrix4fv(uniforms.shadowMatrix, false, shadowMatrix);
+      gl.uniform1f(uniforms.shadowTexel, 1 / this.shadowSize);
+      gl.uniform1i(uniforms.shadowReady, on ? 1 : 0);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+
     render() {
       const gl = this.gl;
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -739,6 +990,12 @@ ${ENVIRONMENT}
       const near = Math.max(this.radius * 0.005, 1e-3);
       const projection = perspective(0.9, aspect, near, this.radius * 100 + 10);
       const toWorld = viewToWorld(view);
+      const shadowMatrix = this._shadowMatrix();
+
+      // The sun's view of the model, redrawn only when the model changes —
+      // orbiting the camera leaves the shadows exactly where they were.
+      if (this.showGround && this.shadowStale) this._renderShadowMap(model, shadowMatrix);
+      const shadowOn = this.showGround && this.shadowReady;
 
       // The environment first, behind everything, writing no depth.
       gl.useProgram(this.backgroundProgram);
@@ -753,7 +1010,27 @@ ${ENVIRONMENT}
       gl.enable(gl.DEPTH_TEST);
       gl.depthMask(true);
 
+      // The floor the model stands on, and the shadow it drops onto it.
+      if (this.showGround) {
+        gl.useProgram(this.groundProgram);
+        gl.uniformMatrix4fv(this.groundUniforms.modelView, false, view);
+        gl.uniformMatrix4fv(this.groundUniforms.projection, false, projection);
+        gl.uniform1f(this.groundUniforms.radius, this.radius * 6);
+        gl.uniform1f(this.groundUniforms.height, this._groundHeight());
+        this._bindShadow(this.groundUniforms, shadowMatrix, shadowOn);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.disable(gl.CULL_FACE);
+        gl.bindVertexArray(this.groundVao);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.bindVertexArray(null);
+        gl.enable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+      }
+
       gl.useProgram(this.program);
+      gl.uniformMatrix4fv(this.uniforms.model, false, model);
+      this._bindShadow(this.uniforms, shadowMatrix, shadowOn);
       gl.uniformMatrix3fv(this.uniforms.viewToWorld, false, toWorld);
       gl.uniformMatrix4fv(this.uniforms.modelView, false, modelView);
       gl.uniformMatrix4fv(this.uniforms.projection, false, projection);

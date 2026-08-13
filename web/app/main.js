@@ -18,6 +18,7 @@
     modeSelect: $('mode-select'),
     upSelect: $('up-select'),
     spinToggle: $('spin-toggle'),
+    groundToggle: $('ground-toggle'),
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     tabs: document.querySelectorAll('.tab'),
@@ -135,6 +136,10 @@
       dom.panel.innerHTML = FbxReport.render(currentAnalysis);
       dom.tree.innerHTML = FbxReport.recordTree(doc.root);
       document.body.classList.add('loaded');
+      // Taken out of the layout rather than faded: assembling a large scene
+      // blocks the main thread for long enough that a CSS transition can sit
+      // at full opacity over the model for seconds.
+      dom.drop.hidden = true;
 
       const what = doc.format === 'obj' ? 'Wavefront OBJ'
         : doc.format === 'blend' ? `Blender ${doc.extra.blenderVersionText || '?'}`
@@ -899,13 +904,18 @@
     ['dragenter', 'dragover'].forEach((type) => {
       document.addEventListener(type, (event) => {
         event.preventDefault();
+        // Back into the layout, so there is something to drop onto.
+        dom.drop.hidden = false;
         dom.drop.classList.add('active');
       });
     });
     ['dragleave', 'drop'].forEach((type) => {
       document.addEventListener(type, (event) => {
         event.preventDefault();
-        if (type === 'drop' || event.relatedTarget === null) dom.drop.classList.remove('active');
+        if (type === 'drop' || event.relatedTarget === null) {
+          dom.drop.classList.remove('active');
+          if (currentDoc) dom.drop.hidden = true;
+        }
       });
     });
     document.addEventListener('drop', (event) => {
@@ -922,6 +932,8 @@
     dom.modeSelect.addEventListener('change', () => viewer.setMode(Number(dom.modeSelect.value)));
     dom.upSelect.addEventListener('change', () => viewer.setUpAxis(dom.upSelect.value));
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
+    dom.groundToggle.addEventListener('change',
+      () => viewer.setShowGround(dom.groundToggle.checked));
     dom.textureToggle.addEventListener('change',
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());

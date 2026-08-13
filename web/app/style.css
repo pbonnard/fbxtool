@@ -160,6 +160,7 @@ body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
   background: rgba(13, 15, 19, 0.86);
   transition: opacity 0.15s;
 }
+.drop[hidden] { display: none; }
 body.loaded .drop { opacity: 0; pointer-events: none; }
 .drop.active { background: rgba(26, 40, 64, 0.92); opacity: 1 !important; pointer-events: auto; }
 .drop-inner { max-width: 420px; }

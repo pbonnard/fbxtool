@@ -305,6 +305,22 @@ returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before
 being encoded back to sRGB. Highlights roll off instead of clipping.
 
+### Ground contact
+
+A model floating on nothing reads as a render however well it is lit, so the
+viewer puts a floor under it and drops a shadow onto it. The floor sits at the
+model's lowest point along whichever axis is up, and fades out a few radii
+away, so it reads as a pool of ground rather than a room with edges.
+
+The shadow is a depth map rendered from the sun, once per mesh — orbiting the
+camera does not redraw it, which is what keeps a 553,006-triangle scene
+interactive. The model samples it too, so it shadows itself: wheel arches and
+the underside of a car go dark the way they should. Only back faces go into the
+map, which is what stops a surface shadowing itself along every edge it turns
+towards the sun.
+
+The **ground** checkbox turns the whole thing off.
+
 ### Assigning materials
 
 Files are often vague about how a surface should look. The Shelby's twenty
@@ -527,6 +543,7 @@ node web/test/dump.js samples/cube_binary.fbx # the WASM reader's whole tree
 node web/test/browser.js samples/*.fbx        # the built page in Chromium
 node web/test/transparency.js glass.fbx       # reads pixels through glass
 node web/test/materials.js samples/scene_parts.fbx   # the material list
+node web/test/ground.js samples/scene_parts.fbx      # the floor and its shadow
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks
