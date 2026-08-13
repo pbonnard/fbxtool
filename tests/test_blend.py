@@ -8,6 +8,7 @@ and the SDNA field-offset arithmetic can be exercised directly.
 from __future__ import annotations
 
 import gzip
+import math
 
 import pytest
 
@@ -206,3 +207,33 @@ def test_real_file_geometry_matches_its_fbx_export(real_blend_path, real_fbx_pat
     indices = biggest.get("PolygonVertexIndex").props[0]
     fbx_indices = fbx.root.path("Objects", "Geometry", "PolygonVertexIndex").props[0]
     assert indices.array.length == fbx_indices.array.length
+
+
+def test_material_look_maps_blender_shading_onto_fbx_properties():
+    """Metalness, roughness and specular become a diffuse/specular pair."""
+    from fbxtool.blend import material_look
+
+    plastic = material_look((0.8, 0.1, 0.1), metallic=0.0, roughness=0.4, specular=0.5)
+    assert plastic["colour"] == (0.8, 0.1, 0.1)
+    # A dielectric reflects 8% of its specular value, so 0.5 gives the usual 0.04.
+    assert plastic["specular"] == pytest.approx((0.04, 0.04, 0.04))
+    # The exponent round-trips: sqrt(2 / (e + 2)) gives the roughness back.
+    assert plastic["shininess"] == pytest.approx(2 / 0.4**2 - 2)
+    assert math.sqrt(2 / (plastic["shininess"] + 2)) == pytest.approx(0.4)
+
+    metal = material_look((0.9, 0.8, 0.5), metallic=1.0, roughness=0.2)
+    assert metal["colour"] == pytest.approx((0.0, 0.0, 0.0))
+    assert metal["specular"] == pytest.approx((0.9, 0.8, 0.5))
+    assert metal["metallic"] == 1.0
+
+    # Out-of-range values are pulled back rather than producing a mirror.
+    assert material_look((1, 1, 1), roughness=0.0)["shininess"] < 3000
+    assert material_look((1, 1, 1), metallic=5)["metallic"] == 1.0
+
+
+def test_blend_materials_carry_their_finish():
+    """The record tree gets the whole appearance, not just a colour."""
+    doc = parse_blend(fb.build_blend())
+    material = doc.root.path("Objects", "Material")
+    names = [entry.props[0].value for entry in material.get("Properties70").children]
+    assert names == ["DiffuseColor", "SpecularColor", "ShininessExponent", "Metallic"]

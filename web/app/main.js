@@ -310,19 +310,18 @@
   /** Objects by UID, rebuilt only when a new file is analysed. */
   let uidIndex = new Map();
 
-  /** One palette entry: the colour a material paints, and its texture. */
+  /** One palette entry: how a material shades, and the image it wears. */
   function materialEntry(material) {
     // Template defaults sit underneath, so a material with no Properties70
-    // still gets the colour its type declares.
+    // still gets the colour and finish its type declares.
     const props = FbxAnalyze.resolvedProperties(material, currentAnalysis.templates);
-    let colour = props.DiffuseColor !== undefined ? props.DiffuseColor : props.Diffuse;
-    if (typeof colour === 'number') colour = [colour, colour, colour];
-    if (!Array.isArray(colour)) colour = [0.72, 0.73, 0.76];
-    const factor = typeof props.DiffuseFactor === 'number' ? props.DiffuseFactor : 1;
+    const look = FbxAnalyze.materialAppearance(props);
     return {
       name: material.displayName,
-      // Values are linear, which is what the shader's output curve expects.
-      colour: [0, 1, 2].map((i) => (Number(colour[i]) || 0) * factor),
+      // Values are linear, which is what the shader works in.
+      colour: look.colour,
+      specular: look.specular,
+      roughness: look.roughness,
       texture: diffuseTexture(material, uidIndex, currentAnalysis.connections),
       layer: -1,
     };
@@ -355,20 +354,7 @@
       .filter((c) => c.kind === 'OO' && c.dst === modelUid)
       .map((c) => byUid.get(c.src))
       .filter((o) => o && o.nodeType === 'Material')
-      .map((material) => {
-        const props = FbxAnalyze.properties(material.node);
-        let colour = props.DiffuseColor !== undefined ? props.DiffuseColor : props.Diffuse;
-        if (typeof colour === 'number') colour = [colour, colour, colour];
-        if (!Array.isArray(colour)) colour = [0.72, 0.73, 0.76];
-        const factor = typeof props.DiffuseFactor === 'number' ? props.DiffuseFactor : 1;
-        return {
-          name: material.displayName,
-          // Values are linear, which is what the shader's output curve expects.
-          colour: [0, 1, 2].map((i) => (Number(colour[i]) || 0) * factor),
-          texture: diffuseTexture(material, byUid, info.connections),
-          layer: -1,
-        };
-      });
+      .map(materialEntry);
   }
 
   /* --------------------------------------------------------------- textures */

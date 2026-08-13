@@ -226,6 +226,55 @@ const FbxAnalyze = (function () {
     return Object.assign({}, (templates || {})[obj.nodeType] || {}, properties(obj.node));
   }
 
+  /**
+   * What a renderer needs from a material's resolved properties.
+   *
+   * FBX materials are Lambert or Phong: a diffuse colour and a specular colour,
+   * each with a factor, plus a shininess exponent. Physically based shading
+   * wants a roughness instead, and the standard mapping from a Blinn-Phong
+   * exponent is `roughness = sqrt(2 / (exponent + 2))` — so the Mercedes'
+   * shininess of 25 becomes 0.27, about right for car paint.
+   *
+   * Colours are linear; that is what exporters write and what the shader wants.
+   */
+  function materialAppearance(props) {
+    const source = props || {};
+    const vector = (value, fallback) => {
+      if (Array.isArray(value)) return [0, 1, 2].map((i) => Number(value[i]) || 0);
+      if (typeof value === 'number') return [value, value, value];
+      return fallback.slice();
+    };
+    const number = (value, fallback) => (typeof value === 'number' ? value : fallback);
+    const scale = (rgb, by) => rgb.map((v) => Math.max(0, v * by));
+
+    const diffuse = source.DiffuseColor !== undefined ? source.DiffuseColor : source.Diffuse;
+    const specular = source.SpecularColor !== undefined ? source.SpecularColor : source.Specular;
+    // A Lambert material has no specular at all; 0.04 is the usual reflectance
+    // of a dielectric at normal incidence.
+    let specularRgb = scale(vector(specular, [0.04, 0.04, 0.04]),
+      number(source.SpecularFactor, 1));
+    // A Phong specular colour scales a highlight; it is not a Fresnel
+    // reflectance, and taken literally it turns every surface into a mirror —
+    // OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at the
+    // brightest a dielectric reaches, unless the file states a metalness, in
+    // which case the value was computed rather than inferred.
+    const peak = Math.max(specularRgb[0], specularRgb[1], specularRgb[2]);
+    if (source.Metallic === undefined && peak > 0.16) {
+      specularRgb = specularRgb.map((v) => v * (0.16 / peak));
+    }
+    const shininess = number(source.ShininessExponent, number(source.Shininess, 20));
+    const transparency = number(source.TransparencyFactor,
+      1 - number(source.Opacity, 1));
+
+    return {
+      colour: scale(vector(diffuse, [0.72, 0.73, 0.76]), number(source.DiffuseFactor, 1)),
+      specular: specularRgb.map((v) => Math.min(v, 1)),
+      // Clamped away from a perfect mirror, which no shading model handles well.
+      roughness: Math.min(1, Math.max(0.05, Math.sqrt(2 / (Math.max(shininess, 0) + 2)))),
+      opacity: Math.min(1, Math.max(0, 1 - transparency)),
+    };
+  }
+
   function analyze(doc) {
     const root = doc.root;
     const out = {
@@ -521,7 +570,7 @@ const FbxAnalyze = (function () {
   return {
     analyze, describeVersion, splitObjectName, properties, arrayLength,
     child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
-    propertyTemplates, resolvedProperties,
+    propertyTemplates, resolvedProperties, materialAppearance,
   };
 })();
 

@@ -524,26 +524,64 @@ def _mesh_records(data, name, totvert, totpoly, totloop, vert_block, poly_block,
                  children)
 
 
-def _material_colours(data: bytes, blocks: list[Block], sdna: Sdna, pointer_size: int,
-                      endian: str) -> dict[int, tuple[float, float, float]]:
-    """Each material's viewport colour, keyed by its address.
+def material_look(base: tuple[float, float, float], *, metallic: float = 0.0,
+                  roughness: float = 0.5, specular: float = 0.5) -> dict[str, Any]:
+    """Blender's shading values as the diffuse/specular pair FBX describes.
 
-    This is the display colour Blender stores on the datablock. A material's
-    rendered appearance lives in its node tree, which is a different problem.
+    A metal has no diffuse and takes its reflectance from its own colour; a
+    dielectric reflects 8% of ``specular`` — the convention the Principled BSDF
+    uses. Roughness becomes a Blinn-Phong exponent, which is what an FBX
+    material carries, and which a renderer turns back into roughness.
+    """
+    metallic = min(max(metallic, 0.0), 1.0)
+    rough = min(max(roughness, 0.03), 1.0)
+    dielectric = 0.08 * min(max(specular, 0.0), 1.0)
+    return {
+        "colour": tuple(c * (1.0 - metallic) for c in base),
+        "specular": tuple(dielectric * (1.0 - metallic) + c * metallic for c in base),
+        "shininess": 2.0 / (rough * rough) - 2.0,
+        "metallic": metallic,
+    }
+
+
+def _material_looks(data: bytes, blocks: list[Block], sdna: Sdna, pointer_size: int,
+                    endian: str) -> dict[int, dict[str, Any]]:
+    """Each material's appearance, keyed by its address.
+
+    Blender keeps a viewport colour on the datablock, plus the metallic,
+    roughness and specular values its viewport and EEVEE fall back on. The
+    node tree can say something different again — that is a separate problem —
+    but these are what the file offers directly.
     """
     material = _Struct(sdna, "Material", pointer_size)
     if not (material and material.has("r")):
         return {}
-    colours = {}
+    looks = {}
     for block in blocks:
         if block.code != "MA":
             continue
+
+        def value(field: str, fallback: float) -> float:
+            if field not in material.offsets:
+                return fallback
+            try:
+                return struct.unpack_from(f"{endian}f", data,
+                                          material.at(block.offset, field))[0]
+            except struct.error:
+                return fallback
+
         try:
-            colours[block.old_pointer] = struct.unpack_from(
-                f"{endian}3f", data, material.at(block.offset, "r"))
+            base = struct.unpack_from(f"{endian}3f", data,
+                                      material.at(block.offset, "r"))
         except struct.error:
             continue
-    return colours
+        looks[block.old_pointer] = material_look(
+            base,
+            metallic=value("metallic", 0.0),
+            roughness=value("roughness", 0.5),
+            specular=value("spec", 0.5),
+        )
+    return looks
 
 
 def _node(name: str, props=None, children=None) -> Node:
@@ -594,7 +632,7 @@ def _build_records(doc: Document, data: bytes, blocks: list[Block], sdna: Sdna,
     ]))
 
     names = _datablock_names(data, blocks, sdna, pointer_size)
-    material_colours = _material_colours(data, blocks, sdna, pointer_size, endian)
+    material_looks = _material_looks(data, blocks, sdna, pointer_size, endian)
     meshes = _extract_meshes(doc, data, blocks, sdna, endian, pointer_size, load_arrays)
     by_pointer = {pointer: (node, name, slots) for node, name, pointer, slots in meshes}
 
@@ -633,7 +671,9 @@ def _build_records(doc: Document, data: bytes, blocks: list[Block], sdna: Sdna,
             continue
 
         if block.code == "MA":
-            colour = material_colours.get(block.old_pointer, (0.8, 0.8, 0.8))
+            look = material_looks.get(block.old_pointer)
+            if look is None:
+                look = material_look((0.8, 0.8, 0.8))
             objects.children.append(
                 _node("Material", [Property("L", block.old_pointer),
                                    _s(f"{label}\x00\x01Material"), _s("")], [
@@ -641,9 +681,16 @@ def _build_records(doc: Document, data: bytes, blocks: list[Block], sdna: Sdna,
                     _node("ShadingModel", [_s("phong")]),
                     _node("Properties70", [], [
                         _node("P", [_s("DiffuseColor"), _s("Color"), _s(""), _s("A"),
-                                    Property("D", float(colour[0])),
-                                    Property("D", float(colour[1])),
-                                    Property("D", float(colour[2]))]),
+                                    *[Property("D", float(c)) for c in look["colour"]]]),
+                        _node("P", [_s("SpecularColor"), _s("Color"), _s(""), _s("A"),
+                                    *[Property("D", float(c)) for c in look["specular"]]]),
+                        _node("P", [_s("ShininessExponent"), _s("Number"), _s(""), _s("A"),
+                                    Property("D", float(look["shininess"]))]),
+                        # Blender states metalness outright, so the reflectance
+                        # above is measured rather than inferred from a
+                        # highlight colour.
+                        _node("P", [_s("Metallic"), _s("Number"), _s(""), _s("A"),
+                                    Property("D", float(look["metallic"]))]),
                     ]),
                 ]))
             continue

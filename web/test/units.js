@@ -167,5 +167,62 @@ check('a material with its own colour keeps it',
 check('and still inherits what it does not set',
   FbxAnalyze.resolvedProperties(painted, templates).ShininessExponent === 20);
 
+console.log('\nanalyze: material appearance');
+// The Mercedes writes exactly this: a Phong material with a specular tint of
+// its own colour at a quarter strength, and a shininess of 25.
+const paint = FbxAnalyze.materialAppearance({
+  DiffuseColor: [0.582, 0.579, 0.563],
+  SpecularColor: [0.582, 0.579, 0.563],
+  SpecularFactor: 0.25,
+  ShininessExponent: 25,
+});
+check('the diffuse colour comes through', nearAll(paint.colour, [0.582, 0.579, 0.563]));
+check('the specular factor scales the specular colour',
+  nearAll(paint.specular, [0.1455, 0.14475, 0.14075], 1e-6), show(paint.specular));
+// roughness = sqrt(2 / (25 + 2)) = 0.2722
+check('shininess becomes roughness', near(paint.roughness, Math.sqrt(2 / 27), 1e-9),
+  paint.roughness.toFixed(4));
+check('an opaque material has full opacity', paint.opacity === 1);
+
+// The Shelby's materials are empty, so this is what its template supplies.
+// Its specular of 0.2 lands just above the dielectric cap.
+const template = FbxAnalyze.materialAppearance({
+  DiffuseColor: [0.8, 0.8, 0.8], DiffuseFactor: 1,
+  SpecularColor: [0.2, 0.2, 0.2], SpecularFactor: 1, ShininessExponent: 20,
+});
+check('template values give a plausible finish',
+  nearAll(template.colour, [0.8, 0.8, 0.8]) && nearAll(template.specular, [0.16, 0.16, 0.16])
+  && near(template.roughness, Math.sqrt(2 / 22), 1e-9), template.roughness.toFixed(4));
+
+check('a diffuse factor scales the colour',
+  nearAll(FbxAnalyze.materialAppearance({ DiffuseColor: [1, 0.5, 0], DiffuseFactor: 0.5 })
+    .colour, [0.5, 0.25, 0]));
+check('a Lambert material falls back to a dielectric specular',
+  nearAll(FbxAnalyze.materialAppearance({ DiffuseColor: [1, 1, 1] }).specular,
+    [0.04, 0.04, 0.04]));
+// `Ks 0.9 0.9 0.9` is ordinary in an OBJ material library, and as a Fresnel
+// reflectance it would make a mirror of a painted wall.
+check('a Phong highlight colour is capped at a dielectric reflectance',
+  nearAll(FbxAnalyze.materialAppearance({ SpecularColor: [0.9, 0.9, 0.9] }).specular,
+    [0.16, 0.16, 0.16], 1e-9));
+check('the cap keeps the tint',
+  nearAll(FbxAnalyze.materialAppearance({ SpecularColor: [0.8, 0.4, 0.2] }).specular,
+    [0.16, 0.08, 0.04], 1e-9));
+check('a stated metalness is left alone',
+  nearAll(FbxAnalyze.materialAppearance({ SpecularColor: [0.9, 0.8, 0.4], Metallic: 1 })
+    .specular, [0.9, 0.8, 0.4]));
+check('a scalar colour is spread across the channels',
+  nearAll(FbxAnalyze.materialAppearance({ DiffuseColor: 0.5 }).colour, [0.5, 0.5, 0.5]));
+check('a mirror is still given some roughness',
+  FbxAnalyze.materialAppearance({ ShininessExponent: 1e9 }).roughness === 0.05);
+check('no properties at all still gives a usable material', (() => {
+  const look = FbxAnalyze.materialAppearance({});
+  return look.colour.length === 3 && look.roughness > 0 && look.opacity === 1;
+})());
+check('transparency becomes opacity',
+  FbxAnalyze.materialAppearance({ TransparencyFactor: 0.25 }).opacity === 0.75);
+check('opacity is read when transparency is absent',
+  FbxAnalyze.materialAppearance({ Opacity: 0.4 }).opacity === 0.4);
+
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

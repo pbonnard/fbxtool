@@ -411,10 +411,32 @@ const FbxBlend = (function () {
       return slots;
     };
 
-    const materialColour = (block) => {
-      if (!hasFields(structs.material, 'r')) return [0.8, 0.8, 0.8];
-      const at = block.body + structs.material.offsets.r;
-      return [0, 1, 2].map((k) => view.getFloat32(at + k * 4, little));
+    /**
+     * A material's appearance, as the diffuse/specular pair FBX describes.
+     *
+     * Blender keeps a viewport colour on the datablock, plus the metallic,
+     * roughness and specular values its viewport and EEVEE fall back on. A
+     * metal has no diffuse and reflects its own colour; a dielectric reflects
+     * 8% of `specular`, the convention the Principled BSDF uses. Roughness
+     * becomes a Blinn-Phong exponent, which is what FBX materials carry.
+     */
+    const materialLook = (block) => {
+      const field = (name, fallback) => (hasFields(structs.material, name)
+        ? view.getFloat32(block.body + structs.material.offsets[name], little)
+        : fallback);
+      const base = hasFields(structs.material, 'r')
+        ? [0, 1, 2].map((k) => view.getFloat32(
+          block.body + structs.material.offsets.r + k * 4, little))
+        : [0.8, 0.8, 0.8];
+      const metallic = Math.min(Math.max(field('metallic', 0), 0), 1);
+      const roughness = Math.min(Math.max(field('roughness', 0.5), 0.03), 1);
+      const dielectric = 0.08 * Math.min(Math.max(field('spec', 0.5), 0), 1);
+      return {
+        colour: base.map((c) => c * (1 - metallic)),
+        specular: base.map((c) => dielectric * (1 - metallic) + c * metallic),
+        shininess: 2 / (roughness * roughness) - 2,
+        metallic,
+      };
     };
 
     const bulk = (code, values) => ({
@@ -487,16 +509,23 @@ const FbxBlend = (function () {
       }
 
       if (block.code === 'MA') {
-        const colour = materialColour(block);
+        const look = materialLook(block);
+        const D = (value) => ({ code: 'D', typeName: 'float64', value });
         objects.children.push(node('Material',
           [L(block.oldPointer), S(`${label}${CLASS_SEP}Material`), S('')], [
             node('Version', [I(102)]),
             node('ShadingModel', [S('phong')]),
             node('Properties70', [], [
               node('P', [S('DiffuseColor'), S('Color'), S(''), S('A'),
-                { code: 'D', typeName: 'float64', value: colour[0] },
-                { code: 'D', typeName: 'float64', value: colour[1] },
-                { code: 'D', typeName: 'float64', value: colour[2] }]),
+                ...look.colour.map(D)]),
+              node('P', [S('SpecularColor'), S('Color'), S(''), S('A'),
+                ...look.specular.map(D)]),
+              node('P', [S('ShininessExponent'), S('Number'), S(''), S('A'),
+                D(look.shininess)]),
+              // Blender states metalness outright, so the reflectance above is
+              // measured rather than inferred from a highlight colour.
+              node('P', [S('Metallic'), S('Number'), S(''), S('A'),
+                D(look.metallic)]),
             ]),
           ]));
         continue;

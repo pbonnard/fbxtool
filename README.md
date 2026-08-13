@@ -275,6 +275,36 @@ colours**, **Index colours** (a hue per material index — useful when the real
 colours are near-identical greys), **Clay** and **Normals**, with textures
 toggleable.
 
+### How it is shaded
+
+A GGX specular lobe over a Lambert diffuse, lit by one sun and by an analytic
+studio environment — a dark floor, a bright horizon band and an overhead
+softbox. A car is mostly reflections, so the environment is what makes a panel
+read as a panel; the same environment is drawn behind the model, dimmed, so
+what it reflects is what you can see.
+
+The files describe Lambert and Phong materials, which have to be mapped onto
+that:
+
+| In the file | Used as |
+| --- | --- |
+| `DiffuseColor` × `DiffuseFactor` | albedo |
+| `SpecularColor` × `SpecularFactor` | reflectance at normal incidence |
+| `Shininess` / `ShininessExponent` | roughness, `sqrt(2 / (exponent + 2))` |
+| `Opacity`, `TransparencyFactor` | read, not yet drawn |
+
+A Phong specular colour scales a highlight — it is not a Fresnel reflectance,
+and taken literally it makes a mirror of everything, since OBJ libraries
+habitually write `Ks 0.9 0.9 0.9`. It is capped at 0.16, the brightest a
+dielectric reaches, unless the file states a metalness outright. A `.blend`
+does: its materials carry `metallic`, `roughness` and `specular`, so those are
+read and converted rather than guessed at.
+
+Colour is managed end to end: images upload as `SRGB8_ALPHA8` so the sampler
+returns linear values, material colours are linear as written, shading happens
+in linear light, and the result is tone-mapped through a filmic curve before
+being encoded back to sRGB. Highlights roll off instead of clipping.
+
 ## Library
 
 ```python
