@@ -691,13 +691,34 @@ __attribute__((export_name("fbx_inflate"))) u32 fbx_inflate(u32 src_off, u32 src
  *
  * FBX stores polygons as a flat index run in which the last index of each
  * polygon is stored as its bitwise complement.  Polygons are fanned into
- * triangles; normals come from the file when it supplies them per polygon
- * vertex or per control point, and are derived from the face otherwise.
+ * triangles; normals and UVs come from the file when it supplies them, through
+ * an index array when the layer says IndexToDirect, and normals fall back to
+ * the face normal otherwise.
  */
 
-#define NRM_NONE 0
-#define NRM_BY_POLYGON_VERTEX 1
-#define NRM_BY_VERTEX 2
+/* Attribute mapping and reference modes, matching the FBX layer element
+ * declarations. IndexToDirect adds a level of indirection through an index
+ * array, which is what most exporters use for UVs. */
+#define MAP_NONE 0
+#define MAP_BY_POLYGON_VERTEX 1
+#define MAP_BY_VERTEX 2
+
+#define REF_DIRECT 0
+#define REF_INDEX_TO_DIRECT 1
+
+/* Parameter block filled by JavaScript; there are too many inputs to pass as
+ * arguments, and this keeps the two sides' layouts in one place. */
+typedef struct {
+    u32 pos_off, pos_count;         /* f64 triples */
+    u32 idx_off, idx_count;         /* i32 polygon vertex indices */
+    u32 nrm_off, nrm_count;         /* f64 triples */
+    u32 nrm_index_off, nrm_index_count;
+    u32 nrm_mapping, nrm_reference;
+    u32 uv_off, uv_count;           /* f64 pairs */
+    u32 uv_index_off, uv_index_count;
+    u32 uv_mapping, uv_reference;
+    u32 mat_off, mat_count;         /* i32, one per polygon or one overall */
+} MeshParams;
 
 typedef struct {
     u32 triangle_count;
@@ -708,6 +729,8 @@ typedef struct {
     f32 max[3];
     u32 polygon_count;
     u32 degenerate_count;
+    u32 uv_off;
+    u32 has_uv;
 } MeshOut;
 
 static MeshOut *g_mesh;
@@ -727,18 +750,35 @@ static void normalize3(f32 *v) {
     v[2] = z * inv;
 }
 
-/* positions: f64 triples, indices: i32 run, normals: optional f64 triples,
- * materials: optional i32 per polygon (or a single value when uniform). */
-__attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(
-    u32 pos_off, u32 pos_count, u32 idx_off, u32 idx_count, u32 nrm_off,
-    u32 nrm_count, u32 nrm_mapping, u32 mat_off, u32 mat_count) {
-    const f64 *positions = (const f64 *)at_off(pos_off);
-    const i32 *indices = (const i32 *)at_off(idx_off);
-    const f64 *normals = nrm_off ? (const f64 *)at_off(nrm_off) : NULL;
-    const i32 *materials = mat_off ? (const i32 *)at_off(mat_off) : NULL;
-    u32 vertex_count = pos_count / 3;
+/* Resolve which element of an attribute array a polygon vertex refers to.
+ * Returns 0xffffffff when the file does not supply one. */
+static u32 attribute_slot(u32 mapping, u32 reference, const i32 *index,
+                          u32 index_count, u32 corner, u32 control_point) {
+    if (mapping == MAP_NONE) return 0xffffffffu;
+    u32 raw = (mapping == MAP_BY_POLYGON_VERTEX) ? corner : control_point;
+    if (reference == REF_INDEX_TO_DIRECT) {
+        if (!index || raw >= index_count) return 0xffffffffu;
+        i32 value = index[raw];
+        if (value < 0) return 0xffffffffu;
+        return (u32)value;
+    }
+    return raw;
+}
 
-    /* Pass one: count polygons and the triangles they fan into. */
+__attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off) {
+    const MeshParams *p = (const MeshParams *)at_off(params_off);
+    const f64 *positions = (const f64 *)at_off(p->pos_off);
+    const i32 *indices = (const i32 *)at_off(p->idx_off);
+    const f64 *normals = p->nrm_off ? (const f64 *)at_off(p->nrm_off) : NULL;
+    const i32 *normal_index = p->nrm_index_off ? (const i32 *)at_off(p->nrm_index_off) : NULL;
+    const f64 *uvs = p->uv_off ? (const f64 *)at_off(p->uv_off) : NULL;
+    const i32 *uv_index = p->uv_index_off ? (const i32 *)at_off(p->uv_index_off) : NULL;
+    const i32 *materials = p->mat_off ? (const i32 *)at_off(p->mat_off) : NULL;
+
+    u32 idx_count = p->idx_count;
+    u32 vertex_count = p->pos_count / 3;
+
+    /* Pass one: how many triangles will the polygons fan into? */
     u32 triangles = 0, polygons = 0, run = 0;
     for (u32 i = 0; i < idx_count; i++) {
         run++;
@@ -748,7 +788,7 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(
             run = 0;
         }
     }
-    if (run >= 3) { /* a final polygon with no terminator */
+    if (run >= 3) {           /* a trailing polygon with no terminator */
         triangles += run - 2;
         polygons++;
     }
@@ -757,25 +797,24 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(
     if (!out) return 0;
     mem_zero(out, sizeof(MeshOut));
     g_mesh = out;
-    out->triangle_count = triangles;
     out->polygon_count = polygons;
     if (!triangles) return to_off(out);
 
     f32 *pos_out = (f32 *)heap_alloc(triangles * 9 * sizeof(f32));
     f32 *nrm_out = (f32 *)heap_alloc(triangles * 9 * sizeof(f32));
     f32 *mat_out = (f32 *)heap_alloc(triangles * 3 * sizeof(f32));
-    if (!pos_out || !nrm_out || !mat_out) return 0;
+    f32 *uv_out = (f32 *)heap_alloc(triangles * 6 * sizeof(f32));
+    if (!pos_out || !nrm_out || !mat_out || !uv_out) return 0;
     out->positions_off = to_off(pos_out);
     out->normals_off = to_off(nrm_out);
     out->material_off = to_off(mat_out);
+    out->uv_off = to_off(uv_out);
+    out->has_uv = uvs ? 1u : 0u;
 
     f32 lo[3] = {3.4e38f, 3.4e38f, 3.4e38f};
     f32 hi[3] = {-3.4e38f, -3.4e38f, -3.4e38f};
 
-    u32 write = 0;   /* triangles written */
-    u32 poly = 0;    /* polygon ordinal, for per-polygon materials */
-    u32 start = 0;   /* flat index where the current polygon starts */
-    u32 degenerate = 0;
+    u32 write = 0, poly = 0, start = 0, degenerate = 0;
 
     for (u32 i = 0; i <= idx_count; i++) {
         int last = (i == idx_count) ? 1 : (indices[i] < 0);
@@ -789,30 +828,27 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(
         }
 
         f32 material = 0.0f;
-        if (materials && mat_count) {
-            u32 slot = (mat_count == 1) ? 0 : (poly < mat_count ? poly : mat_count - 1);
+        if (materials && p->mat_count) {
+            u32 slot = (p->mat_count == 1) ? 0
+                     : (poly < p->mat_count ? poly : p->mat_count - 1);
             material = (f32)materials[slot];
         }
 
         for (u32 t = 1; t + 1 < n; t++) {
             u32 corner[3] = {start, start + t, start + t + 1};
             f32 tri[3][3];
+            u32 control[3];
             int ok = 1;
             for (int c = 0; c < 3; c++) {
                 i32 raw = indices[corner[c]];
                 u32 vi = (u32)(raw < 0 ? ~raw : raw);
-                if (vi >= vertex_count) {
-                    ok = 0;
-                    break;
-                }
+                if (vi >= vertex_count) { ok = 0; break; }
+                control[c] = vi;
                 tri[c][0] = (f32)positions[vi * 3 + 0];
                 tri[c][1] = (f32)positions[vi * 3 + 1];
                 tri[c][2] = (f32)positions[vi * 3 + 2];
             }
-            if (!ok) {
-                degenerate++;
-                continue;
-            }
+            if (!ok) { degenerate++; continue; }
 
             f32 face[3];
             f32 ax = tri[1][0] - tri[0][0], ay = tri[1][1] - tri[0][1], az = tri[1][2] - tri[0][2];
@@ -831,26 +867,35 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(
                     if (v > hi[k]) hi[k] = v;
                 }
 
-                f32 nx = face[0], ny = face[1], nz = face[2];
+                f32 nv[3] = {face[0], face[1], face[2]};
                 if (normals) {
-                    u32 src = 0xffffffffu;
-                    if (nrm_mapping == NRM_BY_POLYGON_VERTEX) {
-                        src = corner[c];
-                    } else if (nrm_mapping == NRM_BY_VERTEX) {
-                        i32 raw = indices[corner[c]];
-                        src = (u32)(raw < 0 ? ~raw : raw);
-                    }
-                    if (src != 0xffffffffu && src * 3 + 2 < nrm_count) {
-                        nx = (f32)normals[src * 3 + 0];
-                        ny = (f32)normals[src * 3 + 1];
-                        nz = (f32)normals[src * 3 + 2];
+                    u32 slot = attribute_slot(p->nrm_mapping, p->nrm_reference,
+                                              normal_index, p->nrm_index_count,
+                                              corner[c], control[c]);
+                    if (slot != 0xffffffffu && slot * 3 + 2 < p->nrm_count) {
+                        nv[0] = (f32)normals[slot * 3 + 0];
+                        nv[1] = (f32)normals[slot * 3 + 1];
+                        nv[2] = (f32)normals[slot * 3 + 2];
                     }
                 }
-                f32 nv[3] = {nx, ny, nz};
                 normalize3(nv);
                 nrm_out[base + 0] = nv[0];
                 nrm_out[base + 1] = nv[1];
                 nrm_out[base + 2] = nv[2];
+
+                f32 u = 0.0f, v = 0.0f;
+                if (uvs) {
+                    u32 slot = attribute_slot(p->uv_mapping, p->uv_reference,
+                                              uv_index, p->uv_index_count,
+                                              corner[c], control[c]);
+                    if (slot != 0xffffffffu && slot * 2 + 1 < p->uv_count) {
+                        u = (f32)uvs[slot * 2 + 0];
+                        v = (f32)uvs[slot * 2 + 1];
+                    }
+                }
+                uv_out[(write * 3 + c) * 2 + 0] = u;
+                uv_out[(write * 3 + c) * 2 + 1] = v;
+
                 mat_out[write * 3 + c] = material;
             }
             write++;

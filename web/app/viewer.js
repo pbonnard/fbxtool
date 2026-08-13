@@ -11,6 +11,7 @@ const FbxViewer = (function () {
   layout(location = 0) in vec3 aPosition;
   layout(location = 1) in vec3 aNormal;
   layout(location = 2) in float aMaterial;
+  layout(location = 3) in vec2 aUv;
 
   uniform mat4 uModelView;
   uniform mat4 uProjection;
@@ -19,12 +20,14 @@ const FbxViewer = (function () {
   out vec3 vNormal;
   out vec3 vViewPosition;
   out float vMaterial;
+  out vec2 vUv;
 
   void main() {
     vec4 viewPosition = uModelView * vec4(aPosition, 1.0);
     vViewPosition = viewPosition.xyz;
     vNormal = uNormalMatrix * aNormal;
     vMaterial = aMaterial;
+    vUv = aUv;
     gl_Position = uProjection * viewPosition;
   }`;
 
@@ -34,11 +37,15 @@ const FbxViewer = (function () {
   in vec3 vNormal;
   in vec3 vViewPosition;
   in float vMaterial;
+  in vec2 vUv;
 
   uniform int uMode;          // 0 file colours, 1 index colours, 2 clay, 3 normals
   uniform vec3 uClayColour;
-  uniform sampler2D uPalette; // one texel per material, in connection order
+  uniform sampler2D uPalette;      // one texel per material, in connection order
   uniform int uPaletteSize;
+  // GLSL ES 3.0 has no default precision for array samplers, unlike sampler2D.
+  uniform highp sampler2DArray uTextures; // one layer per distinct image
+  uniform int uUseTextures;
 
   out vec4 fragColour;
 
@@ -70,7 +77,16 @@ const FbxViewer = (function () {
     if (uMode == 0 && uPaletteSize > 0) {
       // The material index is a whole number carried in a float attribute.
       int slot = clamp(int(vMaterial + 0.5), 0, uPaletteSize - 1);
-      base = texelFetch(uPalette, ivec2(slot, 0), 0).rgb;
+      vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
+      base = entry.rgb;
+      // The alpha channel carries this material's texture layer, offset by one
+      // so that zero means "no texture".
+      int layer = int(entry.a * 255.0 + 0.5) - 1;
+      if (uUseTextures == 1 && layer >= 0) {
+        // A bound diffuse texture replaces the flat colour, as most DCC tools
+        // and viewers treat it.
+        base = texture(uTextures, vec3(vUv, float(layer))).rgb;
+      }
     } else if (uMode == 1) {
       base = materialColour(vMaterial);
     } else {
@@ -173,6 +189,8 @@ const FbxViewer = (function () {
 
       this.mode = 0;
       this.upAxis = 'y';
+      this.hasUv = false;
+      this.showTextures = true;
       this.triangleCount = 0;
       this.yaw = 0.7;
       this.pitch = 0.35;
@@ -226,6 +244,8 @@ const FbxViewer = (function () {
         clayColour: gl.getUniformLocation(program, 'uClayColour'),
         palette: gl.getUniformLocation(program, 'uPalette'),
         paletteSize: gl.getUniformLocation(program, 'uPaletteSize'),
+        textures: gl.getUniformLocation(program, 'uTextures'),
+        useTextures: gl.getUniformLocation(program, 'uUseTextures'),
       };
     }
 
@@ -236,6 +256,7 @@ const FbxViewer = (function () {
       this.positionBuffer = gl.createBuffer();
       this.normalBuffer = gl.createBuffer();
       this.materialBuffer = gl.createBuffer();
+      this.uvBuffer = gl.createBuffer();
 
       const attach = (buffer, location, size) => {
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -245,6 +266,7 @@ const FbxViewer = (function () {
       attach(this.positionBuffer, 0, 3);
       attach(this.normalBuffer, 1, 3);
       attach(this.materialBuffer, 2, 1);
+      attach(this.uvBuffer, 3, 2);
       gl.bindVertexArray(null);
 
       this.paletteTexture = gl.createTexture();
@@ -255,6 +277,9 @@ const FbxViewer = (function () {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, null);
+
+      this.textureArray = gl.createTexture();
+      this.textureLayers = 0;
     }
 
     /**
@@ -262,21 +287,66 @@ const FbxViewer = (function () {
      * order they connect to the model, which is what the per-polygon material
      * index refers to. Colours are linear, matching the shader's output curve.
      */
-    setPalette(colours) {
+    setPalette(materials) {
       const gl = this.gl;
-      this.paletteSize = colours.length;
-      if (!colours.length) { this.dirty = true; return; }
-      const data = new Uint8Array(colours.length * 4);
-      colours.forEach((rgb, i) => {
+      this.paletteSize = materials.length;
+      if (!materials.length) { this.dirty = true; return; }
+      const data = new Uint8Array(materials.length * 4);
+      materials.forEach((material, i) => {
+        const rgb = material.colour || [0.72, 0.73, 0.76];
         for (let k = 0; k < 3; k++) {
           data[i * 4 + k] = Math.max(0, Math.min(255, Math.round((rgb[k] || 0) * 255)));
         }
-        data[i * 4 + 3] = 255;
+        // Layer index + 1, so 0 reads as "this material has no texture".
+        const layer = Number.isInteger(material.layer) ? material.layer : -1;
+        data[i * 4 + 3] = Math.max(0, Math.min(255, layer + 1));
       });
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, colours.length, 1, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, materials.length, 1, 0,
         gl.RGBA, gl.UNSIGNED_BYTE, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
+      this.dirty = true;
+    }
+
+    /**
+     * Upload decoded images as a 2D array texture, one layer each.
+     *
+     * Array layers must share dimensions, so every image is drawn into a
+     * common square first. That costs some fidelity on non-square textures but
+     * keeps the whole mesh to a single draw call.
+     */
+    setTextures(images, edge = 1024) {
+      const gl = this.gl;
+      this.textureLayers = images.length;
+      if (!images.length) { this.dirty = true; return; }
+
+      const size = Math.min(edge, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const context = canvas.getContext('2d');
+
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+      gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8, size, size, images.length,
+        0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      images.forEach((image, layer) => {
+        context.clearRect(0, 0, size, size);
+        // FBX texture space has V running upwards; flip once here rather than
+        // in the shader so the UVs stay as the file wrote them.
+        context.save();
+        context.translate(0, size);
+        context.scale(1, -1);
+        context.drawImage(image, 0, 0, size, size);
+        context.restore();
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, size, size, 1,
+          gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+      });
+      gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
       this.dirty = true;
     }
 
@@ -290,7 +360,10 @@ const FbxViewer = (function () {
       gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.materialBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, mesh.materials, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.uvs, gl.STATIC_DRAW);
       gl.bindVertexArray(null);
+      this.hasUv = mesh.hasUv;
 
       this.triangleCount = mesh.triangleCount;
       this.frame(mesh.min, mesh.max);
@@ -317,6 +390,7 @@ const FbxViewer = (function () {
     }
 
     setMode(mode) { this.mode = mode; this.dirty = true; }
+    setShowTextures(on) { this.showTextures = on; this.dirty = true; }
     setUpAxis(axis) { this.upAxis = axis; this.dirty = true; }
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
 
@@ -435,6 +509,11 @@ const FbxViewer = (function () {
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
       gl.uniform1i(this.uniforms.palette, 0);
       gl.uniform1i(this.uniforms.paletteSize, this.paletteSize);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+      gl.uniform1i(this.uniforms.textures, 1);
+      gl.uniform1i(this.uniforms.useTextures,
+        (this.textureLayers > 0 && this.hasUv && this.showTextures !== false) ? 1 : 0);
 
       gl.bindVertexArray(this.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);

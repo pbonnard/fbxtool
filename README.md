@@ -179,6 +179,30 @@ disagrees with the declared `UpAxis`, which happens in practice: a model
 resting on a ground plane has its minimum at zero along the up axis. The
 choice is shown, and can be overridden.
 
+### Materials and textures
+
+Surfaces are drawn in the file's own `DiffuseColor`. A per-polygon material
+index does not name a material directly — it indexes the materials connected
+to the *model* that owns the geometry, in connection order — so the palette is
+resolved through the connection graph.
+
+Diffuse textures are followed from `Material` through the object-to-property
+connection that names `DiffuseColor`, then on to the `Video` clip holding the
+image:
+
+- **Embedded** images (a `Content` property of raw bytes) load on their own.
+- **Referenced** images — just a filename, which is what most exporters write —
+  need the image supplied. Drop it in with the `.fbx`, or afterwards; files are
+  matched on basename, so the exporter's original absolute path does not
+  matter. Until then the mesh renders in flat colour and the viewport says
+  which filename it is waiting for.
+
+UV and normal layers are read for both `Direct` and `IndexToDirect` reference
+modes, per polygon vertex or per control point. Shading modes are **File
+colours**, **Index colours** (a hue per material index — useful when the real
+colours are near-identical greys), **Clay** and **Normals**, with textures
+toggleable.
+
 ## Library
 
 ```python

@@ -256,19 +256,44 @@ const FbxWasm = (function () {
   /* ------------------------------------------------------------------ mesh */
 
   const MAPPING = { none: 0, byPolygonVertex: 1, byVertex: 2 };
+  const REFERENCE = { direct: 0, indexToDirect: 1 };
+
+  /** Field order of the MeshParams block in fbx.c. */
+  const PARAM_FIELDS = [
+    'posOff', 'posCount', 'idxOff', 'idxCount',
+    'nrmOff', 'nrmCount', 'nrmIndexOff', 'nrmIndexCount', 'nrmMapping', 'nrmReference',
+    'uvOff', 'uvCount', 'uvIndexOff', 'uvIndexCount', 'uvMapping', 'uvReference',
+    'matOff', 'matCount',
+  ];
+
+  const slot = (pair) => (pair ? pair.offset : 0);
+  const size = (pair) => (pair ? pair.count : 0);
 
   /**
-   * Triangulate a mesh. `positions` and `indices` are {offset, count} pairs in
-   * linear memory; `normals` and `materials` are optional.
+   * Triangulate a mesh.
+   *
+   * Every array is an {offset, count} pair in linear memory. `normals` and
+   * `uvs` may each carry an `index` pair when the layer is IndexToDirect.
    */
-  function buildMesh(positions, indices, normals, mapping, materials) {
-    const result = exports_.fbx_build_mesh(
-      positions.offset, positions.count,
-      indices.offset, indices.count,
-      normals ? normals.offset : 0, normals ? normals.count : 0,
-      MAPPING[mapping] || 0,
-      materials ? materials.offset : 0, materials ? materials.count : 0,
-    );
+  function buildMesh(spec) {
+    const values = {
+      posOff: spec.positions.offset, posCount: spec.positions.count,
+      idxOff: spec.indices.offset, idxCount: spec.indices.count,
+      nrmOff: slot(spec.normals), nrmCount: size(spec.normals),
+      nrmIndexOff: slot(spec.normalIndex), nrmIndexCount: size(spec.normalIndex),
+      nrmMapping: MAPPING[spec.normalMapping] || 0,
+      nrmReference: REFERENCE[spec.normalReference] || 0,
+      uvOff: slot(spec.uvs), uvCount: size(spec.uvs),
+      uvIndexOff: slot(spec.uvIndex), uvIndexCount: size(spec.uvIndex),
+      uvMapping: MAPPING[spec.uvMapping] || 0,
+      uvReference: REFERENCE[spec.uvReference] || 0,
+      matOff: slot(spec.materials), matCount: size(spec.materials),
+    };
+    const block = exports_.fbx_alloc(PARAM_FIELDS.length * 4);
+    const params = new Uint32Array(exports_.memory.buffer, block, PARAM_FIELDS.length);
+    PARAM_FIELDS.forEach((name, i) => { params[i] = values[name] >>> 0; });
+
+    const result = exports_.fbx_build_mesh(block);
     if (!result) throw new Error('mesh building ran out of memory');
 
     const dv = view();
@@ -280,19 +305,24 @@ const FbxWasm = (function () {
     const max = [28, 32, 36].map((o) => dv.getFloat32(result + o, true));
     const polygonCount = dv.getUint32(result + 40, true);
     const degenerate = dv.getUint32(result + 44, true);
+    const uvAt = dv.getUint32(result + 48, true);
+    const hasUv = dv.getUint32(result + 52, true) === 1;
 
     const vertices = triangleCount * 9;
     const buffer = exports_.memory.buffer;
+    const empty = new Float32Array(0);
     return {
       triangleCount,
       polygonCount,
       degenerate,
+      hasUv,
       min,
       max,
       // Views into linear memory — copied before the next parse, not retained.
-      positions: triangleCount ? new Float32Array(buffer, positionsAt, vertices) : new Float32Array(0),
-      normals: triangleCount ? new Float32Array(buffer, normalsAt, vertices) : new Float32Array(0),
-      materials: triangleCount ? new Float32Array(buffer, materialsAt, triangleCount * 3) : new Float32Array(0),
+      positions: triangleCount ? new Float32Array(buffer, positionsAt, vertices) : empty,
+      normals: triangleCount ? new Float32Array(buffer, normalsAt, vertices) : empty,
+      materials: triangleCount ? new Float32Array(buffer, materialsAt, triangleCount * 3) : empty,
+      uvs: triangleCount ? new Float32Array(buffer, uvAt, triangleCount * 6) : empty,
     };
   }
 

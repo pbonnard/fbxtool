@@ -260,3 +260,139 @@ def cube_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
 def build_cube(version: int = 7400, *, deflate: bool = True) -> bytes:
     """A complete binary FBX file containing the sample cube scene."""
     return build_binary(cube_nodes(version, deflate=deflate), version=version)
+
+
+# --------------------------------------------------------------------------
+# textured fixtures
+
+
+def png(width: int, height: int, pixels: bytes) -> bytes:
+    """A minimal 8-bit RGB PNG, so tests need no image library."""
+    rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3]
+                    for y in range(height))
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        body = tag + payload
+        return (struct.pack(">I", len(payload)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 9))
+            + chunk(b"IEND", b""))
+
+
+def checker_png(size: int = 64, squares: int = 8) -> bytes:
+    """A two-colour checkerboard, obvious when it lands on geometry."""
+    step = max(size // squares, 1)
+    out = bytearray()
+    for y in range(size):
+        for x in range(size):
+            if ((x // step) + (y // step)) % 2:
+                out += bytes((235, 72, 48))     # orange
+            else:
+                out += bytes((32, 90, 200))     # blue
+    return png(size, size, bytes(out))
+
+
+def textured_cube_nodes(version: int = 7400, *, embed: bool = True,
+                        filename: str = "checker.png") -> list[N]:
+    """A cube carrying UVs and a diffuse texture.
+
+    UVs use ByPolygonVertex + IndexToDirect, which is what real exporters
+    write, so the index path is what gets exercised.
+    """
+    geometry_uid, model_uid, material_uid, texture_uid, video_uid = 10, 20, 30, 40, 50
+
+    vertices = [
+        -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -1.0,
+    ]
+    polygons = [0, 1, 3, -3, 2, 3, 5, -5, 4, 5, 7, -7, 6, 7, 1, -1,
+                1, 7, 5, -4, 6, 0, 2, -5]
+    # Four corners, referenced by index once per polygon vertex.
+    uv_values = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    uv_index = [0, 1, 2, 3] * 6
+
+    image = checker_png()
+
+    video_children = [
+        N("Type", [S("Clip")]),
+        N("Filename", [S(filename)]),
+        N("RelativeFilename", [S(filename)]),
+    ]
+    if embed:
+        video_children.append(N("Content", [R(image)]))
+
+    objects = N("Objects", [], [
+        N("Geometry", [L(geometry_uid), S("Geometry\x00\x01Geometry"), S("Mesh")], [
+            N("Vertices", [darr(vertices, deflate=True)]),
+            N("PolygonVertexIndex", [iarr(polygons, deflate=True)]),
+            N("GeometryVersion", [I(124)]),
+            N("LayerElementUV", [I(0)], [
+                N("Version", [I(101)]),
+                N("Name", [S("map1")]),
+                N("MappingInformationType", [S("ByPolygonVertex")]),
+                N("ReferenceInformationType", [S("IndexToDirect")]),
+                N("UV", [darr(uv_values)]),
+                N("UVIndex", [iarr(uv_index)]),
+            ]),
+            N("LayerElementMaterial", [I(0)], [
+                N("Version", [I(101)]),
+                N("MappingInformationType", [S("AllSame")]),
+                N("ReferenceInformationType", [S("IndexToDirect")]),
+                N("Materials", [iarr([0])]),
+            ]),
+            N("Layer", [I(0)], [N("Version", [I(100)])]),
+        ]),
+        N("Model", [L(model_uid), S("texturedCube\x00\x01Model"), S("Mesh")], [
+            N("Version", [I(232)]),
+        ]),
+        N("Material", [L(material_uid), S("checker\x00\x01Material"), S("")], [
+            N("Version", [I(102)]),
+            N("ShadingModel", [S("phong")]),
+            N("Properties70", [], [
+                N("P", [S("DiffuseColor"), S("Color"), S(""), S("A"),
+                        D(1.0), D(1.0), D(1.0)]),
+            ]),
+        ]),
+        N("Texture", [L(texture_uid), S("checkerTexture\x00\x01Texture"), S("")], [
+            N("Type", [S("TextureVideoClip")]),
+            N("Version", [I(202)]),
+            N("TextureName", [S("checkerTexture\x00\x01Texture")]),
+            N("FileName", [S(filename)]),
+            N("RelativeFilename", [S(filename)]),
+        ]),
+        N("Video", [L(video_uid), S(f"{filename}\x00\x01Video"), S("Clip")], video_children),
+    ])
+
+    connections = N("Connections", [], [
+        N("C", [S("OO"), L(model_uid), L(0)]),
+        N("C", [S("OO"), L(geometry_uid), L(model_uid)]),
+        N("C", [S("OO"), L(material_uid), L(model_uid)]),
+        N("C", [S("OP"), L(texture_uid), L(material_uid), S("DiffuseColor")]),
+        N("C", [S("OO"), L(video_uid), L(texture_uid)]),
+    ])
+
+    header = N("FBXHeaderExtension", [], [
+        N("FBXHeaderExtensionVersion", [I(1003)]),
+        N("FBXVersion", [I(version)]),
+        N("Creator", [S("fbxtool textured fixture")]),
+    ])
+    definitions = N("Definitions", [], [
+        N("Version", [I(100)]),
+        N("Count", [I(5)]),
+        N("ObjectType", [S("Geometry")], [N("Count", [I(1)])]),
+        N("ObjectType", [S("Model")], [N("Count", [I(1)])]),
+        N("ObjectType", [S("Material")], [N("Count", [I(1)])]),
+        N("ObjectType", [S("Texture")], [N("Count", [I(1)])]),
+        N("ObjectType", [S("Video")], [N("Count", [I(1)])]),
+    ])
+    return [header, N("Creator", [S("fbxtool textured fixture")]),
+            definitions, objects, connections]
+
+
+def build_textured_cube(version: int = 7400, *, embed: bool = True,
+                        filename: str = "checker.png") -> bytes:
+    return build_binary(textured_cube_nodes(version, embed=embed, filename=filename),
+                        version=version)

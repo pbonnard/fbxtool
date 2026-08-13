@@ -24,6 +24,11 @@ def sample_binary_path() -> str:
     return str(ROOT / "samples" / "cube_binary.fbx")
 
 
+@pytest.fixture(scope="session")
+def sample_textured_path() -> str:
+    return str(ROOT / "samples" / "cube_textured.fbx")
+
+
 @pytest.fixture
 def binary_cube(tmp_path) -> str:
     import fbxbuild as fb

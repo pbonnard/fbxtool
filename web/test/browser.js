@@ -56,12 +56,16 @@ async function main() {
   const webgl = await page.evaluate(() => !!(window.fbxtool && window.fbxtool.viewer));
   check('WebGL2 context created', webgl);
 
-  for (const file of files) {
-    const name = path.basename(file);
+  for (const entry of files) {
+    // "a.fbx+b.png" loads several files together, as a drop would.
+    const group = entry.split('+');
+    const file = group[0];
+    const expectTexture = group.length > 1 || /textured/i.test(file);
+    const name = group.map((f) => path.basename(f)).join(' + ');
     console.log(`${name}`);
     const started = Date.now();
 
-    await page.setInputFiles('#file-input', file);
+    await page.setInputFiles('#file-input', group);
     await page.waitForFunction(
       () => window.fbxtool && window.fbxtool.doc !== null,
       { timeout: 60000 },
@@ -97,6 +101,9 @@ async function main() {
         parseMs: doc.parseMilliseconds,
         hasFooter: doc.hasFooter,
         triangles: viewer ? viewer.triangleCount : 0,
+        textureLayers: viewer ? viewer.textureLayers : 0,
+        hasUv: viewer ? viewer.hasUv : false,
+        missingTextures: window.fbxtool.missingTextures || [],
         meshInfo: document.getElementById('mesh-info').textContent,
         status: document.getElementById('status').textContent,
         reportSections: document.querySelectorAll('#panel .panel-section').length,
@@ -116,6 +123,13 @@ async function main() {
       `${result.litSamples} lit samples, ${result.distinctColours} distinct colours`);
     check('no warnings', result.warnings.length === 0,
       result.warnings.length ? result.warnings.join('; ') : 'clean');
+    if (expectTexture) {
+      check('UVs present', result.hasUv);
+      check('texture uploaded', result.textureLayers > 0,
+        `${result.textureLayers} layer(s)`);
+      check('no missing textures', result.missingTextures.length === 0,
+        result.missingTextures.join(', ') || 'none');
+    }
     console.log(`       ${result.meshInfo}`);
     console.log(`       parsed in ${result.parseMs.toFixed(0)} ms, `
       + `total ${(Date.now() - started)} ms including render`);

@@ -15,7 +15,7 @@
   <div class="bar-right">
     <span id="status" class="status">Loading WebAssembly…</span>
     <button id="picker" type="button" class="primary">Open .fbx</button>
-    <input id="file-input" type="file" accept=".fbx" hidden>
+    <input id="file-input" type="file" accept=".fbx,image/*" multiple hidden>
   </div>
 </header>
 
@@ -34,6 +34,8 @@
         <option value="y">Y up</option>
         <option value="z">Z up</option>
       </select>
+      <label class="check"><input id="texture-toggle" type="checkbox" checked disabled>
+        textures</label>
       <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
       <button id="reset-view" type="button">Reset view</button>
     </div>
@@ -44,6 +46,9 @@
         <p>Binary or ASCII. Everything runs in this tab — the file is parsed by
            a WebAssembly module and drawn with WebGL, and never leaves your
            machine.</p>
+        <p class="hint">Textures embedded in the file load automatically. If it
+           references images by filename instead, drop those in too — together
+           or afterwards.</p>
       </div>
     </div>
   </section>

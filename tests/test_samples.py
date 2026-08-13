@@ -44,3 +44,27 @@ def test_both_encodings_agree_on_the_mesh(sample_ascii_path, sample_binary_path)
     for detail in details:
         assert "8 vertices" in detail
         assert "24 polygon indices" in detail
+
+
+def test_textured_sample_carries_an_embedded_image(sample_textured_path):
+    """The texture rides inside the file, so it needs nothing alongside it."""
+    doc = read_fbx(sample_textured_path)
+    info = analyze(doc)
+    assert doc.warnings == []
+    assert info.object_counts["Texture"] == 1
+    assert info.object_counts["Video (Clip)"] == 1
+
+    video = doc.root.path("Objects", "Video")
+    content = video.get("Content").props[0].value
+    assert content[:8] == b"\x89PNG\r\n\x1a\n", "the embedded payload should be a PNG"
+    assert len(content) > 100
+
+
+def test_textured_sample_uses_indexed_uvs(sample_textured_path):
+    """IndexToDirect is what real exporters write, so the fixture uses it."""
+    geometry = read_fbx(sample_textured_path).root.path("Objects", "Geometry")
+    uv = geometry.get("LayerElementUV")
+    assert uv.path_value("MappingInformationType") == "ByPolygonVertex"
+    assert uv.path_value("ReferenceInformationType") == "IndexToDirect"
+    assert uv.get("UV").props[0].array.length == 8        # four corners
+    assert uv.get("UVIndex").props[0].array.length == 24  # one per polygon vertex

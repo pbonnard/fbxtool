@@ -180,7 +180,19 @@ def test_page_renders_in_a_browser(built):
         pytest.skip("node is unavailable")
 
     samples = [str(ROOT / "samples" / "cube_binary.fbx"),
-               str(ROOT / "samples" / "cube_ascii.fbx")]
+               str(ROOT / "samples" / "cube_ascii.fbx"),
+               # Embedded texture: loads with no help from the user.
+               str(ROOT / "samples" / "cube_textured.fbx")]
+
+    # A file that references its texture by name, with the image supplied
+    # alongside — "a+b" tells the harness to load them together.
+    import tempfile
+    import fbxbuild as fb
+
+    external = Path(tempfile.mkdtemp()) / "cube_external.fbx"
+    external.write_bytes(fb.build_textured_cube(embed=False, filename="art/checker.png"))
+    samples.append(f"{external}+{ROOT / 'samples' / 'checker.png'}")
+
     real = os.environ.get("FBXTOOL_SAMPLE")
     if real and Path(real).is_file():
         samples.append(real)
