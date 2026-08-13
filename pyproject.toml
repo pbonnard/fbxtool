@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fbxtool"
+version = "1.0.0"
+description = "Inspect FBX files — format version and object structure, ASCII and binary — with no dependencies."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["fbx", "autodesk", "3d", "mesh", "file-format", "inspector"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+fbxinfo = "fbxtool.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["fbxtool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
