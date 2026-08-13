@@ -66,13 +66,17 @@ async function main() {
     console.log(`${name}`);
     const started = Date.now();
 
+    // The page counts finished loads, so waiting is exact even when a previous
+    // file already left a document and a mesh in place.
+    const before = await page.evaluate(() => window.fbxtool.loadCount);
     await page.setInputFiles('#file-input', group);
     await page.waitForFunction(
-      () => window.fbxtool && window.fbxtool.doc !== null,
-      { timeout: 60000 },
+      (seen) => window.fbxtool.loadCount > seen,
+      before,
+      { timeout: 180000 },
     );
     // Let the render loop draw at least one frame with the new mesh.
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(700);
 
     const result = await page.evaluate(() => {
       const { doc, analysis, viewer } = window.fbxtool;

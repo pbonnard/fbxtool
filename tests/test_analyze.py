@@ -255,3 +255,105 @@ def test_both_offset_widths_produce_the_same_scene(version):
     assert info.object_counts["Model (Mesh)"] == 1
     assert info.roots[0].children[0].obj.uid == 2000
     assert info.doc.warnings == []
+
+
+# ------------------------------------------------------------------ templates
+
+
+TEMPLATE_TEXT = """\
+FBXHeaderExtension:  {
+\tFBXVersion: 7400
+}
+Definitions:  {
+\tObjectType: "Material" {
+\t\tCount: 2
+\t\tPropertyTemplate: "FbxSurfacePhong" {
+\t\t\tProperties70:  {
+\t\t\t\tP: "DiffuseColor", "Color", "", "A",0.8,0.1,0.05
+\t\t\t\tP: "ShininessExponent", "Number", "", "A",20
+\t\t\t}
+\t\t}
+\t}
+\tObjectType: "Model" {
+\t\tCount: 1
+\t\tPropertyTemplate: "FbxNode" {
+\t\t\tProperties70:  {
+\t\t\t\tP: "Visibility", "Visibility", "", "A",1
+\t\t\t}
+\t\t}
+\t}
+\tObjectType: "Geometry" {
+\t\tCount: 1
+\t}
+}
+Objects:  {
+\tMaterial: 3001, "Material::plain", "" {
+\t\tShadingModel: "phong"
+\t}
+\tMaterial: 3002, "Material::painted", "" {
+\t\tShadingModel: "phong"
+\t\tProperties70:  {
+\t\t\tP: "DiffuseColor", "Color", "", "A",0,0.5,1
+\t\t}
+\t}
+}
+Connections:  {
+}
+"""
+
+
+def test_property_templates_are_read():
+    from fbxtool.analyze import property_templates
+
+    info = analyze(parse_ascii(TEMPLATE_TEXT))
+    templates = property_templates(info.doc.root)
+    assert templates["Material"]["DiffuseColor"] == [0.8, 0.1, 0.05]
+    assert templates["Material"]["ShininessExponent"] == 20
+    assert templates["Model"]["Visibility"] == 1
+    # An ObjectType without a template contributes nothing.
+    assert "Geometry" not in templates
+    assert info.templates == templates
+
+
+def test_resolved_properties_fall_back_to_the_template():
+    """A material with no Properties70 still has the type's default colour."""
+    from fbxtool.analyze import resolved_properties
+
+    info = analyze(parse_ascii(TEMPLATE_TEXT))
+    plain = next(o for o in info.objects if o.name == "plain")
+    painted = next(o for o in info.objects if o.name == "painted")
+
+    assert resolved_properties(plain, info.templates)["DiffuseColor"] == [0.8, 0.1, 0.05]
+    # An object's own value wins, and it still inherits what it does not set.
+    resolved = resolved_properties(painted, info.templates)
+    assert resolved["DiffuseColor"] == [0, 0.5, 1]
+    assert resolved["ShininessExponent"] == 20
+
+
+def test_resolved_properties_without_templates():
+    from fbxtool.analyze import resolved_properties
+
+    info = analyze(parse_bytes(fb.build_cube()))
+    model = next(o for o in info.objects if o.node_type == "Model")
+    assert resolved_properties(model, {})["Lcl Translation"] == [0.0, 1.0, 0.0]
+
+
+def test_scene_fixture_describes_its_parts():
+    """The multi-part fixture: one geometry instanced by three placed models."""
+    info = analyze(parse_bytes(fb.build_scene()))
+    assert info.doc.warnings == []
+    assert info.object_counts["Model (Mesh)"] == 3
+    assert info.object_counts["Geometry (Mesh)"] == 1
+
+    models = {o.name: o for o in info.objects if o.node_type == "Model"}
+    assert set(models) == {"hub", "arm", "mirror"}
+    # The geometry is connected to every one of them.
+    geometry = next(o for o in info.objects if o.node_type == "Geometry")
+    owners = [c.dst for c in info.connections if c.src == geometry.uid]
+    assert sorted(owners) == sorted(m.uid for m in models.values())
+
+    from fbxtool.analyze import resolved_properties
+
+    for material in (o for o in info.objects if o.node_type == "Material"):
+        colour = resolved_properties(material, info.templates)["DiffuseColor"]
+        assert colour == list(fb.SCENE_DIFFUSE)

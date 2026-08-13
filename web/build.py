@@ -32,6 +32,7 @@ SCRIPTS = [
     "ascii.js",
     "obj.js",
     "blend.js",
+    "transform.js",
     "analyze.js",
     "report.js",
     "viewer.js",

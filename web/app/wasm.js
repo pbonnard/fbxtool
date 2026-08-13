@@ -264,6 +264,7 @@ const FbxWasm = (function () {
     'nrmOff', 'nrmCount', 'nrmIndexOff', 'nrmIndexCount', 'nrmMapping', 'nrmReference',
     'uvOff', 'uvCount', 'uvIndexOff', 'uvIndexCount', 'uvMapping', 'uvReference',
     'matOff', 'matCount',
+    'xformOff', 'normalXformOff', 'flipWinding', 'materialBase',
   ];
 
   const slot = (pair) => (pair ? pair.offset : 0);
@@ -288,6 +289,10 @@ const FbxWasm = (function () {
       uvMapping: MAPPING[spec.uvMapping] || 0,
       uvReference: REFERENCE[spec.uvReference] || 0,
       matOff: slot(spec.materials), matCount: size(spec.materials),
+      xformOff: spec.transform ? uploadFloat64(spec.transform).offset : 0,
+      normalXformOff: spec.normalTransform ? uploadFloat64(spec.normalTransform).offset : 0,
+      flipWinding: spec.flipWinding ? 1 : 0,
+      materialBase: spec.materialBase || 0,
     };
     const block = exports_.fbx_alloc(PARAM_FIELDS.length * 4);
     const params = new Uint32Array(exports_.memory.buffer, block, PARAM_FIELDS.length);
@@ -326,9 +331,13 @@ const FbxWasm = (function () {
     };
   }
 
+  /** Mark the allocator so scratch from one build can be rewound after use. */
+  function mark() { return exports_.fbx_heap_mark(); }
+  function release(at) { exports_.fbx_heap_release(at); }
+
   return {
     init, parseBinary, buildMesh, payloadOffset, asFloat64, asInt32,
-    uploadFloat64, uploadInt32,
+    uploadFloat64, uploadInt32, mark, release,
     get exports() { return exports_; },
     get fileOffset() { return fileOffset; },
     ARRAY_ELEMENT,

@@ -20,6 +20,8 @@ __all__ = [
     "Connection",
     "SceneNode",
     "analyze",
+    "property_templates",
+    "resolved_properties",
     "split_object_name",
 ]
 
@@ -136,6 +138,8 @@ class Analysis:
     animation: dict[str, Any] = field(default_factory=dict)
     roots: list[SceneNode] = field(default_factory=list)
     orphans: list[SceneObject] = field(default_factory=list)
+    #: Default property values per object type, from ``Definitions``.
+    templates: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def object_count(self) -> int:
@@ -164,6 +168,7 @@ def analyze(doc: Document) -> Analysis:
     analysis.max_depth = root.depth()
     _count_properties(root, analysis)
 
+    analysis.templates = property_templates(root)
     _read_header(root, analysis)
     _read_global_settings(root, analysis)
     _read_definitions(root, analysis)
@@ -319,6 +324,35 @@ def _read_global_settings(root: Node, analysis: Analysis) -> None:
     if version is not None:
         settings["version"] = version
     analysis.global_settings = settings
+
+
+def property_templates(root: Node) -> dict[str, dict[str, Any]]:
+    """Default property values per object type, from ``Definitions``.
+
+    A property a file does not set on an object is not unset — it takes the
+    value from that type's ``PropertyTemplate``. Exporters lean on this
+    heavily; a material with no ``Properties70`` at all still has a colour.
+    """
+    definitions = root.get("Definitions")
+    if definitions is None:
+        return {}
+    templates: dict[str, dict[str, Any]] = {}
+    for entry in definitions.get_all("ObjectType"):
+        template = entry.get("PropertyTemplate")
+        if template is None:
+            continue
+        name = entry.value(0, "")
+        if isinstance(name, str) and name:
+            templates[name] = _properties(template)
+    return templates
+
+
+def resolved_properties(obj: "SceneObject", templates: dict[str, dict[str, Any]]
+                        ) -> dict[str, Any]:
+    """An object's properties, with its type's template defaults underneath."""
+    merged = dict(templates.get(obj.node_type, {}))
+    merged.update(_properties(obj.node))
+    return merged
 
 
 def _read_definitions(root: Node, analysis: Analysis) -> None:

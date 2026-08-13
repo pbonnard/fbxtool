@@ -658,10 +658,32 @@ __attribute__((export_name("fbx_alloc"))) u32 fbx_alloc(u32 n) {
     return p ? to_off(p) : 0;
 }
 
+/* The allocator is a bump pointer, so a caller building many meshes can mark a
+ * high-water point and rewind to it once each result has been copied out.
+ * Without that, a scene of many parts grows linear memory repeatedly, and each
+ * growth copies everything already in it. */
+__attribute__((export_name("fbx_heap_mark"))) u32 fbx_heap_mark(void) {
+    if (!heap_ptr) heap_reset();
+    return heap_ptr;
+}
+
+__attribute__((export_name("fbx_heap_release"))) void fbx_heap_release(u32 mark) {
+    if (!(mark >= heap_start && mark <= heap_ptr)) return;
+    /* Anything above the mark is gone, including the inflate tables if they
+     * happened to be allocated there; drop the pointers so they are rebuilt
+     * rather than read back out of reclaimed memory. */
+    if (huff_scratch_lit && to_off(huff_scratch_lit) >= mark) huff_scratch_lit = NULL;
+    if (huff_scratch_dist && to_off(huff_scratch_dist) >= mark) huff_scratch_dist = NULL;
+    heap_ptr = mark;
+}
+
 __attribute__((export_name("fbx_reset"))) void fbx_reset(void) {
     heap_reset();
     huff_scratch_lit = NULL;
     huff_scratch_dist = NULL;
+    /* Claim the inflate tables up front so they sit below anything a caller
+     * later marks, and survive every release. */
+    huff_scratch_ready();
 }
 
 __attribute__((export_name("fbx_version"))) u32 fbx_version(void) { return g_version; }
@@ -718,6 +740,12 @@ typedef struct {
     u32 uv_index_off, uv_index_count;
     u32 uv_mapping, uv_reference;
     u32 mat_off, mat_count;         /* i32, one per polygon or one overall */
+    /* Optional placement. A mesh is stored in its model's local space, so a
+     * scene has to transform each part into world space before combining. */
+    u32 xform_off;                  /* 16 f64, column-major; 0 for identity */
+    u32 normal_xform_off;           /* 9 f64; 0 for identity */
+    u32 flip_winding;               /* set when the transform mirrors */
+    u32 material_base;              /* added to each index, for a shared palette */
 } MeshParams;
 
 typedef struct {
@@ -774,6 +802,9 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off
     const f64 *uvs = p->uv_off ? (const f64 *)at_off(p->uv_off) : NULL;
     const i32 *uv_index = p->uv_index_off ? (const i32 *)at_off(p->uv_index_off) : NULL;
     const i32 *materials = p->mat_off ? (const i32 *)at_off(p->mat_off) : NULL;
+    const f64 *xform = p->xform_off ? (const f64 *)at_off(p->xform_off) : NULL;
+    const f64 *normal_xform = p->normal_xform_off
+        ? (const f64 *)at_off(p->normal_xform_off) : NULL;
 
     u32 idx_count = p->idx_count;
     u32 vertex_count = p->pos_count / 3;
@@ -827,11 +858,11 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off
             continue;
         }
 
-        f32 material = 0.0f;
+        f32 material = (f32)p->material_base;
         if (materials && p->mat_count) {
             u32 slot = (p->mat_count == 1) ? 0
                      : (poly < p->mat_count ? poly : p->mat_count - 1);
-            material = (f32)materials[slot];
+            material = (f32)(materials[slot] + (i32)p->material_base);
         }
 
         for (u32 t = 1; t + 1 < n; t++) {
@@ -844,11 +875,30 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off
                 u32 vi = (u32)(raw < 0 ? ~raw : raw);
                 if (vi >= vertex_count) { ok = 0; break; }
                 control[c] = vi;
-                tri[c][0] = (f32)positions[vi * 3 + 0];
-                tri[c][1] = (f32)positions[vi * 3 + 1];
-                tri[c][2] = (f32)positions[vi * 3 + 2];
+                f64 x = positions[vi * 3 + 0];
+                f64 y = positions[vi * 3 + 1];
+                f64 z = positions[vi * 3 + 2];
+                if (xform) {
+                    f64 tx = xform[0] * x + xform[4] * y + xform[8] * z + xform[12];
+                    f64 ty = xform[1] * x + xform[5] * y + xform[9] * z + xform[13];
+                    f64 tz = xform[2] * x + xform[6] * y + xform[10] * z + xform[14];
+                    x = tx; y = ty; z = tz;
+                }
+                tri[c][0] = (f32)x;
+                tri[c][1] = (f32)y;
+                tri[c][2] = (f32)z;
             }
             if (!ok) { degenerate++; continue; }
+
+            /* A mirroring transform reverses which side a triangle faces. */
+            if (p->flip_winding) {
+                f32 swap;
+                for (int k = 0; k < 3; k++) {
+                    swap = tri[1][k]; tri[1][k] = tri[2][k]; tri[2][k] = swap;
+                }
+                u32 hold = corner[1]; corner[1] = corner[2]; corner[2] = hold;
+                u32 held = control[1]; control[1] = control[2]; control[2] = held;
+            }
 
             f32 face[3];
             f32 ax = tri[1][0] - tri[0][0], ay = tri[1][1] - tri[0][1], az = tri[1][2] - tri[0][2];
@@ -873,9 +923,21 @@ __attribute__((export_name("fbx_build_mesh"))) u32 fbx_build_mesh(u32 params_off
                                               normal_index, p->nrm_index_count,
                                               corner[c], control[c]);
                     if (slot != 0xffffffffu && slot * 3 + 2 < p->nrm_count) {
-                        nv[0] = (f32)normals[slot * 3 + 0];
-                        nv[1] = (f32)normals[slot * 3 + 1];
-                        nv[2] = (f32)normals[slot * 3 + 2];
+                        f64 nx = normals[slot * 3 + 0];
+                        f64 ny = normals[slot * 3 + 1];
+                        f64 nz = normals[slot * 3 + 2];
+                        if (normal_xform) {
+                            f64 rx = normal_xform[0] * nx + normal_xform[3] * ny
+                                   + normal_xform[6] * nz;
+                            f64 ry = normal_xform[1] * nx + normal_xform[4] * ny
+                                   + normal_xform[7] * nz;
+                            f64 rz = normal_xform[2] * nx + normal_xform[5] * ny
+                                   + normal_xform[8] * nz;
+                            nx = rx; ny = ry; nz = rz;
+                        }
+                        nv[0] = (f32)nx;
+                        nv[1] = (f32)ny;
+                        nv[2] = (f32)nz;
                     }
                 }
                 normalize3(nv);

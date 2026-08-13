@@ -125,16 +125,21 @@ def build_binary(nodes, version: int = 7400) -> bytes:
     return bytes(out)
 
 
+#: A unit cube centred on the origin, reaching ±1 along every axis.
+CUBE_VERTICES = [
+    -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+    -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -1.0,
+]
+CUBE_POLYGONS = [0, 1, 3, -3, 2, 3, 5, -5, 4, 5, 7, -7, 6, 7, 1, -1,
+                 1, 7, 5, -4, 6, 0, 2, -5]
+
+
 def cube_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
     """A small but realistic scene: one mesh, one material, one texture."""
     geometry_uid, model_uid, material_uid, texture_uid = 1000, 2000, 3000, 4000
 
-    vertices = [
-        -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-        -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -1.0,
-    ]
-    polygons = [0, 1, 3, -3, 2, 3, 5, -5, 4, 5, 7, -7, 6, 7, 1, -1,
-                1, 7, 5, -4, 6, 0, 2, -5]
+    vertices = CUBE_VERTICES
+    polygons = CUBE_POLYGONS
 
     header = N("FBXHeaderExtension", [], [
         N("FBXHeaderExtensionVersion", [I(1003)]),
@@ -261,6 +266,126 @@ def cube_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
 def build_cube(version: int = 7400, *, deflate: bool = True) -> bytes:
     """A complete binary FBX file containing the sample cube scene."""
     return build_binary(cube_nodes(version, deflate=deflate), version=version)
+
+
+# --------------------------------------------------------------------------
+# multi-part scene fixture
+
+
+#: Where each part of :func:`scene_nodes` ends up, and how big the whole is.
+#:
+#: The three parts share one cube and are chained parent to child:
+#:
+#:   hub     identity                      -> -1..1 on every axis
+#:   arm     child of hub,  T=(4,0,0) S=2  ->  x 2..6, y -2..2, z -2..2
+#:   mirror  child of arm,  T=(0,0,3) S=(1,1,-1)
+#:                                         ->  x 2..6, y -2..2, z  4..8
+#:
+#: so the assembled scene spans 7 x 4 x 10 units. The mirror's negative scale
+#: also reverses its winding, which the renderer has to undo.
+SCENE_SIZE = (7.0, 4.0, 10.0)
+SCENE_PARTS = 3
+SCENE_TRIANGLES = 36
+#: The material colour comes from the Definitions template, not the materials.
+SCENE_DIFFUSE = (0.8, 0.1, 0.05)
+
+
+def scene_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
+    """A scene that only assembles correctly when transforms are honoured.
+
+    One geometry is instanced by three models, each with its own placement and
+    its own material, and none of the materials carries a colour of its own —
+    that comes from the ``PropertyTemplate`` in ``Definitions``.
+    """
+    geometry_uid = 1000
+    hub_uid, arm_uid, mirror_uid = 2001, 2002, 2003
+    materials = {hub_uid: 3001, arm_uid: 3002, mirror_uid: 3003}
+
+    def model(uid: int, name: str, props: list[N]) -> N:
+        return N("Model", [L(uid), S(f"{name}\x00\x01Model"), S("Mesh")], [
+            N("Version", [I(232)]),
+            N("Properties70", [], props),
+            N("Shading", [C(True)]),
+            N("Culling", [S("CullingOff")]),
+        ])
+
+    def lcl(name: str, x: float, y: float, z: float) -> N:
+        return N("P", [S(f"Lcl {name}"), S(f"Lcl {name}"), S(""), S("A"),
+                       D(x), D(y), D(z)])
+
+    objects = N("Objects", [], [
+        N("Geometry", [L(geometry_uid), S("part\x00\x01Geometry"), S("Mesh")], [
+            N("Vertices", [darr(CUBE_VERTICES, deflate=deflate)]),
+            N("PolygonVertexIndex", [iarr(CUBE_POLYGONS, deflate=deflate)]),
+            N("GeometryVersion", [I(124)]),
+            N("Layer", [I(0)], [N("Version", [I(100)])]),
+        ]),
+        model(hub_uid, "hub", []),
+        model(arm_uid, "arm", [lcl("Translation", 4.0, 0.0, 0.0),
+                               lcl("Scaling", 2.0, 2.0, 2.0)]),
+        model(mirror_uid, "mirror", [lcl("Translation", 0.0, 0.0, 3.0),
+                                     lcl("Scaling", 1.0, 1.0, -1.0)]),
+        *[N("Material", [L(uid), S(f"paint{index}\x00\x01Material"), S("")], [
+            N("Version", [I(102)]),
+            N("ShadingModel", [S("phong")]),
+            N("MultiLayer", [I(0)]),
+        ]) for index, uid in enumerate(materials.values())],
+    ])
+
+    definitions = N("Definitions", [], [
+        N("Version", [I(100)]),
+        N("Count", [I(8)]),
+        N("ObjectType", [S("GlobalSettings")], [N("Count", [I(1)])]),
+        N("ObjectType", [S("Geometry")], [N("Count", [I(1)])]),
+        N("ObjectType", [S("Model")], [N("Count", [I(3)])]),
+        N("ObjectType", [S("Material")], [
+            N("Count", [I(3)]),
+            N("PropertyTemplate", [S("FbxSurfacePhong")], [
+                N("Properties70", [], [
+                    N("P", [S("DiffuseColor"), S("Color"), S(""), S("A"),
+                            D(SCENE_DIFFUSE[0]), D(SCENE_DIFFUSE[1]),
+                            D(SCENE_DIFFUSE[2])]),
+                    N("P", [S("ShininessExponent"), S("Number"), S(""), S("A"),
+                            D(20.0)]),
+                ]),
+            ]),
+        ]),
+    ])
+
+    connections = N("Connections", [], [
+        N("C", [S("OO"), L(hub_uid), L(0)]),
+        # The chain the world matrices have to walk: mirror -> arm -> hub.
+        N("C", [S("OO"), L(arm_uid), L(hub_uid)]),
+        N("C", [S("OO"), L(mirror_uid), L(arm_uid)]),
+        # One geometry, three models.
+        *[N("C", [S("OO"), L(geometry_uid), L(uid)]) for uid in materials],
+        *[N("C", [S("OO"), L(material_uid), L(model_uid)])
+          for model_uid, material_uid in materials.items()],
+    ])
+
+    header = N("FBXHeaderExtension", [], [
+        N("FBXHeaderExtensionVersion", [I(1003)]),
+        N("FBXVersion", [I(version)]),
+        N("EncryptionType", [I(0)]),
+        N("Creator", [S("fbxtool test fixture")]),
+    ])
+
+    global_settings = N("GlobalSettings", [], [
+        N("Version", [I(1000)]),
+        N("Properties70", [], [
+            N("P", [S("UpAxis"), S("int"), S("Integer"), S(""), I(1)]),
+            N("P", [S("UpAxisSign"), S("int"), S("Integer"), S(""), I(1)]),
+            N("P", [S("UnitScaleFactor"), S("double"), S("Number"), S(""), D(1.0)]),
+        ]),
+    ])
+
+    return [header, N("Creator", [S("fbxtool test fixture")]),
+            global_settings, definitions, objects, connections]
+
+
+def build_scene(version: int = 7400, *, deflate: bool = True) -> bytes:
+    """A complete binary FBX file holding the three-part scene."""
+    return build_binary(scene_nodes(version, deflate=deflate), version=version)
 
 
 # --------------------------------------------------------------------------

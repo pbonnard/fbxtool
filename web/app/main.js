@@ -30,6 +30,9 @@
   let currentAnalysis = null;
   let currentGeometry = null;
   let lastSceneFile = null;
+  let sceneParts = [];
+  /** Bumped once a file is fully read, reported and drawn. */
+  let loadCount = 0;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
@@ -65,6 +68,7 @@
       setStatus(`Added ${added} companion file(s), applying…`);
       if (lastSceneFile && libraries.length) await loadFile(lastSceneFile);
       else if (currentGeometry) await showGeometry(currentGeometry);
+      else if (sceneParts.length) await showScene();
       return;
     }
     await loadFile(scene);
@@ -104,22 +108,167 @@
 
       currentDoc = doc;
       currentAnalysis = FbxAnalyze.analyze(doc);
+      uidIndex = new Map(currentAnalysis.objects
+        .filter((o) => o.uid !== null).map((o) => [o.uid, o]));
 
       dom.panel.innerHTML = FbxReport.render(currentAnalysis);
       dom.tree.innerHTML = FbxReport.recordTree(doc.root);
       document.body.classList.add('loaded');
 
-      populateGeometry(doc);
       const what = doc.format === 'obj' ? 'Wavefront OBJ'
         : doc.format === 'blend' ? `Blender ${doc.extra.blenderVersionText || '?'}`
         : `FBX ${doc.version || '?'} ${doc.encoding}`;
       const label = `${what} · ${currentAnalysis.totalRecords.toLocaleString()} records · `
         + `${doc.parseMilliseconds.toFixed(0)} ms`;
       setStatus(label, doc.warnings.length ? 'warn' : 'ok');
+      // Last, and awaited: building a scene is the slow half of a load.
+      await populateGeometry(doc);
     } catch (error) {
       console.error(error);
       setStatus(`Could not read ${file.name}: ${error.message}`, 'error');
+    } finally {
+      loadCount += 1;
     }
+  }
+
+  /* ----------------------------------------------------------------- scene */
+
+  /**
+   * The renderable parts of a scene: every model that owns a geometry, with
+   * its transform, its parent, and its materials in slot order.
+   *
+   * A mesh is stored in its model's local space, so a scene only assembles
+   * correctly once each part is placed by its model's world matrix.
+   */
+  function collectParts() {
+    const info = currentAnalysis;
+    if (!info) return [];
+    const byUid = new Map(info.objects.filter((o) => o.uid !== null).map((o) => [o.uid, o]));
+
+    // Keyed by model, not by geometry: one mesh is often shared by several
+    // models — four wheels from one wheel — and each of those is its own part.
+    const parts = new Map();          // model uid -> part
+    for (const conn of info.connections) {
+      if (conn.kind !== 'OO') continue;
+      const geometry = byUid.get(conn.src);
+      const model = byUid.get(conn.dst);
+      if (!geometry || geometry.nodeType !== 'Geometry') continue;
+      if (!model || model.nodeType !== 'Model' || parts.has(model.uid)) continue;
+      parts.set(model.uid, {
+        model,
+        geometry,
+        materials: [],
+        parent: null,
+        properties: FbxAnalyze.resolvedProperties(model, info.templates),
+      });
+    }
+
+    for (const conn of info.connections) {
+      if (conn.kind !== 'OO') continue;
+      const part = parts.get(conn.dst);
+      const source = byUid.get(conn.src);
+      if (part && source && source.nodeType === 'Material') part.materials.push(source);
+      // Model-to-model parenting, for the transform chain.
+      const child = parts.get(conn.src);
+      if (child && byUid.get(conn.dst) && byUid.get(conn.dst).nodeType === 'Model') {
+        child.parent = conn.dst;
+      }
+    }
+    return [...parts.entries()].map(([uid, part]) => ({ uid, ...part }));
+  }
+
+  /** A part's world matrix, composed up the parent chain. */
+  function worldMatrix(part, byUid, cache) {
+    if (cache.has(part.uid)) return cache.get(part.uid);
+    let matrix = FbxTransform.localMatrix(part.properties);
+    if (part.parent !== null && byUid.has(part.parent)) {
+      const parent = byUid.get(part.parent);
+      matrix = FbxTransform.multiply(worldMatrix(parent, byUid, cache), matrix);
+    }
+    cache.set(part.uid, matrix);
+    return matrix;
+  }
+
+  /** Build every part, placed in world space, as one combined mesh. */
+  function buildScene(parts) {
+    const byUid = new Map(parts.map((p) => [p.uid, p]));
+    const cache = new Map();
+    const pieces = [];
+    const palette = [];
+
+    // Everything a part allocates is scratch once its result is copied out.
+    const heapMark = FbxWasm.mark();
+    for (const part of parts) {
+      const world = worldMatrix(part, byUid, cache);
+      const geometric = FbxTransform.geometricMatrix(part.properties);
+      const placement = geometric ? FbxTransform.multiply(world, geometric) : world;
+      const materialBase = palette.length;
+      palette.push(...part.materials.map(materialEntry));
+
+      let mesh;
+      try {
+        mesh = buildMesh(part.geometry.node, {
+          transform: placement,
+          normalTransform: FbxTransform.normalMatrix(placement),
+          // A mirroring transform reverses facing, so the winding follows.
+          flipWinding: FbxTransform.determinant3(placement) < 0,
+          materialBase,
+        });
+      } catch (error) {
+        console.warn(`skipped ${part.model.displayName}: ${error.message}`);
+        continue;
+      }
+      if (!mesh || !mesh.triangleCount) continue;
+      // Copy out now: the next build may grow memory and detach these views.
+      pieces.push({
+        positions: mesh.positions.slice(),
+        normals: mesh.normals.slice(),
+        materials: mesh.materials.slice(),
+        uvs: mesh.uvs.slice(),
+        hasUv: mesh.hasUv,
+        triangleCount: mesh.triangleCount,
+        polygonCount: mesh.polygonCount,
+        min: mesh.min,
+        max: mesh.max,
+      });
+      FbxWasm.release(heapMark);
+    }
+    if (!pieces.length) return null;
+
+    const triangleCount = pieces.reduce((sum, p) => sum + p.triangleCount, 0);
+    const polygonCount = pieces.reduce((sum, p) => sum + p.polygonCount, 0);
+    const positions = new Float32Array(triangleCount * 9);
+    const normals = new Float32Array(triangleCount * 9);
+    const uvs = new Float32Array(triangleCount * 6);
+    const materials = new Float32Array(triangleCount * 3);
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+
+    let vertexAt = 0;
+    let cornerAt = 0;
+    for (const piece of pieces) {
+      positions.set(piece.positions, vertexAt);
+      normals.set(piece.normals, vertexAt);
+      uvs.set(piece.uvs, cornerAt * 2);
+      materials.set(piece.materials, cornerAt);
+      vertexAt += piece.positions.length;
+      cornerAt += piece.materials.length;
+      for (let k = 0; k < 3; k++) {
+        if (piece.min[k] < min[k]) min[k] = piece.min[k];
+        if (piece.max[k] > max[k]) max[k] = piece.max[k];
+      }
+    }
+
+    return {
+      mesh: {
+        triangleCount, polygonCount, min, max,
+        hasUv: pieces.some((p) => p.hasUv),
+        positions, normals, uvs, materials,
+        degenerate: 0,
+      },
+      palette,
+      parts: pieces.length,
+    };
   }
 
   /* -------------------------------------------------------------- geometry */
@@ -143,6 +292,41 @@
     return { axis: declared, fromGeometry: false };
   }
 
+  /** Choose the up axis for a freshly built mesh and put the viewer on it. */
+  function applyUpAxis(mesh) {
+    // A .blend has no axis declaration — Blender is natively Z-up — so there
+    // is nothing to disagree with there.
+    const declared = currentAnalysis.globalSettings.upAxis
+      || (currentDoc.format === 'blend' ? '+Z' : null);
+    const declaredAxis = (declared || '+Y').includes('Z') ? 'z' : 'y';
+    const chosen = guessUpAxis(mesh.min, mesh.max, declaredAxis);
+    dom.upSelect.value = chosen.axis;
+    viewer.setUpAxis(chosen.axis);
+    return chosen;
+  }
+
+  /* ------------------------------------------------------------- materials */
+
+  /** Objects by UID, rebuilt only when a new file is analysed. */
+  let uidIndex = new Map();
+
+  /** One palette entry: the colour a material paints, and its texture. */
+  function materialEntry(material) {
+    // Template defaults sit underneath, so a material with no Properties70
+    // still gets the colour its type declares.
+    const props = FbxAnalyze.resolvedProperties(material, currentAnalysis.templates);
+    let colour = props.DiffuseColor !== undefined ? props.DiffuseColor : props.Diffuse;
+    if (typeof colour === 'number') colour = [colour, colour, colour];
+    if (!Array.isArray(colour)) colour = [0.72, 0.73, 0.76];
+    const factor = typeof props.DiffuseFactor === 'number' ? props.DiffuseFactor : 1;
+    return {
+      name: material.displayName,
+      // Values are linear, which is what the shader's output curve expects.
+      colour: [0, 1, 2].map((i) => (Number(colour[i]) || 0) * factor),
+      texture: diffuseTexture(material, uidIndex, currentAnalysis.connections),
+      layer: -1,
+    };
+  }
 
   /**
    * The real colours of the materials this geometry uses.
@@ -288,6 +472,7 @@
 
   function populateGeometry(doc) {
     const candidates = FbxAnalyze.findAllGeometry(doc);
+    sceneParts = collectParts();
     dom.geometrySelect.innerHTML = '';
     if (!candidates.length) {
       dom.geometrySelect.disabled = true;
@@ -295,7 +480,15 @@
       viewer.clear();
       return;
     }
-    dom.geometrySelect.disabled = candidates.length === 1;
+
+    // A scene is only itself once every part is placed, so that comes first.
+    if (sceneParts.length > 1) {
+      const whole = document.createElement('option');
+      whole.value = 'scene';
+      whole.textContent = `Whole scene — ${sceneParts.length} parts`;
+      dom.geometrySelect.appendChild(whole);
+    }
+    dom.geometrySelect.disabled = candidates.length === 1 && sceneParts.length <= 1;
     candidates.forEach((entry, index) => {
       const [name] = FbxAnalyze.splitObjectName(
         entry.props.map((p) => p.value).find((v) => typeof v === 'string') || '',
@@ -309,12 +502,62 @@
       dom.geometrySelect.appendChild(option);
     });
     dom.geometrySelect.dataset.count = String(candidates.length);
-    showGeometry(candidates[0]);
+    return sceneParts.length > 1 ? showScene() : showGeometry(candidates[0]);
+  }
+
+  /** Yield long enough for the browser to paint pending UI changes. */
+  const nextFrame = () => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+
+  /** Render every part of the scene, each placed by its model's transform. */
+  async function showScene() {
+    currentGeometry = null;
+    try {
+      dom.meshInfo.textContent = `assembling ${sceneParts.length} parts…`;
+      // Assembling a large scene blocks the main thread, so let the overlay
+      // fade and the status update land first.
+      await nextFrame();
+      const started = performance.now();
+      const built = buildScene(sceneParts);
+      if (!built) {
+        dom.meshInfo.textContent = 'no triangles in this scene';
+        viewer.clear();
+        return;
+      }
+      const elapsed = performance.now() - started;
+      viewer.setMesh(built.mesh);
+
+      const textures = await resolveTextures(built.palette);
+      missingTextures = textures.missing;
+      viewer.setPalette(built.palette);
+      viewer.setTextures(textures.images);
+      dom.modeSelect.value = built.palette.length ? '0' : '2';
+      viewer.setMode(Number(dom.modeSelect.value));
+      dom.textureToggle.disabled = textures.images.length === 0;
+      applyUpAxis(built.mesh);
+
+      const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
+      let text = `${built.parts} parts · ${built.mesh.triangleCount.toLocaleString()} `
+        + `triangles · ${size.map((v) => v.toFixed(1)).join(' × ')} units · `
+        + `${elapsed.toFixed(0)} ms · ${built.palette.length} material colours`;
+      if (textures.requested) {
+        text += ` · ${textures.images.length}/${textures.requested} textures`;
+      }
+      if (textures.missing.length) {
+        text += ` · missing: ${textures.missing.join(', ')} — drop the image in`;
+      }
+      dom.meshInfo.textContent = text;
+    } catch (error) {
+      console.error(error);
+      dom.meshInfo.textContent = `could not assemble the scene: ${error.message}`;
+      viewer.clear();
+    }
   }
 
 
   /** Pull the arrays a geometry record needs and hand them to the WASM core. */
-  function buildMesh(entry) {
+  function buildMesh(entry, placement = {}) {
     const child = (name) => entry.children.find((c) => c.name === name);
     const nestedArray = (node) => {
       if (!node) return null;
@@ -402,6 +645,7 @@
       normalIndex,
       uvs, uvIndex, uvMapping, uvReference,
       materials,
+      ...placement,
     });
   }
 
@@ -428,14 +672,7 @@
       viewer.setMode(Number(dom.modeSelect.value));
       dom.textureToggle.disabled = textures.images.length === 0;
 
-      // A .blend has no axis declaration — Blender is natively Z-up — so there
-      // is nothing to disagree with there.
-      const declared = currentAnalysis.globalSettings.upAxis
-        || (currentDoc.format === 'blend' ? '+Z' : null);
-      const declaredAxis = (declared || '+Y').includes('Z') ? 'z' : 'y';
-      const chosen = guessUpAxis(mesh.min, mesh.max, declaredAxis);
-      dom.upSelect.value = chosen.axis;
-      viewer.setUpAxis(chosen.axis);
+      const chosen = applyUpAxis(mesh);
 
       const size = [0, 1, 2].map((i) => (mesh.max[i] - mesh.min[i]));
       let text = `${mesh.triangleCount.toLocaleString()} triangles from `
@@ -491,6 +728,7 @@
     });
 
     dom.geometrySelect.addEventListener('change', () => {
+      if (dom.geometrySelect.value === 'scene') { showScene(); return; }
       const candidates = FbxAnalyze.findAllGeometry(currentDoc);
       const entry = candidates[Number(dom.geometrySelect.value)];
       if (entry) showGeometry(entry);
@@ -533,6 +771,7 @@
       get analysis() { return currentAnalysis; },
       get viewer() { return viewer; },
       get missingTextures() { return missingTextures; },
+      get loadCount() { return loadCount; },
       loadFile,
       loadFiles,
     };

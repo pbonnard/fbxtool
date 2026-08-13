@@ -68,3 +68,26 @@ def test_textured_sample_uses_indexed_uvs(sample_textured_path):
     assert uv.path_value("ReferenceInformationType") == "IndexToDirect"
     assert uv.get("UV").props[0].array.length == 8        # four corners
     assert uv.get("UVIndex").props[0].array.length == 24  # one per polygon vertex
+
+
+def test_scene_sample_is_in_step_with_the_writer(sample_scene_path):
+    """The checked-in multi-part scene is generated, so it must not drift."""
+    import fbxbuild as fb
+
+    from pathlib import Path
+
+    assert Path(sample_scene_path).read_bytes() == fb.build_scene(version=7400), (
+        "run tools/make_samples.py to regenerate samples/"
+    )
+
+
+def test_scene_sample_instances_one_mesh(sample_scene_path):
+    info = analyze(read_fbx(sample_scene_path))
+    assert info.doc.warnings == []
+    assert info.object_counts["Model (Mesh)"] == 3
+    assert info.object_counts["Geometry (Mesh)"] == 1
+    # hub -> arm -> mirror, each carrying the same geometry.
+    root = info.roots[0].children[0]
+    assert root.obj.name == "hub"
+    assert root.children[0].obj.name == "arm"
+    assert root.children[0].children[0].obj.name == "mirror"

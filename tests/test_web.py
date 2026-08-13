@@ -166,6 +166,31 @@ def test_wasm_reader_handles_both_offset_widths(built, tmp_path, version):
     assert wasm["nodes"] == _python_dump(str(path))
 
 
+@needs_node
+def test_javascript_units():
+    """Transform maths and PropertyTemplate defaults, checked under Node."""
+    result = subprocess.run(["node", str(WEB / "test" / "units.js")],
+                            capture_output=True, text=True, env=_node_env())
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_wasm_heap_mark_and_release(built, tmp_path):
+    """The bump allocator has to rewind cleanly between mesh builds."""
+    import fbxbuild as fb
+
+    path = tmp_path / "cube.fbx"
+    path.write_bytes(fb.build_cube())
+    result = subprocess.run(["node", str(WEB / "test" / "heap.js"), str(path)],
+                            capture_output=True, text=True, env=_node_env())
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
 @needs_clang
 @needs_node
 def test_page_renders_in_a_browser(built):
@@ -202,6 +227,12 @@ def test_page_renders_in_a_browser(built):
     blend.write_bytes(fb.build_blend())
     samples.append(str(blend))
 
+    # A scene of several parts, which only assembles correctly when each
+    # model's transform is applied — see test_scene_assembles_in_the_browser.
+    scene = Path(tempfile.mkdtemp()) / "parts.fbx"
+    scene.write_bytes(fb.build_scene())
+    samples.append(str(scene))
+
     real = os.environ.get("FBXTOOL_SAMPLE")
     if real and Path(real).is_file():
         samples.append(real)
@@ -211,3 +242,37 @@ def test_page_renders_in_a_browser(built):
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_scene_assembles_in_the_browser(built, tmp_path):
+    """Every part placed by its model's transform, with the size to prove it.
+
+    The fixture chains three models onto one shared cube, so the assembled
+    scene is only the right size if instancing, the parent chain and the
+    negative scale on the last part are all handled.
+    """
+    try:
+        probe = subprocess.run(["node", "-e", "require('playwright')"],
+                               capture_output=True, text=True, env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    scene = tmp_path / "parts.fbx"
+    scene.write_bytes(fb.build_scene())
+    result = subprocess.run(["node", str(WEB / "test" / "browser.js"), str(scene)],
+                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+    size = " × ".join(f"{v:.1f}" for v in fb.SCENE_SIZE)
+    assert f"{fb.SCENE_PARTS} parts" in result.stdout
+    assert f"{fb.SCENE_TRIANGLES} triangles" in result.stdout
+    assert f"{size} units" in result.stdout, f"expected a {size} scene"
+    # One palette entry per part, all coloured by the Definitions template.
+    assert f"{fb.SCENE_PARTS} material colours" in result.stdout

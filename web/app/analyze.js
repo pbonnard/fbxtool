@@ -202,6 +202,30 @@ const FbxAnalyze = (function () {
     return '';
   }
 
+  /**
+   * Default property values per object type, from Definitions.
+   *
+   * A property a file does not set is not unset — it takes the value from that
+   * type's PropertyTemplate. Exporters lean on this: a material with no
+   * Properties70 at all still has a colour.
+   */
+  function propertyTemplates(root) {
+    const definitions = child(root, 'Definitions');
+    if (!definitions) return {};
+    const out = {};
+    for (const entry of childAll(definitions, 'ObjectType')) {
+      const template = child(entry, 'PropertyTemplate');
+      const name = value(entry);
+      if (template && typeof name === 'string' && name) out[name] = properties(template);
+    }
+    return out;
+  }
+
+  /** An object's properties, with its type's template defaults underneath. */
+  function resolvedProperties(obj, templates) {
+    return Object.assign({}, (templates || {})[obj.nodeType] || {}, properties(obj.node));
+  }
+
   function analyze(doc) {
     const root = doc.root;
     const out = {
@@ -226,6 +250,7 @@ const FbxAnalyze = (function () {
       animation: {},
       roots: [],
       orphans: [],
+      templates: propertyTemplates(root),
       warnings: doc.warnings.slice(),
     };
 
@@ -496,6 +521,7 @@ const FbxAnalyze = (function () {
   return {
     analyze, describeVersion, splitObjectName, properties, arrayLength,
     child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
+    propertyTemplates, resolvedProperties,
   };
 })();
 

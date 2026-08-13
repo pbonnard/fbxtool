@@ -19,10 +19,16 @@ import fbxbuild as fb  # noqa: E402  (needs the path set up first)
 
 
 def main() -> int:
-    target = ROOT / "samples" / "cube_binary.fbx"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(fb.build_cube(version=7400))
-    print(f"wrote {target.relative_to(ROOT)} ({target.stat().st_size} bytes)")
+    samples = ROOT / "samples"
+    samples.mkdir(parents=True, exist_ok=True)
+    for name, data in [
+        ("cube_binary.fbx", fb.build_cube(version=7400)),
+        # Three placed parts sharing one mesh, for the whole-scene view.
+        ("scene_parts.fbx", fb.build_scene(version=7400)),
+    ]:
+        target = samples / name
+        target.write_bytes(data)
+        print(f"wrote {target.relative_to(ROOT)} ({target.stat().st_size} bytes)")
     return 0
 
 
