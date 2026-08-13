@@ -291,7 +291,7 @@ that:
 | `DiffuseColor` × `DiffuseFactor` | albedo |
 | `SpecularColor` × `SpecularFactor` | reflectance at normal incidence |
 | `Shininess` / `ShininessExponent` | roughness, `sqrt(2 / (exponent + 2))` |
-| `Opacity`, `TransparencyFactor` | read, not yet drawn |
+| `Opacity`, `TransparencyFactor` | how much the surface hides |
 
 A Phong specular colour scales a highlight — it is not a Fresnel reflectance,
 and taken literally it makes a mirror of everything, since OBJ libraries
@@ -304,6 +304,24 @@ Colour is managed end to end: images upload as `SRGB8_ALPHA8` so the sampler
 returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before
 being encoded back to sRGB. Highlights roll off instead of clipping.
+
+### Transparency
+
+A material below full opacity is drawn in a second, blended pass: solid
+surfaces first so the depth buffer is finished, then the see-through ones with
+depth read but not written, back faces before front faces so the far side of a
+windscreen is laid down before the near side goes over it. Files with nothing
+transparent never pay for the second pass.
+
+How much a sheet hides is not only its opacity — it is also what it reflects,
+and at a grazing angle glass reflects nearly everything, which is why a
+windscreen turns opaque as it swings away from you. The blend follows that.
+
+Transparency reaches the viewer from every format: `Opacity` and
+`TransparencyFactor` in FBX, `d` and `Tr` in an OBJ material library, and the
+alpha of a Blender material's colour. Both the Mercedes FBX and the `.blend` of
+the same car carry it — `WindowsTint` at 0.5, `Lights_Glass` at 0.25 — so the
+windows show the interior rather than a black panel.
 
 ## Library
 
@@ -471,10 +489,11 @@ The JavaScript and WebAssembly layers have their own harnesses, each run by
 `pytest` and each usable on its own:
 
 ```sh
-node web/test/units.js                        # transform maths, template defaults
+node web/test/units.js                        # transform maths, material mapping
 node web/test/heap.js samples/cube_binary.fbx # the WASM bump allocator
 node web/test/dump.js samples/cube_binary.fbx # the WASM reader's whole tree
 node web/test/browser.js samples/*.fbx        # the built page in Chromium
+node web/test/transparency.js glass.fbx       # reads pixels through glass
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks

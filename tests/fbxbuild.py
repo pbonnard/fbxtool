@@ -388,6 +388,99 @@ def build_scene(version: int = 7400, *, deflate: bool = True) -> bytes:
     return build_binary(scene_nodes(version, deflate=deflate), version=version)
 
 
+#: A red cube inside a larger blue one that is mostly see-through, so the inner
+#: cube can only appear on screen if transparency is actually drawn.
+GLASS_OPACITY = 0.35
+GLASS_INNER = (0.55, 0.02, 0.02)
+GLASS_OUTER = (0.05, 0.10, 0.30)
+
+
+def glass_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
+    """One mesh instanced twice: a solid core inside a transparent shell."""
+    geometry_uid = 1000
+    core_uid, shell_uid = 2001, 2002
+    core_material, shell_material = 3001, 3002
+
+    def model(uid: int, name: str, scale: float) -> N:
+        return N("Model", [L(uid), S(f"{name}\x00\x01Model"), S("Mesh")], [
+            N("Version", [I(232)]),
+            N("Properties70", [], [
+                N("P", [S("Lcl Scaling"), S("Lcl Scaling"), S(""), S("A"),
+                        D(scale), D(scale), D(scale)]),
+            ]),
+        ])
+
+    def material(uid: int, name: str, colour, opacity: float) -> N:
+        props = [
+            N("P", [S("DiffuseColor"), S("Color"), S(""), S("A"),
+                    D(colour[0]), D(colour[1]), D(colour[2])]),
+            N("P", [S("ShininessExponent"), S("Number"), S(""), S("A"), D(60.0)]),
+        ]
+        if opacity < 1.0:
+            props += [
+                N("P", [S("Opacity"), S("Number"), S(""), S("A"), D(opacity)]),
+                N("P", [S("TransparencyFactor"), S("Number"), S(""), S("A"),
+                        D(1.0 - opacity)]),
+            ]
+        return N("Material", [L(uid), S(f"{name}\x00\x01Material"), S("")], [
+            N("Version", [I(102)]),
+            N("ShadingModel", [S("phong")]),
+            N("Properties70", [], props),
+        ])
+
+    objects = N("Objects", [], [
+        N("Geometry", [L(geometry_uid), S("box\x00\x01Geometry"), S("Mesh")], [
+            N("Vertices", [darr(CUBE_VERTICES, deflate=deflate)]),
+            N("PolygonVertexIndex", [iarr(CUBE_POLYGONS, deflate=deflate)]),
+            N("GeometryVersion", [I(124)]),
+            N("Layer", [I(0)], [N("Version", [I(100)])]),
+        ]),
+        model(core_uid, "core", 1.0),
+        model(shell_uid, "shell", 2.2),
+        material(core_material, "paint", GLASS_INNER, 1.0),
+        material(shell_material, "glass", GLASS_OUTER, GLASS_OPACITY),
+    ])
+
+    connections = N("Connections", [], [
+        N("C", [S("OO"), L(core_uid), L(0)]),
+        N("C", [S("OO"), L(shell_uid), L(0)]),
+        N("C", [S("OO"), L(geometry_uid), L(core_uid)]),
+        N("C", [S("OO"), L(geometry_uid), L(shell_uid)]),
+        N("C", [S("OO"), L(core_material), L(core_uid)]),
+        N("C", [S("OO"), L(shell_material), L(shell_uid)]),
+    ])
+
+    return [
+        N("FBXHeaderExtension", [], [
+            N("FBXHeaderExtensionVersion", [I(1003)]),
+            N("FBXVersion", [I(version)]),
+            N("Creator", [S("fbxtool test fixture")]),
+        ]),
+        N("Creator", [S("fbxtool test fixture")]),
+        N("GlobalSettings", [], [
+            N("Version", [I(1000)]),
+            N("Properties70", [], [
+                N("P", [S("UpAxis"), S("int"), S("Integer"), S(""), I(1)]),
+                N("P", [S("UpAxisSign"), S("int"), S("Integer"), S(""), I(1)]),
+            ]),
+        ]),
+        N("Definitions", [], [
+            N("Version", [I(100)]),
+            N("Count", [I(5)]),
+            N("ObjectType", [S("Geometry")], [N("Count", [I(1)])]),
+            N("ObjectType", [S("Model")], [N("Count", [I(2)])]),
+            N("ObjectType", [S("Material")], [N("Count", [I(2)])]),
+        ]),
+        objects,
+        connections,
+    ]
+
+
+def build_glass(version: int = 7400, *, deflate: bool = True) -> bytes:
+    """A complete binary FBX file holding the glass-shell scene."""
+    return build_binary(glass_nodes(version, deflate=deflate), version=version)
+
+
 # --------------------------------------------------------------------------
 # textured fixtures
 

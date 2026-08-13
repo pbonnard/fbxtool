@@ -193,6 +193,29 @@ def test_wasm_heap_mark_and_release(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_transparency_is_drawn(built, tmp_path):
+    """A solid core inside a see-through shell has to stay visible."""
+    try:
+        probe = subprocess.run(["node", "-e", "require('playwright')"],
+                               capture_output=True, text=True, env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    glass = tmp_path / "glass.fbx"
+    glass.write_bytes(fb.build_glass())
+    result = subprocess.run(["node", str(WEB / "test" / "transparency.js"), str(glass)],
+                            capture_output=True, text=True, env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_page_renders_in_a_browser(built):
     """Load the page in Chromium, feed it files, and confirm pixels were drawn."""
     try:
@@ -232,6 +255,11 @@ def test_page_renders_in_a_browser(built):
     scene = Path(tempfile.mkdtemp()) / "parts.fbx"
     scene.write_bytes(fb.build_scene())
     samples.append(str(scene))
+
+    # A see-through material, drawn in a second blended pass.
+    glass = Path(tempfile.mkdtemp()) / "glass.fbx"
+    glass.write_bytes(fb.build_glass())
+    samples.append(str(glass))
 
     real = os.environ.get("FBXTOOL_SAMPLE")
     if real and Path(real).is_file():

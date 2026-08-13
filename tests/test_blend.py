@@ -221,6 +221,10 @@ def test_material_look_maps_blender_shading_onto_fbx_properties():
     assert plastic["shininess"] == pytest.approx(2 / 0.4**2 - 2)
     assert math.sqrt(2 / (plastic["shininess"] + 2)) == pytest.approx(0.4)
 
+    assert plastic["opacity"] == 1.0
+    glass = material_look((0.1, 0.2, 0.3), alpha=0.25)
+    assert glass["opacity"] == 0.25
+
     metal = material_look((0.9, 0.8, 0.5), metallic=1.0, roughness=0.2)
     assert metal["colour"] == pytest.approx((0.0, 0.0, 0.0))
     assert metal["specular"] == pytest.approx((0.9, 0.8, 0.5))
@@ -236,4 +240,5 @@ def test_blend_materials_carry_their_finish():
     doc = parse_blend(fb.build_blend())
     material = doc.root.path("Objects", "Material")
     names = [entry.props[0].value for entry in material.get("Properties70").children]
-    assert names == ["DiffuseColor", "SpecularColor", "ShininessExponent", "Metallic"]
+    assert names == ["DiffuseColor", "SpecularColor", "ShininessExponent",
+                     "Metallic", "Opacity"]

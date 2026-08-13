@@ -357,3 +357,18 @@ def test_scene_fixture_describes_its_parts():
     for material in (o for o in info.objects if o.node_type == "Material"):
         colour = resolved_properties(material, info.templates)["DiffuseColor"]
         assert colour == list(fb.SCENE_DIFFUSE)
+
+
+def test_glass_fixture_marks_one_material_see_through():
+    """Both spellings of transparency, so either reader path is covered."""
+    info = analyze(parse_bytes(fb.build_glass()))
+    assert info.doc.warnings == []
+    assert info.object_counts["Model (Mesh)"] == 2
+
+    from fbxtool.analyze import resolved_properties
+
+    looks = {o.name: resolved_properties(o, info.templates)
+             for o in info.objects if o.node_type == "Material"}
+    assert looks["paint"].get("Opacity") is None
+    assert looks["glass"]["Opacity"] == pytest.approx(fb.GLASS_OPACITY)
+    assert looks["glass"]["TransparencyFactor"] == pytest.approx(1 - fb.GLASS_OPACITY)

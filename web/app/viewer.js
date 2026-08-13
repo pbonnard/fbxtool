@@ -12,6 +12,10 @@
 'use strict';
 
 const FbxViewer = (function () {
+  /* Below this, a material is drawn in the blended pass. Some exporters write
+   * 0.999 for "opaque", which is not worth a second pass. */
+  const OPAQUE = 0.996;
+
   /* Shared by the model and background shaders: one studio environment, in
    * linear radiance. A bright horizon band is what paint and chrome pick up. */
   const ENVIRONMENT = `
@@ -123,6 +127,8 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uTextures; // one layer per distinct image
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
+  uniform int uPass;          // 0 opaque, 1 blended
+  uniform float uOpaqueLimit;
 
   out vec4 fragColour;
 ${ENVIRONMENT}
@@ -184,6 +190,7 @@ ${ENVIRONMENT}
     vec3 albedo;
     vec3 f0 = vec3(0.04);       // a plain dielectric, unless the file says more
     float roughness = 0.55;
+    float opacity = 1.0;
     if (uMode == 0 && uPaletteSize > 0) {
       // The material index is a whole number carried in a float attribute.
       int slot = clamp(int(vMaterial + 0.5), 0, uPaletteSize - 1);
@@ -192,6 +199,7 @@ ${ENVIRONMENT}
       albedo = entry.rgb;
       f0 = finish.rgb;
       roughness = clamp(finish.a, 0.05, 1.0);
+      opacity = clamp(texelFetch(uPalette, ivec2(slot, 2), 0).r, 0.0, 1.0);
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
@@ -205,6 +213,10 @@ ${ENVIRONMENT}
     } else {
       albedo = uClayColour;
     }
+
+    // Each pass takes the half of the scene it is set up to draw.
+    bool blended = opacity < uOpaqueLimit;
+    if (blended != (uPass == 1)) discard;
 
     vec3 viewDir = normalize(-vViewPosition);
     // Lighting happens in world space so the environment does not swing around
@@ -232,10 +244,17 @@ ${ENVIRONMENT}
     }
 
     // The environment, which is what makes a curved surface read as a surface.
+    vec3 reflectance = environmentBrdf(f0, roughness, nov);
     vec3 ambient = diffuseColour * environmentIrradiance(n)
-      + environmentSpecular(r, roughness) * environmentBrdf(f0, roughness, nov);
+      + environmentSpecular(r, roughness) * reflectance;
 
-    fragColour = vec4(encodeSrgb(toneMap(direct + ambient)), 1.0);
+    // What a sheet of glass hides is what it lets through plus what it
+    // reflects, and at a grazing angle it reflects nearly everything — which
+    // is why a windscreen goes opaque as it turns away from you.
+    float mirrored = clamp(dot(reflectance, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    float coverage = clamp(opacity + (1.0 - opacity) * mirrored, 0.0, 1.0);
+
+    fragColour = vec4(encodeSrgb(toneMap(direct + ambient)), coverage);
   }`;
 
   /* ------------------------------------------------------------- matrices */
@@ -399,6 +418,8 @@ ${ENVIRONMENT}
         textures: gl.getUniformLocation(program, 'uTextures'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
+        pass: gl.getUniformLocation(program, 'uPass'),
+        opaqueLimit: gl.getUniformLocation(program, 'uOpaqueLimit'),
       };
 
       const background = gl.createProgram();
@@ -448,6 +469,8 @@ ${ENVIRONMENT}
 
       this.textureArray = gl.createTexture();
       this.textureLayers = 0;
+      this.hasTransparency = false;
+      this.transparentMaterials = 0;
     }
 
     /**
@@ -455,17 +478,19 @@ ${ENVIRONMENT}
      * they connect to the model, which is what the per-polygon material index
      * refers to.
      *
-     * Two rows: the diffuse colour with the texture layer in alpha, then the
-     * specular colour with roughness in alpha. Floats, because the values are
-     * linear and eight bits of a linear ramp bands badly in the darks — the
-     * Mercedes' interior sits at 0.05.
+     * Three rows: the diffuse colour with the texture layer in alpha, the
+     * specular colour with roughness in alpha, then opacity. Floats, because
+     * the values are linear and eight bits of a linear ramp bands badly in the
+     * darks — the Mercedes' interior sits at 0.05.
      */
     setPalette(materials) {
       const gl = this.gl;
       this.paletteSize = materials.length;
+      this.hasTransparency = false;
+      this.transparentMaterials = 0;
       if (!materials.length) { this.dirty = true; return; }
       const width = materials.length;
-      const data = new Float32Array(width * 2 * 4);
+      const data = new Float32Array(width * 3 * 4);
       materials.forEach((material, i) => {
         const rgb = material.colour || [0.72, 0.73, 0.76];
         const specular = material.specular || [0.04, 0.04, 0.04];
@@ -478,9 +503,16 @@ ${ENVIRONMENT}
         data[i * 4 + 3] = Math.max(0, layer + 1);
         data[(width + i) * 4 + 3] = Math.min(1, Math.max(0.05,
           typeof material.roughness === 'number' ? material.roughness : 0.5));
+        const opacity = typeof material.opacity === 'number'
+          ? Math.min(1, Math.max(0, material.opacity)) : 1;
+        data[(width * 2 + i) * 4] = opacity;
+        if (opacity < OPAQUE) {
+          this.hasTransparency = true;
+          this.transparentMaterials++;
+        }
       });
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 2, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 3, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;
@@ -710,9 +742,30 @@ ${ENVIRONMENT}
       gl.uniform1i(this.uniforms.textures, 1);
       gl.uniform1i(this.uniforms.useTextures,
         (this.textureLayers > 0 && this.hasUv && this.showTextures !== false) ? 1 : 0);
+      gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
 
       gl.bindVertexArray(this.vao);
-      gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
+      const vertices = this.triangleCount * 3;
+      // Solid surfaces first, so anything blended over them tests against a
+      // finished depth buffer.
+      gl.uniform1i(this.uniforms.pass, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, vertices);
+
+      // Then the see-through half, back faces before front so the far side of
+      // a windscreen is laid down before the near side blends over it. Depth
+      // is read but not written: two sheets of glass must not hide each other.
+      if (this.hasTransparency && this.mode === 0) {
+        gl.uniform1i(this.uniforms.pass, 1);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(false);
+        gl.cullFace(gl.FRONT);
+        gl.drawArrays(gl.TRIANGLES, 0, vertices);
+        gl.cullFace(gl.BACK);
+        gl.drawArrays(gl.TRIANGLES, 0, vertices);
+        gl.depthMask(true);
+        gl.disable(gl.BLEND);
+      }
       gl.bindVertexArray(null);
     }
   }

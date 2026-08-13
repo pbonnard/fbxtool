@@ -310,6 +310,12 @@
   /** Objects by UID, rebuilt only when a new file is analysed. */
   let uidIndex = new Map();
 
+  /** How many of a palette's materials the file marks as see-through. */
+  function seeThrough(palette) {
+    const count = palette.filter((m) => m.opacity < 0.996).length;
+    return count ? ` · ${count} see-through` : '';
+  }
+
   /** One palette entry: how a material shades, and the image it wears. */
   function materialEntry(material) {
     // Template defaults sit underneath, so a material with no Properties70
@@ -322,6 +328,7 @@
       colour: look.colour,
       specular: look.specular,
       roughness: look.roughness,
+      opacity: look.opacity,
       texture: diffuseTexture(material, uidIndex, currentAnalysis.connections),
       layer: -1,
     };
@@ -527,6 +534,7 @@
       let text = `${built.parts} parts · ${built.mesh.triangleCount.toLocaleString()} `
         + `triangles · ${size.map((v) => v.toFixed(1)).join(' × ')} units · `
         + `${elapsed.toFixed(0)} ms · ${built.palette.length} material colours`;
+      text += seeThrough(built.palette);
       if (textures.requested) {
         text += ` · ${textures.images.length}/${textures.requested} textures`;
       }
@@ -667,6 +675,7 @@
       text += palette.length
         ? ` · ${palette.length} material colours`
         : ' · no material colours in this file';
+      text += seeThrough(palette);
       if (textures.requested) {
         text += ` · ${textures.images.length}/${textures.requested} textures`;
         if (!mesh.hasUv) text += ' (no UVs in this mesh)';

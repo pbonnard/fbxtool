@@ -53,6 +53,9 @@ const FbxObj = (function () {
       else if (key === 'ks') current.specular = numbers(rest, 3);
       else if (key === 'ka') current.ambient = numbers(rest, 3);
       else if (key === 'ns') current.shininess = numbers(rest, 1)[0];
+      // Dissolve, written either way round: `d 1` and `Tr 0` both mean opaque.
+      else if (key === 'd') current.opacity = numbers(rest, 1)[0];
+      else if (key === 'tr') current.opacity = 1 - numbers(rest, 1)[0];
       else if (key === 'map_kd' || (key === 'map_ka' && !current.map)) {
         // Skip option flags such as "-s 1 1 1" before the filename.
         const cleaned = [];
@@ -256,6 +259,7 @@ const FbxObj = (function () {
       const props = [p70('DiffuseColor', 'Color', ...material.diffuse.map(D))];
       if (material.specular) props.push(p70('SpecularColor', 'Color', ...material.specular.map(D)));
       if (material.shininess !== undefined) props.push(p70('Shininess', 'double', D(material.shininess)));
+      if (material.opacity !== undefined) props.push(p70('Opacity', 'double', D(material.opacity)));
       objectsNode.children.push(
         node('Material', [L(uid), S(`${material.name}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),

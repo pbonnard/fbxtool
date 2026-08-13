@@ -525,7 +525,8 @@ def _mesh_records(data, name, totvert, totpoly, totloop, vert_block, poly_block,
 
 
 def material_look(base: tuple[float, float, float], *, metallic: float = 0.0,
-                  roughness: float = 0.5, specular: float = 0.5) -> dict[str, Any]:
+                  roughness: float = 0.5, specular: float = 0.5,
+                  alpha: float = 1.0) -> dict[str, Any]:
     """Blender's shading values as the diffuse/specular pair FBX describes.
 
     A metal has no diffuse and takes its reflectance from its own colour; a
@@ -541,6 +542,7 @@ def material_look(base: tuple[float, float, float], *, metallic: float = 0.0,
         "specular": tuple(dielectric * (1.0 - metallic) + c * metallic for c in base),
         "shininess": 2.0 / (rough * rough) - 2.0,
         "metallic": metallic,
+        "opacity": min(max(alpha, 0.0), 1.0),
     }
 
 
@@ -580,6 +582,9 @@ def _material_looks(data: bytes, blocks: list[Block], sdna: Sdna, pointer_size: 
             metallic=value("metallic", 0.0),
             roughness=value("roughness", 0.5),
             specular=value("spec", 0.5),
+            # The fourth component of the viewport colour, which is where
+            # Blender keeps a material's transparency.
+            alpha=value("a", 1.0),
         )
     return looks
 
@@ -691,6 +696,8 @@ def _build_records(doc: Document, data: bytes, blocks: list[Block], sdna: Sdna,
                         # highlight colour.
                         _node("P", [_s("Metallic"), _s("Number"), _s(""), _s("A"),
                                     Property("D", float(look["metallic"]))]),
+                        _node("P", [_s("Opacity"), _s("Number"), _s(""), _s("A"),
+                                    Property("D", float(look["opacity"]))]),
                     ]),
                 ]))
             continue

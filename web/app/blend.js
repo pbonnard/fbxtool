@@ -436,6 +436,9 @@ const FbxBlend = (function () {
         specular: base.map((c) => dielectric * (1 - metallic) + c * metallic),
         shininess: 2 / (roughness * roughness) - 2,
         metallic,
+        // The fourth component of the viewport colour, which is where Blender
+        // keeps a material's transparency.
+        opacity: Math.min(Math.max(field('a', 1), 0), 1),
       };
     };
 
@@ -526,6 +529,8 @@ const FbxBlend = (function () {
               // measured rather than inferred from a highlight colour.
               node('P', [S('Metallic'), S('Number'), S(''), S('A'),
                 D(look.metallic)]),
+              node('P', [S('Opacity'), S('Number'), S(''), S('A'),
+                D(look.opacity)]),
             ]),
           ]));
         continue;
