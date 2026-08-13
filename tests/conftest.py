@@ -56,3 +56,17 @@ def real_fbx_path() -> str:
     if candidate and Path(candidate).is_file():
         return candidate
     pytest.skip("set FBXTOOL_SAMPLE to a real .fbx file to run this test")
+
+
+@pytest.fixture(scope="session")
+def real_blend_path() -> str:
+    """A real Blender file, if one is available.
+
+    Set ``FBXTOOL_BLEND`` to point at your own; no .blend is checked in.
+    """
+    import os
+
+    candidate = os.environ.get("FBXTOOL_BLEND")
+    if candidate and Path(candidate).is_file():
+        return candidate
+    pytest.skip("set FBXTOOL_BLEND to a real .blend file to run this test")

@@ -66,7 +66,8 @@ def read_model(
         kind = detect_format(head)
         if kind == "blend":
             handle.seek(0)
-            return parse_blend(handle.read(), path=path)
+            return parse_blend(handle.read(), path=path,
+                               load_arrays=load_arrays)
         if kind == "obj":
             handle.seek(0)
             raw = handle.read()
@@ -163,7 +164,7 @@ def parse_bytes(
     """Parse an in-memory FBX file of either encoding."""
     kind = detect_format(data[:_SNIFF_SIZE])
     if kind == "blend":
-        return parse_blend(data, path=path)
+        return parse_blend(data, path=path, load_arrays=load_arrays)
     if kind == "obj":
         text = _decode(data) or ""
         doc = parse_obj(text, path=path, load_arrays=load_arrays)

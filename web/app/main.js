@@ -428,8 +428,11 @@
       viewer.setMode(Number(dom.modeSelect.value));
       dom.textureToggle.disabled = textures.images.length === 0;
 
-      const declaredAxis = (currentAnalysis.globalSettings.upAxis || '+Y').includes('Z')
-        ? 'z' : 'y';
+      // A .blend has no axis declaration — Blender is natively Z-up — so there
+      // is nothing to disagree with there.
+      const declared = currentAnalysis.globalSettings.upAxis
+        || (currentDoc.format === 'blend' ? '+Z' : null);
+      const declaredAxis = (declared || '+Y').includes('Z') ? 'z' : 'y';
       const chosen = guessUpAxis(mesh.min, mesh.max, declaredAxis);
       dom.upSelect.value = chosen.axis;
       viewer.setUpAxis(chosen.axis);
@@ -449,8 +452,10 @@
         text += ` · missing: ${textures.missing.join(', ')} — drop the image in`;
       }
       if (chosen.fromGeometry) {
-        text += ` · ${chosen.axis.toUpperCase()} up from the geometry, though the `
-          + `file declares ${currentAnalysis.globalSettings.upAxis}`;
+        text += ` · ${chosen.axis.toUpperCase()} up from the geometry`;
+        if (currentAnalysis.globalSettings.upAxis) {
+          text += `, though the file declares ${currentAnalysis.globalSettings.upAxis}`;
+        }
       }
       dom.meshInfo.textContent = text;
     } catch (error) {

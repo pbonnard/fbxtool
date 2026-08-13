@@ -7,12 +7,10 @@ with **no dependencies** and without the Autodesk FBX SDK.
 | --- | --- |
 | **FBX** binary and ASCII | full — inspect and render |
 | **Wavefront OBJ** (+ `.mtl`) | full — inspect and render |
-| **Blender `.blend`** | container only — version, file-blocks, SDNA, datablocks |
+| **Blender `.blend`** | inspect and render, for the `MVert`/`MPoly`/`MLoop` layout |
 
-OBJ is normalised into the same record tree as FBX, so every option and the
-viewer apply to it unchanged. A `.blend` is a dump of Blender's own memory
-rather than an interchange format; its container and SDNA are read, but no
-geometry is extracted — see [Blender files](#blender-files) for why.
+OBJ and `.blend` are normalised into the same record tree as FBX, so every
+option and the viewer apply to them unchanged.
 
 ```
 $ fbxinfo samples/cube_binary.fbx
@@ -119,12 +117,20 @@ Datablock names are located by computing the offset of `ID.name` **from the
 file's own SDNA**, so they are found wherever a given release puts them rather
 than at a hard-coded offset.
 
-No geometry is extracted. A `.blend` is Blender's internal memory image, not an
-interchange format: the layout of a mesh changed substantially at 2.8, again
-across 3.x as attributes became generic, and again at 4.0. Writing an extractor
-against those layouts without a corpus of real files to check it on would
-produce something that appears to work and silently misreads other versions.
-Export to FBX or OBJ to see the geometry.
+Meshes are extracted too, and render: `MVert` holds the coordinates, `MLoop`
+the per-corner vertex indices, `MPoly` the run of loops each polygon owns, and
+`MLoopUV` the texture coordinates — each reached by following the address the
+block had when it was written. Materials come from the mesh's slot table, which
+is what a polygon's material index refers to.
+
+Every offset and struct size is computed from the file's own SDNA, so this
+adapts to whatever a release put where rather than assuming a layout. Releases
+that replaced these arrays with generic attributes (3.6 deprecated `MVert`, 4.0
+removed it) are detected by their absence and **reported rather than guessed
+at** — a wrong guess would render plausible nonsense.
+
+Materials use the viewport display colour stored on the datablock. A material's
+rendered appearance lives in its node tree, which is a separate problem.
 
 Files saved with Blender's **Compress** option are wrapped — gzip up to 2.9x,
 Zstandard from 3.0. Gzip is unwrapped automatically; Zstandard is detected and

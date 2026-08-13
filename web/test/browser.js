@@ -95,6 +95,7 @@ async function main() {
       return {
         encoding: doc.encoding,
         format: doc.format || 'fbx',
+        meshes: (doc.extra && doc.extra.meshes) || 0,
         version: doc.version,
         records: analysis.totalRecords,
         objects: analysis.objects.length,
@@ -124,8 +125,8 @@ async function main() {
     check('report rendered', result.reportSections >= minimumSections,
       `${result.reportSections} sections`);
     check('record tree rendered', result.treeItems > 0, `${result.treeItems} nodes shown`);
-    // A .blend is reported, not rendered, so it is not expected to draw.
-    const expectMesh = result.format !== 'blend';
+    // A .blend renders when its meshes use the MVert/MPoly/MLoop layout.
+    const expectMesh = result.format !== 'blend' || result.meshes > 0;
     if (expectMesh) {
       check('triangles built', result.triangles > 0,
         `${result.triangles.toLocaleString()} triangles`);

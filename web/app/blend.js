@@ -138,6 +138,121 @@ const FbxBlend = (function () {
     return null;
   }
 
+  /** Field offsets and size for one SDNA struct, computed from the file. */
+  function structInfo(sdna, name, pointerSize) {
+    const index = structNamed(sdna, name);
+    const info = { index, size: 0, offsets: {} };
+    if (index === null) return info;
+    const typeIndex = sdna.structs[index][0];
+    info.size = sdna.lengths[typeIndex] || 0;
+    let offset = 0;
+    for (const [fieldType, fieldName] of sdna.structs[index][1]) {
+      const raw = sdna.names[fieldName] || '';
+      const bare = raw.split('[')[0].replace(/^[*(]+/, '');
+      if (!(bare in info.offsets)) info.offsets[bare] = offset;
+      let size = raw.startsWith('*') || raw.startsWith('(*')
+        ? pointerSize : (sdna.lengths[fieldType] || 0);
+      ARRAY_DIMENSION.lastIndex = 0;
+      let match = ARRAY_DIMENSION.exec(raw);
+      while (match) { size *= Number(match[1]); match = ARRAY_DIMENSION.exec(raw); }
+      offset += size;
+    }
+    return info;
+  }
+
+  const hasFields = (info, ...fields) =>
+    info.index !== null && fields.every((f) => f in info.offsets);
+
+  /**
+   * Pull a mesh out of the four parallel arrays Blender writes: MVert holds
+   * the coordinates, MLoop the per-corner vertex indices, MPoly the run of
+   * loops each polygon owns, MLoopUV the texture coordinates.
+   */
+  function extractMesh(view, bytes, base, structs, byAddress, little, pointerSize) {
+    const { mesh, vert, poly, loop, loopUv } = structs;
+    const readInt = (field) => view.getInt32(base + mesh.offsets[field], little);
+    const follow = (field) => {
+      if (!(field in mesh.offsets)) return null;
+      const at = base + mesh.offsets[field];
+      const address = pointerSize === 8
+        ? Number(view.getBigUint64(at, little)) : view.getUint32(at, little);
+      return byAddress.get(address) || null;
+    };
+
+    const totvert = readInt('totvert');
+    const totpoly = readInt('totpoly');
+    const totloop = readInt('totloop');
+    if (totvert <= 0 || totloop <= 0) return null;
+
+    const vertBlock = follow('mvert');
+    const polyBlock = follow('mpoly');
+    const loopBlock = follow('mloop');
+    const uvBlock = follow('mloopuv');
+    if (!vertBlock || !polyBlock || !loopBlock) return null;
+
+    const positions = new Float64Array(totvert * 3);
+    const normals = new Float64Array(totvert * 3);
+    const coOffset = vert.offsets.co;
+    const noOffset = vert.offsets.no;
+    for (let i = 0; i < totvert; i++) {
+      const at = vertBlock.body + i * vert.size;
+      for (let k = 0; k < 3; k++) {
+        positions[i * 3 + k] = view.getFloat32(at + coOffset + k * 4, little);
+        if (noOffset !== undefined) {
+          // Vertex normals are stored as normalised shorts.
+          normals[i * 3 + k] = view.getInt16(at + noOffset + k * 2, little) / 32767;
+        }
+      }
+    }
+
+    const corner = new Uint32Array(totloop);
+    const loopV = loop.offsets.v;
+    for (let i = 0; i < totloop; i++) {
+      corner[i] = view.getUint32(loopBlock.body + i * loop.size + loopV, little);
+    }
+
+    const indices = new Int32Array(totloop);
+    const materials = new Int32Array(totpoly);
+    const startOffset = poly.offsets.loopstart;
+    const countOffset = poly.offsets.totloop;
+    const matOffset = poly.offsets.mat_nr;
+    let written = 0;
+    let polygons = 0;
+    for (let i = 0; i < totpoly; i++) {
+      const at = polyBlock.body + i * poly.size;
+      const start = view.getInt32(at + startOffset, little);
+      const count = view.getInt32(at + countOffset, little);
+      if (count < 3 || start < 0 || start + count > totloop) continue;
+      for (let position = 0; position < count; position++) {
+        const index = corner[start + position];
+        // FBX-style run: each polygon's last index is complemented.
+        indices[written++] = position === count - 1 ? ~index : index;
+      }
+      materials[polygons++] = matOffset === undefined
+        ? 0 : view.getInt16(at + matOffset, little);
+    }
+
+    let uvs = null;
+    if (uvBlock && hasFields(loopUv, 'uv')) {
+      uvs = new Float64Array(totloop * 2);
+      const uvOffset = loopUv.offsets.uv;
+      for (let i = 0; i < totloop; i++) {
+        const at = uvBlock.body + i * loopUv.size + uvOffset;
+        uvs[i * 2] = view.getFloat32(at, little);
+        uvs[i * 2 + 1] = view.getFloat32(at + 4, little);
+      }
+    }
+
+    return {
+      positions,
+      normals: noOffset === undefined ? null : normals,
+      indices: indices.subarray(0, written),
+      materials: materials.subarray(0, polygons),
+      uvs,
+      totvert,
+    };
+  }
+
   function structNamed(sdna, name) {
     for (let i = 0; i < sdna.structs.length; i++) {
       if (sdna.types[sdna.structs[i][0]] === name) return i;
@@ -246,23 +361,154 @@ const FbxBlend = (function () {
       node('Names', [I(sdna.names.length)]),
     ]));
 
+    const decodeName = (block) => {
+      if (nameOffset === null) return '';
+      const at = block.body + nameOffset;
+      let end = at;
+      while (end < bytes.length && end < at + 66 && bytes[end] !== 0) end++;
+      const text = new TextDecoder('utf-8').decode(bytes.subarray(at, end));
+      return text.slice(0, 2) === block.code ? text.slice(2) : text;
+    };
+
+    const structs = {
+      mesh: structInfo(sdna, 'Mesh', pointerSize),
+      vert: structInfo(sdna, 'MVert', pointerSize),
+      poly: structInfo(sdna, 'MPoly', pointerSize),
+      loop: structInfo(sdna, 'MLoop', pointerSize),
+      loopUv: structInfo(sdna, 'MLoopUV', pointerSize),
+      material: structInfo(sdna, 'Material', pointerSize),
+    };
+    const byAddress = new Map();
+    for (const block of blocks) if (block.oldPointer) byAddress.set(block.oldPointer, block);
+
+    const canExtract = hasFields(structs.mesh, 'mvert', 'mpoly', 'mloop',
+      'totvert', 'totpoly', 'totloop')
+      && hasFields(structs.vert, 'co') && hasFields(structs.poly, 'loopstart', 'totloop')
+      && hasFields(structs.loop, 'v');
+    if (!canExtract && blocks.some((b) => b.code === 'ME')) {
+      warnings.push('this Blender version stores mesh data as generic attributes '
+        + 'rather than the MVert/MPoly/MLoop arrays; geometry was not extracted');
+    }
+
+    // The materials a mesh points at, in slot order, which is what a polygon's
+    // material index refers to.
+    const materialSlots = (base) => {
+      if (!hasFields(structs.mesh, 'mat', 'totcol')) return [];
+      const total = view.getInt16(base + structs.mesh.offsets.totcol, little);
+      const at = base + structs.mesh.offsets.mat;
+      const address = pointerSize === 8
+        ? Number(view.getBigUint64(at, little)) : view.getUint32(at, little);
+      const table = byAddress.get(address);
+      if (total <= 0 || !table) return [];
+      const slots = [];
+      for (let i = 0; i < total; i++) {
+        const entry = table.body + i * pointerSize;
+        if (entry + pointerSize > bytes.length) break;
+        const pointer = pointerSize === 8
+          ? Number(view.getBigUint64(entry, little)) : view.getUint32(entry, little);
+        slots.push(pointer);
+      }
+      return slots;
+    };
+
+    const materialColour = (block) => {
+      if (!hasFields(structs.material, 'r')) return [0.8, 0.8, 0.8];
+      const at = block.body + structs.material.offsets.r;
+      return [0, 1, 2].map((k) => view.getFloat32(at + k * 4, little));
+    };
+
+    const bulk = (code, values) => ({
+      code,
+      typeName: `${code === 'd' ? 'float64' : 'int32'}[]`,
+      array: { length: values.length, encoding: 0,
+               byteLength: values.length * (code === 'd' ? 8 : 4), dataOffset: 0 },
+      values,
+      value: null,
+    });
+
     const objects = node('Objects', [], []);
+    const connections = [];
+    // Synthetic model UIDs are small integers; real ones are former memory
+    // addresses, so the two cannot collide.
+    let nextModelUid = 1;
+    let meshCount = 0;
+
     for (const block of blocks) {
       const kind = ID_TYPES[block.code];
       if (!kind) continue;
-      let label = '';
-      if (nameOffset !== null) {
-        const at = block.body + nameOffset;
-        let end = at;
-        while (end < bytes.length && end < at + 66 && bytes[end] !== 0) end++;
-        label = new TextDecoder('utf-8').decode(bytes.subarray(at, end));
-        if (label.slice(0, 2) === block.code) label = label.slice(2);
+      const label = decodeName(block);
+
+      if (block.code === 'ME' && canExtract) {
+        const data = extractMesh(view, bytes, block.body, structs, byAddress,
+          little, pointerSize);
+        if (data) {
+          meshCount++;
+          const children = [
+            node('Vertices', [bulk('d', data.positions)]),
+            node('PolygonVertexIndex', [bulk('i', data.indices)]),
+            node('GeometryVersion', [I(124)]),
+          ];
+          if (data.normals) {
+            children.push(node('LayerElementNormal', [I(0)], [
+              node('MappingInformationType', [S('ByVertice')]),
+              node('ReferenceInformationType', [S('Direct')]),
+              node('Normals', [bulk('d', data.normals)]),
+            ]));
+          }
+          if (data.uvs) {
+            children.push(node('LayerElementUV', [I(0)], [
+              node('Name', [S('UVMap')]),
+              node('MappingInformationType', [S('ByPolygonVertex')]),
+              node('ReferenceInformationType', [S('Direct')]),
+              node('UV', [bulk('d', data.uvs)]),
+            ]));
+          }
+          children.push(node('LayerElementMaterial', [I(0)], [
+            node('MappingInformationType', [S('ByPolygon')]),
+            node('ReferenceInformationType', [S('IndexToDirect')]),
+            node('Materials', [bulk('i', data.materials)]),
+          ]));
+          children.push(node('Layer', [I(0)], [node('Version', [I(100)])]));
+
+          objects.children.push(node('Geometry',
+            [L(block.oldPointer), S(`${label}${CLASS_SEP}Geometry`), S('Mesh')],
+            children));
+          const modelUid = nextModelUid++;
+          objects.children.push(node('Model',
+            [L(modelUid), S(`${label}${CLASS_SEP}Model`), S('Mesh')],
+            [node('Version', [I(232)])]));
+          connections.push(node('C', [S('OO'), L(modelUid), L(0)]));
+          connections.push(node('C', [S('OO'), L(block.oldPointer), L(modelUid)]));
+          for (const pointer of materialSlots(block.body)) {
+            if (pointer) connections.push(node('C', [S('OO'), L(pointer), L(modelUid)]));
+          }
+          continue;
+        }
       }
+
+      if (block.code === 'MA') {
+        const colour = materialColour(block);
+        objects.children.push(node('Material',
+          [L(block.oldPointer), S(`${label}${CLASS_SEP}Material`), S('')], [
+            node('Version', [I(102)]),
+            node('ShadingModel', [S('phong')]),
+            node('Properties70', [], [
+              node('P', [S('DiffuseColor'), S('Color'), S(''), S('A'),
+                { code: 'D', typeName: 'float64', value: colour[0] },
+                { code: 'D', typeName: 'float64', value: colour[1] },
+                { code: 'D', typeName: 'float64', value: colour[2] }]),
+            ]),
+          ]));
+        continue;
+      }
+
       objects.children.push(node(kind,
         [L(block.oldPointer), S(`${label}${CLASS_SEP}${kind}`), S(block.code)],
         [node('Size', [I(block.size)])]));
     }
     if (objects.children.length) root.children.push(objects);
+    if (connections.length) root.children.push(node('Connections', [], connections));
+    extra.meshes = meshCount;
 
     Object.assign(extra, {
       blockCount: blocks.length,

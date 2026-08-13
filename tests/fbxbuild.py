@@ -7,6 +7,7 @@ the null terminator and the footer — not a general-purpose exporter.
 
 from __future__ import annotations
 
+import re
 import struct
 import zlib
 
@@ -402,46 +403,67 @@ def build_textured_cube(version: int = 7400, *, embed: bool = True,
 # .blend fixtures
 #
 # A .blend is a dump of Blender's memory plus an SDNA block describing the C
-# structs it contains. This writes a small but structurally faithful one, so
-# the container and SDNA reader can be tested without Blender installed.
+# structs it contains. This writes a small but structurally faithful one —
+# including a real mesh reached by pointer — so both the container reader and
+# the SDNA-driven mesh extraction can be tested without Blender installed.
 
 BLEND_MAGIC = b"BLENDER"
 
+#: (type, name) pairs per struct, in declaration order. Field sizes follow the
+#: SDNA rules: a leading '*' means a pointer, '[n]' multiplies.
+_BLEND_TYPES = [
+    ("void", 0), ("char", 1), ("short", 2), ("int", 4), ("float", 4),
+    ("ID", 0), ("Library", 0), ("MVert", 20), ("MPoly", 12), ("MLoop", 8),
+    ("MLoopUV", 12), ("Material", 0), ("Mesh", 0), ("Object", 0),
+]
+
+_BLEND_STRUCTS = {
+    "ID": [("void", "*next"), ("void", "*prev"), ("ID", "*newid"),
+           ("Library", "*lib"), ("char", "name[66]"), ("short", "flag")],
+    "MVert": [("float", "co[3]"), ("short", "no[3]"), ("char", "flag"),
+              ("char", "bweight")],
+    "MPoly": [("int", "loopstart"), ("int", "totloop"), ("short", "mat_nr"),
+              ("char", "flag"), ("char", "_pad")],
+    "MLoop": [("int", "v"), ("int", "e")],
+    "MLoopUV": [("float", "uv[2]"), ("int", "flag")],
+    "Material": [("ID", "id"), ("float", "r"), ("float", "g"), ("float", "b"),
+                 ("float", "a")],
+    "Mesh": [("ID", "id"), ("MPoly", "*mpoly"), ("MLoop", "*mloop"),
+             ("MLoopUV", "*mloopuv"), ("MVert", "*mvert"), ("Material", "**mat"),
+             ("int", "totvert"), ("int", "totpoly"), ("int", "totloop"),
+             ("short", "totcol")],
+    "Object": [("ID", "id"), ("void", "*data")],
+}
+
+#: Struct order in the SDNA; datablocks reference these by index.
+_BLEND_ORDER = ["ID", "MVert", "MPoly", "MLoop", "MLoopUV", "Material", "Mesh", "Object"]
+
+_ARRAY = re.compile(r"\[(\d+)\]")
+
+
+def _blend_field_size(type_name: str, field_name: str, sizes: dict, pointer_size: int) -> int:
+    size = pointer_size if field_name.startswith("*") else sizes[type_name]
+    for count in _ARRAY.findall(field_name):
+        size *= int(count)
+    return size
+
+
+def _blend_sizes(pointer_size: int) -> dict:
+    """Struct sizes, computed the way the SDNA declares them."""
+    sizes = dict(_BLEND_TYPES)
+    for name in _BLEND_ORDER:
+        sizes[name] = sum(_blend_field_size(t, f, sizes, pointer_size)
+                          for t, f in _BLEND_STRUCTS[name])
+    return sizes
+
 
 def _sdna_block(pointer_size: int, endian: str = "<") -> bytes:
-    """An SDNA describing an ID struct and a few datablock types."""
-    names = ["*next", "*prev", "*newid", "*lib", "name[66]", "flag", "id", "*data"]
-    types = ["void", "ID", "Library", "char", "short", "Object", "Mesh", "Material"]
-    # ID: two void pointers, an ID pointer, a Library pointer, name[66], flag.
-    id_length = pointer_size * 4 + 66 + 2
-    lengths = [0, id_length, 0, 1, 2, id_length + pointer_size,
-               id_length + pointer_size, id_length]
-
-    def index_of(collection, value):
-        return collection.index(value)
-
-    id_fields = [
-        (index_of(types, "void"), index_of(names, "*next")),
-        (index_of(types, "void"), index_of(names, "*prev")),
-        (index_of(types, "ID"), index_of(names, "*newid")),
-        (index_of(types, "Library"), index_of(names, "*lib")),
-        (index_of(types, "char"), index_of(names, "name[66]")),
-        (index_of(types, "short"), index_of(names, "flag")),
-    ]
-    # Every datablock struct opens with an embedded ID, which is what lets the
-    # reader find names without knowing the struct.
-    def with_id(extra=True):
-        fields = [(index_of(types, "ID"), index_of(names, "id"))]
-        if extra:
-            fields.append((index_of(types, "void"), index_of(names, "*data")))
-        return fields
-
-    structs = [
-        (index_of(types, "ID"), id_fields),
-        (index_of(types, "Object"), with_id()),
-        (index_of(types, "Mesh"), with_id()),
-        (index_of(types, "Material"), with_id(extra=False)),
-    ]
+    sizes = _blend_sizes(pointer_size)
+    names, types = [], [name for name, _ in _BLEND_TYPES]
+    for struct_name in _BLEND_ORDER:
+        for _, field_name in _BLEND_STRUCTS[struct_name]:
+            if field_name not in names:
+                names.append(field_name)
 
     def strings(tag, items):
         out = bytearray(tag)
@@ -457,61 +479,126 @@ def _sdna_block(pointer_size: int, endian: str = "<") -> bytes:
     body += strings(b"TYPE", types)
 
     tlen = bytearray(b"TLEN")
-    tlen += struct.pack(f"{endian}{len(lengths)}H", *lengths)
+    tlen += struct.pack(f"{endian}{len(types)}H", *[sizes[t] for t in types])
     while len(tlen) % 4:
         tlen += b"\x00"
     body += tlen
 
     strc = bytearray(b"STRC")
-    strc += struct.pack(f"{endian}I", len(structs))
-    for type_index, fields in structs:
-        strc += struct.pack(f"{endian}HH", type_index, len(fields))
-        for field in fields:
-            strc += struct.pack(f"{endian}HH", *field)
+    strc += struct.pack(f"{endian}I", len(_BLEND_ORDER))
+    for struct_name in _BLEND_ORDER:
+        fields = _BLEND_STRUCTS[struct_name]
+        strc += struct.pack(f"{endian}HH", types.index(struct_name), len(fields))
+        for type_name, field_name in fields:
+            strc += struct.pack(f"{endian}HH", types.index(type_name),
+                                names.index(field_name))
+        body += b""
     body += strc
     return bytes(body)
 
 
-#: Struct index within _sdna_block, by datablock code.
-_BLEND_STRUCT = {"OB": 1, "ME": 2, "MA": 3}
-
-
-def _id_payload(code: str, name: str, pointer_size: int) -> bytes:
+def _blend_id(code: str, name: str, pointer_size: int) -> bytes:
     """An ID struct whose name field holds the code-prefixed datablock name."""
-    payload = bytearray(pointer_size * 4)        # next, prev, newid, lib
+    payload = bytearray(pointer_size * 4)           # next, prev, newid, lib
     field = (code + name).encode("utf-8")[:65]
     payload += field + b"\x00" * (66 - len(field))
-    payload += struct.pack("<h", 0)              # flag
-    payload += b"\x00" * pointer_size            # trailing data pointer
+    payload += struct.pack("<h", 0)                 # flag
     return bytes(payload)
 
 
+#: A unit cube: eight corners, six quads, twenty-four loops.
+_CUBE_VERTS = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+               (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+_CUBE_FACES = [(0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+               (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+
+
 def build_blend(version: int = 293, *, pointer_size: int = 8,
-                datablocks=(("OB", "Cube"), ("ME", "Cube"), ("MA", "Red")),
-                compress: bool = False, truncated: bool = False) -> bytes:
-    """A small but structurally valid .blend file."""
+                datablocks=(("OB", "Cube"), ("MA", "Red")),
+                with_mesh: bool = True, compress: bool = False,
+                truncated: bool = False) -> bytes:
+    """A small but structurally valid .blend file.
+
+    With *with_mesh*, a real cube is written as MVert/MPoly/MLoop arrays in
+    their own blocks, reached from the Mesh struct by pointer exactly as
+    Blender writes them.
+    """
     endian = "<"
+    sizes = _blend_sizes(pointer_size)
+    pointer_format = "Q" if pointer_size == 8 else "I"
+    header = struct.Struct(f"{endian}4sI{pointer_format}II")
+
     out = bytearray(BLEND_MAGIC)
     out += b"-" if pointer_size == 8 else b"_"
     out += b"v"
     out += f"{version:03d}".encode("ascii")
 
-    pointer_format = "Q" if pointer_size == 8 else "I"
-    header = struct.Struct(f"{endian}4sI{pointer_format}II")
-    address = 0x1000
+    address = 0x10000
 
-    def block(code: str, payload: bytes, sdna_index: int = 0, count: int = 1):
+    def next_address():
         nonlocal address
-        address += 0x100
-        return header.pack(code.encode("ascii").ljust(4, b"\x00"), len(payload),
-                           address, sdna_index, count) + payload
+        address += 0x1000
+        return address
 
-    out += block("GLOB", b"\x00" * 32)
+    def block(code: str, payload: bytes, at: int, sdna_index: int = 0, count: int = 1):
+        return header.pack(code.encode("ascii").ljust(4, b"\x00"), len(payload),
+                           at, sdna_index, count) + payload
+
+    out += block("GLOB", b"\x00" * 32, next_address())
+
+    material_addresses = []
     for code, name in datablocks:
-        out += block(code, _id_payload(code, name, pointer_size),
-                     sdna_index=_BLEND_STRUCT.get(code, 0))
-    out += block("DATA", b"\x00" * 64)
-    out += block("DNA1", _sdna_block(pointer_size, endian))
+        at = next_address()
+        payload = bytearray(_blend_id(code, name, pointer_size))
+        if code == "MA":
+            payload += struct.pack(f"{endian}4f", 0.9, 0.1, 0.1, 1.0)
+            material_addresses.append(at)
+        payload += b"\x00" * pointer_size
+        out += block(code, bytes(payload), at, sdna_index=_BLEND_ORDER.index("Object"))
+
+    if with_mesh:
+        vert_at, poly_at, loop_at, uv_at, mat_at = (next_address() for _ in range(5))
+
+        verts = bytearray()
+        for x, y, z in _CUBE_VERTS:
+            verts += struct.pack(f"{endian}3f", float(x), float(y), float(z))
+            verts += struct.pack(f"{endian}3h", 0, 0, 32767)   # normal, as shorts
+            verts += b"\x00\x00"                               # flag, bweight
+        polys, loops, uvs = bytearray(), bytearray(), bytearray()
+        for index, face in enumerate(_CUBE_FACES):
+            polys += struct.pack(f"{endian}iihbb", index * 4, 4,
+                                 index % max(len(material_addresses), 1), 0, 0)
+            for corner, vertex in enumerate(face):
+                loops += struct.pack(f"{endian}II", vertex, 0)
+                uvs += struct.pack(f"{endian}2fi", (corner % 2), (corner // 2), 0)
+
+        out += block("DATA", bytes(verts), vert_at,
+                     sdna_index=_BLEND_ORDER.index("MVert"), count=len(_CUBE_VERTS))
+        out += block("DATA", bytes(polys), poly_at,
+                     sdna_index=_BLEND_ORDER.index("MPoly"), count=len(_CUBE_FACES))
+        out += block("DATA", bytes(loops), loop_at,
+                     sdna_index=_BLEND_ORDER.index("MLoop"), count=len(_CUBE_FACES) * 4)
+        out += block("DATA", bytes(uvs), uv_at,
+                     sdna_index=_BLEND_ORDER.index("MLoopUV"), count=len(_CUBE_FACES) * 4)
+        out += block("DATA",
+                     struct.pack(f"{endian}{len(material_addresses)}{pointer_format}",
+                                 *material_addresses) or b"\x00" * pointer_size,
+                     mat_at, count=max(len(material_addresses), 1))
+
+        mesh = bytearray(_blend_id("ME", "Cube", pointer_size))
+        mesh += struct.pack(f"{endian}{pointer_format}", poly_at)
+        mesh += struct.pack(f"{endian}{pointer_format}", loop_at)
+        mesh += struct.pack(f"{endian}{pointer_format}", uv_at)
+        mesh += struct.pack(f"{endian}{pointer_format}", vert_at)
+        mesh += struct.pack(f"{endian}{pointer_format}", mat_at)
+        mesh += struct.pack(f"{endian}iii", len(_CUBE_VERTS), len(_CUBE_FACES),
+                            len(_CUBE_FACES) * 4)
+        mesh += struct.pack(f"{endian}h", len(material_addresses))
+        assert len(mesh) == sizes["Mesh"], f"{len(mesh)} != declared {sizes['Mesh']}"
+        out += block("ME", bytes(mesh), next_address(),
+                     sdna_index=_BLEND_ORDER.index("Mesh"))
+
+    out += block("DNA1", _sdna_block(pointer_size, endian), next_address())
     if not truncated:
         out += header.pack(b"ENDB", 0, 0, 0, 0)
 

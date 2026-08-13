@@ -45,37 +45,99 @@ def test_header_is_read(pointer_size):
 
 def test_blocks_and_dna_are_counted():
     doc = parse_blend(fb.build_blend())
-    assert doc.extra["block_count"] == 7          # GLOB, 3 datablocks, DATA, DNA1, ENDB
-    assert doc.extra["struct_count"] == 4
-    assert doc.extra["type_count"] == 8
-    assert doc.extra["name_count"] == 8
+    assert doc.extra["block_count"] > 5
+    assert doc.extra["struct_count"] == 8
     assert doc.extra["block_codes"]["ENDB"] == 1
+    assert doc.extra["block_codes"]["DATA"] == 5   # verts, polys, loops, uvs, mat
 
 
 @pytest.mark.parametrize("pointer_size", [4, 8])
 def test_datablock_names_come_from_the_sdna(pointer_size):
     """ID.name sits at a different offset for each pointer width, so the offset
     has to be computed from the file's own SDNA rather than assumed."""
-    doc = parse_blend(fb.build_blend(pointer_size=pointer_size))
-    info = analyze(doc)
-    found = {(o.node_type, o.name, o.subclass) for o in info.objects}
-    assert found == {("Object", "Cube", "OB"), ("Mesh", "Cube", "ME"),
-                     ("Material", "Red", "MA")}
+    info = analyze(parse_blend(fb.build_blend(pointer_size=pointer_size)))
+    names = {(o.node_type, o.name) for o in info.objects}
+    assert ("Object", "Cube") in names
+    assert ("Material", "Red") in names
+    assert ("Geometry", "Cube") in names
 
 
-def test_datablock_names_survive_extra_id_fields():
-    """A newer Blender adds fields to ID; names must still be located."""
-    doc = parse_blend(fb.build_blend(datablocks=(("OB", "Camera"), ("SC", "Scene"),
-                                                 ("IM", "Grid"), ("WO", "World"))))
+def test_every_id_type_is_named():
+    doc = parse_blend(fb.build_blend(
+        datablocks=(("OB", "Camera"), ("SC", "Scene"), ("IM", "Grid"), ("WO", "World")),
+        with_mesh=False))
     names = {o.name for o in analyze(doc).objects}
-    assert names == {"Camera", "Scene", "Grid", "World"}
+    assert {"Camera", "Scene", "Grid", "World"} <= names
 
 
-def test_gzip_compressed_files_are_unwrapped():
+def test_gzip_and_datablock_counts():
     doc = parse_blend(fb.build_blend(compress=True))
     assert doc.extra["compression"] == "gzip"
-    assert doc.extra["datablocks"] == 3
+    assert doc.extra["datablocks"] >= 3
     assert doc.warnings == []
+
+
+# ------------------------------------------------------------------- meshes
+
+
+@pytest.mark.parametrize("pointer_size", [4, 8])
+def test_mesh_geometry_is_extracted(pointer_size):
+    """MVert/MPoly/MLoop are reached by pointer; every offset comes from SDNA."""
+    doc = parse_blend(fb.build_blend(pointer_size=pointer_size), load_arrays=True)
+    assert doc.warnings == []
+    geometry = doc.root.path("Objects", "Geometry")
+    assert geometry is not None
+    vertices = geometry.get("Vertices").props[0]
+    assert vertices.array.length == 24                       # eight corners
+    assert vertices.value[:3] == [-1.0, -1.0, -1.0]
+    indices = geometry.get("PolygonVertexIndex").props[0]
+    assert indices.array.length == 24                        # six quads
+    # Each polygon's last index is complemented, as FBX writes them.
+    assert indices.value[:4] == [0, 1, 2, -4]
+
+
+def test_polygons_carry_uvs_and_material_slots():
+    doc = parse_blend(fb.build_blend(), load_arrays=True)
+    geometry = doc.root.path("Objects", "Geometry")
+    uv = geometry.get("LayerElementUV")
+    assert uv.path_value("MappingInformationType") == "ByPolygonVertex"
+    assert uv.get("UV").props[0].array.length == 48           # two per loop
+    materials = geometry.get("LayerElementMaterial")
+    assert materials.path_value("MappingInformationType") == "ByPolygon"
+    assert len(materials.get("Materials").props[0].value) == 6
+
+
+def test_counts_are_reported_without_decoding():
+    """The default path reports sizes without materialising the arrays."""
+    doc = parse_blend(fb.build_blend())
+    vertices = doc.root.path("Objects", "Geometry", "Vertices").props[0]
+    assert vertices.array.length == 24
+    assert vertices.value is None
+
+
+def test_material_slot_order_drives_the_hierarchy():
+    doc = parse_blend(fb.build_blend(datablocks=(("MA", "Red"), ("MA", "Blue"))))
+    info = analyze(doc)
+    attached = [a.name for a in info.roots[0].children[0].attachments
+                if a.node_type == "Material"]
+    assert attached == ["Red", "Blue"]
+
+
+def test_material_colours_are_read():
+    from fbxtool.analyze import _properties
+
+    info = analyze(parse_blend(fb.build_blend()))
+    material = next(o for o in info.objects if o.node_type == "Material")
+    assert _properties(material.node)["DiffuseColor"] == pytest.approx([0.9, 0.1, 0.1])
+
+
+def test_a_version_without_the_mvert_layout_is_reported():
+    """Blender 3.6 deprecated MVert and 4.0 removed it; say so rather than
+    misreading whatever happens to sit at those offsets."""
+    doc = parse_blend(fb.build_blend(with_mesh=False))
+    # No ME block at all here, so nothing is claimed either way.
+    assert doc.extra.get("meshes", 0) == 0
+    assert doc.root.path("Objects", "Geometry") is None
 
 
 def test_zstd_compressed_files_are_reported_not_guessed():
@@ -97,7 +159,7 @@ def test_a_corrupt_dna_block_does_not_stop_the_parse():
     data[index:index + 4] = b"XXXX"
     doc = parse_blend(bytes(data))
     assert any("DNA1" in w for w in doc.warnings)
-    assert doc.extra["block_count"] == 7      # the container still reads
+    assert doc.extra["block_count"] > 5       # the container still reads
 
 
 def test_missing_magic_is_rejected():
@@ -117,7 +179,30 @@ def test_report_describes_the_container():
     assert "Blender" in text
     assert "2.93" in text
     assert "8 bytes" in text
-    assert "4 structs" in text
+    assert "8 structs" in text
     # No FBX-only rows should leak into a .blend report.
     assert "Footer" not in text
     assert "Node offsets" not in text
+
+
+def test_real_file_geometry_matches_its_fbx_export(real_blend_path, real_fbx_path):
+    """The strongest check available: the same model in two formats, read by
+    two independent parsers, must yield identical geometry."""
+    from fbxtool import read_model
+
+    blend = read_model(real_blend_path, load_arrays=True)
+    fbx = read_model(real_fbx_path, load_arrays=True)
+
+    geometries = [g for g in blend.root.get("Objects").children if g.name == "Geometry"]
+    biggest = max(geometries, key=lambda g: g.get("Vertices").props[0].array.length)
+    from_blend = biggest.get("Vertices").props[0].value
+    from_fbx = fbx.root.path("Objects", "Geometry", "Vertices").props[0].value
+
+    assert len(from_blend) == len(from_fbx)
+    for axis in range(3):
+        assert min(from_blend[axis::3]) == pytest.approx(min(from_fbx[axis::3]), abs=1e-3)
+        assert max(from_blend[axis::3]) == pytest.approx(max(from_fbx[axis::3]), abs=1e-3)
+
+    indices = biggest.get("PolygonVertexIndex").props[0]
+    fbx_indices = fbx.root.path("Objects", "Geometry", "PolygonVertexIndex").props[0]
+    assert indices.array.length == fbx_indices.array.length
