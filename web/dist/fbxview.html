@@ -303,9 +303,10 @@ ul.record-tree .count { color: var(--muted); }
     <div class="viewport-controls">
       <select id="geometry-select" title="Geometry to display" disabled></select>
       <select id="mode-select" title="Shading mode">
-        <option value="0">Materials</option>
-        <option value="1">Clay</option>
-        <option value="2">Normals</option>
+        <option value="0">File colours</option>
+        <option value="1">Index colours</option>
+        <option value="2">Clay</option>
+        <option value="3">Normals</option>
       </select>
       <select id="up-select" title="Which axis points up in the mesh data">
         <option value="y">Y up</option>
@@ -1708,8 +1709,10 @@ const FbxViewer = (function () {
   in vec3 vViewPosition;
   in float vMaterial;
 
-  uniform int uMode;          // 0 materials, 1 clay, 2 normals
+  uniform int uMode;          // 0 file colours, 1 index colours, 2 clay, 3 normals
   uniform vec3 uClayColour;
+  uniform sampler2D uPalette; // one texel per material, in connection order
+  uniform int uPaletteSize;
 
   out vec4 fragColour;
 
@@ -1732,12 +1735,21 @@ const FbxViewer = (function () {
     }
     if (!gl_FrontFacing) normal = -normal;
 
-    if (uMode == 2) {
+    if (uMode == 3) {
       fragColour = vec4(normal * 0.5 + 0.5, 1.0);
       return;
     }
 
-    vec3 base = uMode == 0 ? materialColour(vMaterial) : uClayColour;
+    vec3 base;
+    if (uMode == 0 && uPaletteSize > 0) {
+      // The material index is a whole number carried in a float attribute.
+      int slot = clamp(int(vMaterial + 0.5), 0, uPaletteSize - 1);
+      base = texelFetch(uPalette, ivec2(slot, 0), 0).rgb;
+    } else if (uMode == 1) {
+      base = materialColour(vMaterial);
+    } else {
+      base = uClayColour;
+    }
 
     vec3 viewDir = normalize(-vViewPosition);
     vec3 keyDir = normalize(vec3(0.4, 0.7, 0.8));
@@ -1886,6 +1898,8 @@ const FbxViewer = (function () {
         normalMatrix: gl.getUniformLocation(program, 'uNormalMatrix'),
         mode: gl.getUniformLocation(program, 'uMode'),
         clayColour: gl.getUniformLocation(program, 'uClayColour'),
+        palette: gl.getUniformLocation(program, 'uPalette'),
+        paletteSize: gl.getUniformLocation(program, 'uPaletteSize'),
       };
     }
 
@@ -1906,6 +1920,38 @@ const FbxViewer = (function () {
       attach(this.normalBuffer, 1, 3);
       attach(this.materialBuffer, 2, 1);
       gl.bindVertexArray(null);
+
+      this.paletteTexture = gl.createTexture();
+      this.paletteSize = 0;
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /**
+     * Upload the scene's real material colours, one texel per material in the
+     * order they connect to the model, which is what the per-polygon material
+     * index refers to. Colours are linear, matching the shader's output curve.
+     */
+    setPalette(colours) {
+      const gl = this.gl;
+      this.paletteSize = colours.length;
+      if (!colours.length) { this.dirty = true; return; }
+      const data = new Uint8Array(colours.length * 4);
+      colours.forEach((rgb, i) => {
+        for (let k = 0; k < 3; k++) {
+          data[i * 4 + k] = Math.max(0, Math.min(255, Math.round((rgb[k] || 0) * 255)));
+        }
+        data[i * 4 + 3] = 255;
+      });
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, colours.length, 1, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      this.dirty = true;
     }
 
     /** Upload a mesh. Buffers are copied, so WASM memory may be reused after. */
@@ -2059,6 +2105,10 @@ const FbxViewer = (function () {
       gl.uniformMatrix3fv(this.uniforms.normalMatrix, false, normalMatrix(modelView));
       gl.uniform1i(this.uniforms.mode, this.mode);
       gl.uniform3f(this.uniforms.clayColour, 0.72, 0.73, 0.76);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+      gl.uniform1i(this.uniforms.palette, 0);
+      gl.uniform1i(this.uniforms.paletteSize, this.paletteSize);
 
       gl.bindVertexArray(this.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
@@ -2172,6 +2222,44 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
 
+  /**
+   * The real colours of the materials this geometry uses.
+   *
+   * A per-polygon material index does not name a material directly: it indexes
+   * the materials connected to the *model* that owns the geometry, in the
+   * order those connections appear. So the palette has to be resolved through
+   * the connection graph rather than read off the geometry record.
+   */
+  function materialPalette(entry) {
+    const info = currentAnalysis;
+    if (!info || !info.connections.length) return [];
+    const byUid = new Map(info.objects.filter((o) => o.uid !== null).map((o) => [o.uid, o]));
+    const uid = entry.props.map((p) => p.value).find((v) => typeof v === 'number');
+    if (uid === undefined) return [];               // legacy 6.x files have no UIDs
+
+    // A Model may hold its own geometry; otherwise walk Geometry -> Model.
+    let modelUid = uid;
+    if (entry.name !== 'Model') {
+      const link = info.connections.find((c) => c.kind === 'OO' && c.src === uid);
+      if (!link) return [];
+      modelUid = link.dst;
+    }
+
+    return info.connections
+      .filter((c) => c.kind === 'OO' && c.dst === modelUid)
+      .map((c) => byUid.get(c.src))
+      .filter((o) => o && o.nodeType === 'Material')
+      .map((material) => {
+        const props = FbxAnalyze.properties(material.node);
+        let colour = props.DiffuseColor !== undefined ? props.DiffuseColor : props.Diffuse;
+        if (typeof colour === 'number') colour = [colour, colour, colour];
+        if (!Array.isArray(colour)) colour = [0.72, 0.73, 0.76];
+        const factor = typeof props.DiffuseFactor === 'number' ? props.DiffuseFactor : 1;
+        // Values are linear, which is what the shader's output curve expects.
+        return [0, 1, 2].map((i) => (Number(colour[i]) || 0) * factor);
+      });
+  }
+
   function populateGeometry(doc) {
     const candidates = FbxAnalyze.findAllGeometry(doc);
     dom.geometrySelect.innerHTML = '';
@@ -2258,6 +2346,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const elapsed = performance.now() - started;
       viewer.setMesh(mesh);
 
+      const palette = materialPalette(entry);
+      viewer.setPalette(palette);
+      // Without usable colours the file-colour mode has nothing to show.
+      dom.modeSelect.value = palette.length ? '0' : '2';
+      viewer.setMode(Number(dom.modeSelect.value));
+
       const declaredAxis = (currentAnalysis.globalSettings.upAxis || '+Y').includes('Z')
         ? 'z' : 'y';
       const chosen = guessUpAxis(mesh.min, mesh.max, declaredAxis);
@@ -2268,6 +2362,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       let text = `${mesh.triangleCount.toLocaleString()} triangles from `
         + `${mesh.polygonCount.toLocaleString()} polygons · `
         + `${size.map((v) => v.toFixed(1)).join(' × ')} units · ${elapsed.toFixed(0)} ms`;
+      text += palette.length
+        ? ` · ${palette.length} material colours`
+        : ' · no material colours in this file';
       if (chosen.fromGeometry) {
         text += ` · ${chosen.axis.toUpperCase()} up from the geometry, though the `
           + `file declares ${currentAnalysis.globalSettings.upAxis}`;

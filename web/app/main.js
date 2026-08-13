@@ -98,6 +98,44 @@
   }
 
 
+  /**
+   * The real colours of the materials this geometry uses.
+   *
+   * A per-polygon material index does not name a material directly: it indexes
+   * the materials connected to the *model* that owns the geometry, in the
+   * order those connections appear. So the palette has to be resolved through
+   * the connection graph rather than read off the geometry record.
+   */
+  function materialPalette(entry) {
+    const info = currentAnalysis;
+    if (!info || !info.connections.length) return [];
+    const byUid = new Map(info.objects.filter((o) => o.uid !== null).map((o) => [o.uid, o]));
+    const uid = entry.props.map((p) => p.value).find((v) => typeof v === 'number');
+    if (uid === undefined) return [];               // legacy 6.x files have no UIDs
+
+    // A Model may hold its own geometry; otherwise walk Geometry -> Model.
+    let modelUid = uid;
+    if (entry.name !== 'Model') {
+      const link = info.connections.find((c) => c.kind === 'OO' && c.src === uid);
+      if (!link) return [];
+      modelUid = link.dst;
+    }
+
+    return info.connections
+      .filter((c) => c.kind === 'OO' && c.dst === modelUid)
+      .map((c) => byUid.get(c.src))
+      .filter((o) => o && o.nodeType === 'Material')
+      .map((material) => {
+        const props = FbxAnalyze.properties(material.node);
+        let colour = props.DiffuseColor !== undefined ? props.DiffuseColor : props.Diffuse;
+        if (typeof colour === 'number') colour = [colour, colour, colour];
+        if (!Array.isArray(colour)) colour = [0.72, 0.73, 0.76];
+        const factor = typeof props.DiffuseFactor === 'number' ? props.DiffuseFactor : 1;
+        // Values are linear, which is what the shader's output curve expects.
+        return [0, 1, 2].map((i) => (Number(colour[i]) || 0) * factor);
+      });
+  }
+
   function populateGeometry(doc) {
     const candidates = FbxAnalyze.findAllGeometry(doc);
     dom.geometrySelect.innerHTML = '';
@@ -184,6 +222,12 @@
       const elapsed = performance.now() - started;
       viewer.setMesh(mesh);
 
+      const palette = materialPalette(entry);
+      viewer.setPalette(palette);
+      // Without usable colours the file-colour mode has nothing to show.
+      dom.modeSelect.value = palette.length ? '0' : '2';
+      viewer.setMode(Number(dom.modeSelect.value));
+
       const declaredAxis = (currentAnalysis.globalSettings.upAxis || '+Y').includes('Z')
         ? 'z' : 'y';
       const chosen = guessUpAxis(mesh.min, mesh.max, declaredAxis);
@@ -194,6 +238,9 @@
       let text = `${mesh.triangleCount.toLocaleString()} triangles from `
         + `${mesh.polygonCount.toLocaleString()} polygons · `
         + `${size.map((v) => v.toFixed(1)).join(' × ')} units · ${elapsed.toFixed(0)} ms`;
+      text += palette.length
+        ? ` · ${palette.length} material colours`
+        : ' · no material colours in this file';
       if (chosen.fromGeometry) {
         text += ` · ${chosen.axis.toUpperCase()} up from the geometry, though the `
           + `file declares ${currentAnalysis.globalSettings.upAxis}`;

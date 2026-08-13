@@ -35,8 +35,10 @@ const FbxViewer = (function () {
   in vec3 vViewPosition;
   in float vMaterial;
 
-  uniform int uMode;          // 0 materials, 1 clay, 2 normals
+  uniform int uMode;          // 0 file colours, 1 index colours, 2 clay, 3 normals
   uniform vec3 uClayColour;
+  uniform sampler2D uPalette; // one texel per material, in connection order
+  uniform int uPaletteSize;
 
   out vec4 fragColour;
 
@@ -59,12 +61,21 @@ const FbxViewer = (function () {
     }
     if (!gl_FrontFacing) normal = -normal;
 
-    if (uMode == 2) {
+    if (uMode == 3) {
       fragColour = vec4(normal * 0.5 + 0.5, 1.0);
       return;
     }
 
-    vec3 base = uMode == 0 ? materialColour(vMaterial) : uClayColour;
+    vec3 base;
+    if (uMode == 0 && uPaletteSize > 0) {
+      // The material index is a whole number carried in a float attribute.
+      int slot = clamp(int(vMaterial + 0.5), 0, uPaletteSize - 1);
+      base = texelFetch(uPalette, ivec2(slot, 0), 0).rgb;
+    } else if (uMode == 1) {
+      base = materialColour(vMaterial);
+    } else {
+      base = uClayColour;
+    }
 
     vec3 viewDir = normalize(-vViewPosition);
     vec3 keyDir = normalize(vec3(0.4, 0.7, 0.8));
@@ -213,6 +224,8 @@ const FbxViewer = (function () {
         normalMatrix: gl.getUniformLocation(program, 'uNormalMatrix'),
         mode: gl.getUniformLocation(program, 'uMode'),
         clayColour: gl.getUniformLocation(program, 'uClayColour'),
+        palette: gl.getUniformLocation(program, 'uPalette'),
+        paletteSize: gl.getUniformLocation(program, 'uPaletteSize'),
       };
     }
 
@@ -233,6 +246,38 @@ const FbxViewer = (function () {
       attach(this.normalBuffer, 1, 3);
       attach(this.materialBuffer, 2, 1);
       gl.bindVertexArray(null);
+
+      this.paletteTexture = gl.createTexture();
+      this.paletteSize = 0;
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /**
+     * Upload the scene's real material colours, one texel per material in the
+     * order they connect to the model, which is what the per-polygon material
+     * index refers to. Colours are linear, matching the shader's output curve.
+     */
+    setPalette(colours) {
+      const gl = this.gl;
+      this.paletteSize = colours.length;
+      if (!colours.length) { this.dirty = true; return; }
+      const data = new Uint8Array(colours.length * 4);
+      colours.forEach((rgb, i) => {
+        for (let k = 0; k < 3; k++) {
+          data[i * 4 + k] = Math.max(0, Math.min(255, Math.round((rgb[k] || 0) * 255)));
+        }
+        data[i * 4 + 3] = 255;
+      });
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, colours.length, 1, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      this.dirty = true;
     }
 
     /** Upload a mesh. Buffers are copied, so WASM memory may be reused after. */
@@ -386,6 +431,10 @@ const FbxViewer = (function () {
       gl.uniformMatrix3fv(this.uniforms.normalMatrix, false, normalMatrix(modelView));
       gl.uniform1i(this.uniforms.mode, this.mode);
       gl.uniform3f(this.uniforms.clayColour, 0.72, 0.73, 0.76);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+      gl.uniform1i(this.uniforms.palette, 0);
+      gl.uniform1i(this.uniforms.paletteSize, this.paletteSize);
 
       gl.bindVertexArray(this.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
