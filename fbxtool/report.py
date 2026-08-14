@@ -113,6 +113,7 @@ FORMAT_NAMES = {
     "fbx": "Autodesk FBX",
     "obj": "Wavefront OBJ",
     "blend": "Blender",
+    "gltf": "glTF 2.0",
 }
 
 
@@ -132,6 +133,10 @@ def _render_file(out: _Out, analysis: Analysis) -> None:
         return
     if doc.format == "blend":
         _render_blend_rows(rows, doc)
+        out.pairs(rows)
+        return
+    if doc.format == "gltf":
+        _render_gltf_rows(rows, doc)
         out.pairs(rows)
         return
 
@@ -180,6 +185,38 @@ def _render_obj_rows(rows: list[tuple[str, Any]], doc) -> None:
     if extra.get("line_or_point_statements"):
         rows.append(("Line/point statements", f"{extra['line_or_point_statements']}"
                                               " (not rendered)"))
+
+
+def _render_gltf_rows(rows: list[tuple[str, Any]], doc) -> None:
+    extra = doc.extra
+    rows.append(("Container", "binary (.glb — JSON and a buffer chunk)"
+                 if doc.encoding == "binary" else "text (.gltf)"))
+    rows.append(("glTF version", extra.get("gltf_version") or "unknown"))
+    rows.append(("Written by", extra.get("generator") or "unknown"))
+    if extra.get("copyright"):
+        rows.append(("Copyright", extra["copyright"]))
+    primitives = extra.get("primitives", 0)
+    rows.append(("Meshes", f"{extra.get('meshes', 0):,} "
+                           f"({primitives:,} primitive{'' if primitives == 1 else 's'}, "
+                           f"{extra.get('triangles', 0):,} triangles)"))
+    rows.append(("Nodes", f"{extra.get('nodes', 0):,}"))
+    rows.append(("Materials", f"{extra.get('materials', 0):,}"))
+    rows.append(("Images", f"{extra.get('images', 0):,}"))
+    rows.append(("Buffers", f"{extra.get('buffers', 0):,} "
+                            f"({extra.get('buffer_views', 0):,} views, "
+                            f"{extra.get('accessors', 0):,} accessors)"))
+    if extra.get("external_buffers"):
+        rows.append(("Read from beside it", ", ".join(extra["external_buffers"][:4])))
+    if extra.get("component_types"):
+        rows.append(("Component types", ", ".join(extra["component_types"])))
+    for label, key in (("Animations", "animations"), ("Skins", "skins"),
+                       ("Cameras", "cameras")):
+        if extra.get(key):
+            rows.append((label, f"{extra[key]:,}"))
+    if extra.get("extensions_used"):
+        rows.append(("Extensions used", ", ".join(extra["extensions_used"])))
+    if extra.get("extensions_required"):
+        rows.append(("Extensions required", ", ".join(extra["extensions_required"])))
 
 
 def _render_blend_rows(rows: list[tuple[str, Any]], doc) -> None:

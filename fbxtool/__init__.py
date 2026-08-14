@@ -1,4 +1,6 @@
-"""fbxtool — inspect FBX files (ASCII and binary) without the FBX SDK.
+"""fbxtool — inspect model files without the FBX SDK.
+
+Reads FBX (binary and ASCII), Wavefront OBJ, glTF 2.0 and Blender .blend.
 
 Typical use::
 
@@ -27,6 +29,7 @@ from .model import (
     UnsupportedFormatError,
 )
 from .blend import parse_blend
+from .gltf import parse_gltf
 from .obj import parse_mtl, parse_obj
 from .reader import detect_format, parse_bytes, read_fbx, read_model
 from .report import render_text, render_tree, to_dict
@@ -56,6 +59,7 @@ __all__ = [
     "parse_binary",
     "parse_bytes",
     "parse_blend",
+    "parse_gltf",
     "parse_mtl",
     "parse_obj",
     "read_fbx",

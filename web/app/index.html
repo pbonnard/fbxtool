@@ -16,7 +16,7 @@
     <span id="status" class="status">Loading WebAssembly…</span>
     <button id="picker" type="button" class="primary">Open model</button>
     <input id="file-input" type="file"
-           accept=".fbx,.obj,.mtl,.blend,.json,image/*" multiple hidden>
+           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.bin,.json,image/*" multiple hidden>
   </div>
 </header>
 
@@ -53,12 +53,14 @@
     <div id="drop" class="drop">
       <div class="drop-inner">
         <h1>Drop a model file</h1>
-        <p>FBX (binary or ASCII), Wavefront OBJ, or a Blender <code>.blend</code>.
-           Everything runs in this tab — parsed by a WebAssembly module and drawn
-           with WebGL, never leaving your machine.</p>
+        <p>FBX (binary or ASCII), Wavefront OBJ, glTF 2.0
+           (<code>.gltf</code> or <code>.glb</code>), or a Blender
+           <code>.blend</code>. Everything runs in this tab — parsed by a
+           WebAssembly module and drawn with WebGL, never leaving your
+           machine.</p>
         <p class="hint">Embedded textures load automatically. Files that
-           reference images or an <code>.mtl</code> by name need those dropped in
-           too — together or afterwards.</p>
+           reference images, an <code>.mtl</code> or a <code>.bin</code> by name
+           need those dropped in too — together or afterwards.</p>
       </div>
     </div>
   </section>

@@ -41,7 +41,9 @@ const FbxReport = (function () {
     return parts;
   }
 
-  const FORMAT_NAMES = { fbx: 'Autodesk FBX', obj: 'Wavefront OBJ', blend: 'Blender' };
+  const FORMAT_NAMES = {
+    fbx: 'Autodesk FBX', obj: 'Wavefront OBJ', blend: 'Blender', gltf: 'glTF 2.0',
+  };
 
   function objRows(doc, pairs) {
     const e = doc.extra || {};
@@ -70,6 +72,23 @@ const FbxReport = (function () {
       + `${number(e.typeCount || 0)} types, ${number(e.nameCount || 0)} field names`]);
   }
 
+  function gltfRows(doc, pairs) {
+    const e = doc.extra || {};
+    pairs.push(['Container', doc.encoding === 'binary'
+      ? 'binary (.glb — JSON and a buffer chunk)' : 'text (.gltf)']);
+    pairs.push(['glTF version', e.gltfVersion || 'unknown']);
+    pairs.push(['Written by', e.generator || 'unknown']);
+    pairs.push(['Meshes', `${number(e.meshes || 0)} `
+      + `(${number(e.primitives || 0)} primitive${e.primitives === 1 ? '' : 's'})`]);
+    pairs.push(['Nodes', number(e.nodes || 0)]);
+    pairs.push(['Materials', number(e.materials || 0)]);
+    pairs.push(['Images', number(e.images || 0)]);
+    pairs.push(['Buffers', number(e.buffers || 0)]);
+    if (e.extensions && e.extensions.length) {
+      pairs.push(['Extensions used', e.extensions.join(', ')]);
+    }
+  }
+
   function fileSection(info) {
     const doc = info.doc;
     const version = info.version;
@@ -87,6 +106,13 @@ const FbxReport = (function () {
     }
     if (doc.format === 'blend') {
       blendRows(doc, pairs);
+      return section('File', rows(pairs));
+    }
+    if (doc.format === 'gltf') {
+      gltfRows(doc, pairs);
+      if (doc.parseMilliseconds !== undefined) {
+        pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
+      }
       return section('File', rows(pairs));
     }
     pairs.push(['Encoding', doc.encoding === 'binary' ? 'binary' : 'ASCII text']);

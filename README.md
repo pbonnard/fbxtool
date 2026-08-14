@@ -7,10 +7,11 @@ with **no dependencies** and without the Autodesk FBX SDK.
 | --- | --- |
 | **FBX** binary and ASCII | full — inspect and render |
 | **Wavefront OBJ** (+ `.mtl`) | full — inspect and render |
+| **glTF 2.0** (`.gltf` and `.glb`) | full — inspect, render and export |
 | **Blender `.blend`** | inspect and render, for the `MVert`/`MPoly`/`MLoop` layout |
 
-OBJ and `.blend` are normalised into the same record tree as FBX, so every
-option and the viewer apply to them unchanged.
+OBJ, glTF and `.blend` are normalised into the same record tree as FBX, so
+every option and the viewer apply to them unchanged.
 
 ```
 $ fbxinfo samples/cube_binary.fbx
@@ -106,6 +107,30 @@ produces the same report as for FBX: `v`/`vn`/`vt` become vertex, normal and UV
 arrays, `f` becomes the polygon index run, `usemtl` becomes a per-polygon
 material layer, and `map_Kd` becomes a texture reference. Face indices may be
 given in any of the five OBJ syntaxes, including negative (relative) ones.
+
+### glTF 2.0
+
+`fbxinfo model.glb` — or `model.gltf`, whose `.bin` is read from beside it —
+reports the container, the generator, and what the file holds: meshes,
+primitives and triangles, nodes, materials, images, buffer views and accessors,
+the component types in use, and the extensions the file names.
+
+The mapping is the awkward part, since glTF stores what a graphics API wants
+rather than what a scene description wants. Each primitive becomes one
+`Geometry` and one `Model`, since a primitive has exactly one material; the
+index list becomes an FBX polygon run with every third index complemented;
+`POSITION` and `NORMAL` become `Vertices` and a `ByVertice` normal layer; and
+`TEXCOORD_0` becomes a UV layer with V flipped, glTF measuring it downwards
+from the top. Metallic-roughness becomes the material properties the rest of
+the tool already reads — `DiffuseColor` and `SpecularColor` split by
+metalness, and roughness back to a shininess exponent.
+
+Attributes may be interleaved behind a `byteStride`, indices may be 8, 16 or
+32 bits, and a *sparse* accessor may overwrite some of what a buffer view
+holds — all of which are handled, since real exporters use all of them.
+Accessors are decoded only when the arrays are wanted, so a listing reads the
+headers and nothing else. A node placed by a matrix and one placed by a
+quaternion both come out as the Euler angles FBX writes.
 
 ### Blender files
 
@@ -408,6 +433,25 @@ The export is checked against the **Khronos glTF-Validator**
 that comes out is the one that went in — same triangle count, same bounds, and
 on small meshes every triangle compared corner by corner.
 
+### Importing glTF
+
+The same page reads glTF back, so a `.glb` or a `.gltf` opens like any other
+model — dropped in, reported on, rendered, its materials editable, and
+exportable again. A `.gltf` naming a `.bin` says so if it arrives alone; drop
+the `.bin` in with it, or afterwards, and the model fills in.
+
+Reading is checked against the export: every sample is written out as a `.glb`
+and opened again, and what comes back has to be the same triangles, the same
+size in the same place, and the same materials with the same colours — the
+Mercedes' 361,236 triangles included. Since our own exporter writes only the
+easy shapes, a hand-written file covers the rest: attributes interleaved behind
+a `byteStride`, 16-bit indices, a sparse accessor, a primitive with no indices
+at all, and nodes placed by a quaternion and by a matrix.
+
+The reader exists twice — once in Python for `fbxinfo`, once in JavaScript for
+the page — and the two are held to the same records, property for property and
+array length for array length, on both containers.
+
 ### Ground contact
 
 A model floating on nothing reads as a render however well it is lit, so the
@@ -651,11 +695,13 @@ node web/test/ground.js samples/scene_parts.fbx      # the floor and its shadow
 node web/test/gltf.js samples/cube_textured.fbx      # export, then validate it
 node web/test/subdivide.js model.fbx                 # smoothing through the module
 node web/test/smoothing.js samples/cube_binary.fbx samples/scene_parts.fbx
+node web/test/gltfin.js samples/cube_textured.fbx     # export, then read it back
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks
-and SDNA — so the container reader is testable without Blender installed.
+and SDNA — so the container reader is testable without Blender installed, and
+glTF fixtures in both containers, written to be awkward on purpose.
 
 The web tests skip cleanly when `clang` or `node` is unavailable.
 

@@ -53,6 +53,8 @@
   const suppliedImages = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
+  /** Binary payloads a .gltf points at, keyed the same way. */
+  const suppliedBuffers = new Map();
   let missingTextures = [];
   /** The palette on screen, its materials grouped, and the user's edits. */
   let currentPalette = [];
@@ -80,10 +82,17 @@
     const list = Array.from(files);
     const images = list.filter((f) => /\.(png|jpe?g|gif|bmp|webp|tga)$/i.test(f.name));
     const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
+    // A .gltf keeps its vertices in a .bin beside it, the way an .obj keeps its
+    // colours in an .mtl.
+    const payloads = list.filter((f) => /\.bin$/i.test(f.name));
     const assignments = list.filter((f) => /\.json$/i.test(f.name));
     for (const image of images) suppliedImages.set(image.name.toLowerCase(), image);
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
+    }
+    for (const payload of payloads) {
+      suppliedBuffers.set(payload.name.toLowerCase(),
+        new Uint8Array(await payload.arrayBuffer()));
     }
     // A saved material assignment applies to whatever is on screen.
     for (const file of assignments) {
@@ -95,7 +104,7 @@
       }
     }
 
-    const companions = new Set([...images, ...libraries, ...assignments]);
+    const companions = new Set([...images, ...libraries, ...payloads, ...assignments]);
     const scene = list.find((f) => !companions.has(f));
     if (!scene) {
       const added = companions.size;
@@ -106,7 +115,8 @@
       }
       // Companions arriving after the scene: reload so they take effect.
       setStatus(`Added ${added} companion file(s), applying…`);
-      if (lastSceneFile && libraries.length) await loadFile(lastSceneFile);
+      // An .mtl or a .bin changes what the file itself reads as, so re-read it.
+      if (lastSceneFile && (libraries.length || payloads.length)) await loadFile(lastSceneFile);
       else if (currentGeometry) await showGeometry(currentGeometry);
       else if (sceneParts.length) await showScene();
       return;
@@ -159,6 +169,9 @@
       let doc = null;
       if (FbxBlend.looksLikeBlend(buffer)) {
         doc = FbxBlend.parse(buffer);
+      } else if (FbxGltfIn.looksLikeGltf(buffer)) {
+        // Both containers, .glb and .gltf, are recognised from the bytes.
+        doc = FbxGltfIn.parse(buffer, { files: suppliedBuffers });
       } else {
         doc = FbxWasm.parseBinary(buffer);
       }
@@ -171,10 +184,10 @@
           doc = FbxObj.parse(text, { materials: suppliedMaterials });
         } else {
           setStatus(`${file.name} is not a model we recognise — not FBX `
-            + '(binary or ASCII), OBJ or .blend.', 'error');
+            + '(binary or ASCII), OBJ, glTF or .blend.', 'error');
           return;
         }
-      } else if (doc.format !== 'blend') {
+      } else if (doc.format !== 'blend' && doc.format !== 'gltf') {
         doc.versionSource = 'header';
       }
       lastSceneFile = file;
@@ -203,6 +216,8 @@
 
       const what = doc.format === 'obj' ? 'Wavefront OBJ'
         : doc.format === 'blend' ? `Blender ${doc.extra.blenderVersionText || '?'}`
+        : doc.format === 'gltf'
+          ? `glTF ${doc.extra.gltfVersion || '2.0'} ${doc.encoding === 'binary' ? '.glb' : '.gltf'}`
         : `FBX ${doc.version || '?'} ${doc.encoding}`;
       const label = `${what} · ${currentAnalysis.totalRecords.toLocaleString()} records · `
         + `${doc.parseMilliseconds.toFixed(0)} ms`;
@@ -221,7 +236,8 @@
 
   /**
    * The renderable parts of a scene: every model that owns a geometry, with
-   * its transform, its parent, and its materials in slot order.
+   * its own properties and its materials in slot order. Where each one stands
+   * is composed separately, up the chain of frames.
    *
    * A mesh is stored in its model's local space, so a scene only assembles
    * correctly once each part is placed by its model's world matrix.
@@ -242,7 +258,6 @@
         model,
         geometry,
         materials: [],
-        parent: null,
         properties: FbxAnalyze.resolvedProperties(model, info.templates),
       });
     };
@@ -266,31 +281,76 @@
       const target = resolve(conn.dst);
       const part = target ? parts.get(keyOf(target)) : null;
       if (part && source && source.nodeType === 'Material') part.materials.push(source);
-      // Model-to-model parenting, for the transform chain.
-      const child = source ? parts.get(keyOf(source)) : null;
-      if (child && target && target !== source && target.nodeType === 'Model') {
-        child.parent = keyOf(target);
-      }
     }
     return [...parts.values()];
   }
 
-  /** A part's world matrix, composed up the parent chain. */
-  function worldMatrix(part, byKey, cache) {
-    if (cache.has(part.key)) return cache.get(part.key);
-    // Guard against a cycle in a malformed file: claim the identity first.
-    cache.set(part.key, FbxTransform.identity());
-    let matrix = FbxTransform.localMatrix(part.properties);
-    if (part.parent !== null && byKey.has(part.parent)) {
-      matrix = FbxTransform.multiply(worldMatrix(byKey.get(part.parent), byKey, cache), matrix);
+  /**
+   * Every model's local placement and its parent, whether or not it holds a
+   * mesh of its own.
+   *
+   * A part's transform is composed up this chain rather than through the parts
+   * alone: a model that carries nothing but a transform is a real link in it —
+   * a rig, a pivot, or the root node a glTF hangs its axis and unit conversion
+   * on — and skipping it leaves everything below in the wrong place.
+   */
+  function collectFrames() {
+    const info = currentAnalysis;
+    if (!info) return new Map();
+    const { keyOf, resolve } = objectIndex;
+
+    const frames = new Map();
+    for (const obj of info.objects) {
+      if (obj.nodeType !== 'Model') continue;
+      const key = keyOf(obj);
+      if (key === null || frames.has(key)) continue;
+      frames.set(key, {
+        key,
+        parent: null,
+        properties: FbxAnalyze.resolvedProperties(obj, info.templates),
+      });
     }
-    cache.set(part.key, matrix);
+    for (const conn of info.connections) {
+      if (conn.kind !== 'OO') continue;
+      const source = resolve(conn.src);
+      const target = resolve(conn.dst);
+      if (!source || !target || source === target) continue;
+      if (source.nodeType !== 'Model' || target.nodeType !== 'Model') continue;
+      const frame = frames.get(keyOf(source));
+      if (frame && frame.parent === null) frame.parent = keyOf(target);
+    }
+    return frames;
+  }
+
+  /** A frame's world matrix, composed up the parent chain. */
+  function worldMatrix(frame, frames, cache) {
+    if (cache.has(frame.key)) return cache.get(frame.key);
+    // Guard against a cycle in a malformed file: claim the identity first.
+    cache.set(frame.key, FbxTransform.identity());
+    let matrix = FbxTransform.localMatrix(frame.properties);
+    if (frame.parent !== null && frames.has(frame.parent)) {
+      matrix = FbxTransform.multiply(
+        worldMatrix(frames.get(frame.parent), frames, cache), matrix);
+    }
+    cache.set(frame.key, matrix);
     return matrix;
+  }
+
+  /** Whether a part's transform chain moves it at all. */
+  function isPlaced(part) {
+    const frames = collectFrames();
+    const frame = frames.get(part.key);
+    if (!frame) return false;
+    const world = worldMatrix(frame, frames, new Map());
+    const geometric = FbxTransform.geometricMatrix(part.properties);
+    const matrix = geometric ? FbxTransform.multiply(world, geometric) : world;
+    const identity = FbxTransform.identity();
+    return matrix.some((value, index) => Math.abs(value - identity[index]) > 1e-9);
   }
 
   /** Build every part, placed in world space, as one combined mesh. */
   function buildScene(parts) {
-    const byKey = new Map(parts.map((p) => [p.key, p]));
+    const frames = collectFrames();
     const cache = new Map();
     const pieces = [];
     const palette = [];
@@ -299,7 +359,8 @@
     // Everything a part allocates is scratch once its result is copied out.
     const heapMark = FbxWasm.mark();
     for (const part of parts) {
-      const world = worldMatrix(part, byKey, cache);
+      const frame = frames.get(part.key);
+      const world = frame ? worldMatrix(frame, frames, cache) : FbxTransform.identity();
       const geometric = FbxTransform.geometricMatrix(part.properties);
       const placement = geometric ? FbxTransform.multiply(world, geometric) : world;
       const materialBase = palette.length;
@@ -486,9 +547,11 @@
 
   /** Build whatever is on screen again, after a setting that changes the mesh. */
   function redraw() {
-    // Whatever is on screen is rebuilt where the camera already is.
+    // Whatever is on screen is rebuilt where the camera already is. A scene is
+    // what is showing whenever no single geometry was picked, however few
+    // parts it has.
     if (currentGeometry) return showGeometry(currentGeometry, { keepCamera: true });
-    if (sceneParts.length > 1) return showScene({ keepCamera: true });
+    if (sceneParts.length) return showScene({ keepCamera: true });
     return Promise.resolve();
   }
 
@@ -929,14 +992,22 @@
       return;
     }
 
+    // One part is normally shown as the mesh it is, which is cheaper and reads
+    // better — but not when its placement is doing real work. A glTF hangs its
+    // axis and unit conversion on the node above the mesh, and a file with a
+    // single part would otherwise come out lying on its side.
+    const placed = sceneParts.length === 1 && isPlaced(sceneParts[0]);
+
     // A scene is only itself once every part is placed, so that comes first.
-    if (sceneParts.length > 1) {
+    if (sceneParts.length > 1 || placed) {
       const whole = document.createElement('option');
       whole.value = 'scene';
-      whole.textContent = `Whole scene — ${sceneParts.length} parts`;
+      whole.textContent = sceneParts.length > 1
+        ? `Whole scene — ${sceneParts.length} parts` : 'Whole scene — as placed';
       dom.geometrySelect.appendChild(whole);
     }
-    dom.geometrySelect.disabled = candidates.length === 1 && sceneParts.length <= 1;
+    dom.geometrySelect.disabled = candidates.length === 1 && !placed
+      && sceneParts.length <= 1;
     candidates.forEach((entry, index) => {
       const [name] = FbxAnalyze.splitObjectName(
         entry.props.map((p) => p.value).find((v) => typeof v === 'string') || '',
@@ -950,7 +1021,7 @@
       dom.geometrySelect.appendChild(option);
     });
     dom.geometrySelect.dataset.count = String(candidates.length);
-    return sceneParts.length > 1 ? showScene() : showGeometry(candidates[0]);
+    return sceneParts.length > 1 || placed ? showScene() : showGeometry(candidates[0]);
   }
 
   /** Yield long enough for the browser to paint pending UI changes. */
@@ -962,7 +1033,8 @@
   async function showScene({ keepCamera = false } = {}) {
     currentGeometry = null;
     try {
-      dom.meshInfo.textContent = `assembling ${sceneParts.length} parts…`;
+      dom.meshInfo.textContent = `assembling ${sceneParts.length} `
+        + `part${sceneParts.length === 1 ? '' : 's'}…`;
       // Assembling a large scene blocks the main thread, so let the overlay
       // fade and the status update land first.
       await nextFrame();
@@ -985,7 +1057,8 @@
       applyUpAxis(built.mesh);
 
       const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
-      let text = `${built.parts} parts · ${built.mesh.triangleCount.toLocaleString()} `
+      let text = `${built.parts} part${built.parts === 1 ? '' : 's'} · `
+        + `${built.mesh.triangleCount.toLocaleString()} `
         + `triangles · ${size.map((v) => v.toFixed(1)).join(' × ')} units · `
         + `${elapsed.toFixed(0)} ms · ${built.palette.length} material colours`;
       text += smoothingNote(built.mesh);

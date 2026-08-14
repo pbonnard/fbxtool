@@ -1,12 +1,14 @@
-"""A minimal binary FBX writer, used to produce known-good test input.
+"""Minimal writers for the formats the readers read, for known-good input.
 
-This is deliberately small: it writes exactly the structures the readers need
-to be exercised against — typed properties, deflated arrays, nested records,
-the null terminator and the footer — not a general-purpose exporter.
+These are deliberately small: they write exactly the structures the readers
+need to be exercised against — typed properties, deflated arrays, nested
+records, the null terminator and the footer for FBX, and for glTF the awkward
+shapes a plain exporter never produces — not general-purpose exporters.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import struct
 import zlib
@@ -977,3 +979,242 @@ def build_blend(version: int = 293, *, pointer_size: int = 8,
         import gzip as _gzip
         data = _gzip.compress(data)
     return data
+
+
+#: A cube under a parent that holds nothing but a transform. The parent scales
+#: by two and stands the cube ten units away, so the assembled scene is 4 units
+#: across — 2 if the parent's transform is skipped, which is the whole point.
+RIGGED_SIZE = (4.0, 4.0, 4.0)
+RIGGED_PARTS = 1
+RIGGED_TRIANGLES = 12
+
+
+def rigged_nodes(version: int = 7400, *, deflate: bool = True) -> list[N]:
+    """A mesh whose placement lives on a parent with no mesh of its own.
+
+    Exporters write this constantly — a rig, a pivot, or the root node a glTF
+    hangs its axis and unit conversion on — and a scene assembled by walking
+    only the parts that hold geometry silently drops it.
+    """
+    geometry_uid, cube_uid, rig_uid = 1000, 2001, 2002
+
+    def lcl(name: str, x: float, y: float, z: float) -> N:
+        return N("P", [S(f"Lcl {name}"), S(f"Lcl {name}"), S(""), S("A"),
+                       D(x), D(y), D(z)])
+
+    objects = N("Objects", [], [
+        N("Geometry", [L(geometry_uid), S("part\x00\x01Geometry"), S("Mesh")], [
+            N("Vertices", [darr(CUBE_VERTICES, deflate=deflate)]),
+            N("PolygonVertexIndex", [iarr(CUBE_POLYGONS, deflate=deflate)]),
+            N("GeometryVersion", [I(124)]),
+            N("Layer", [I(0)], [N("Version", [I(100)])]),
+        ]),
+        N("Model", [L(rig_uid), S("rig\x00\x01Model"), S("Null")], [
+            N("Version", [I(232)]),
+            N("Properties70", [], [lcl("Translation", 10.0, 0.0, 0.0),
+                                   lcl("Scaling", 2.0, 2.0, 2.0)]),
+        ]),
+        N("Model", [L(cube_uid), S("cube\x00\x01Model"), S("Mesh")], [
+            N("Version", [I(232)]),
+            N("Properties70", [], []),
+        ]),
+    ])
+
+    connections = N("Connections", [], [
+        N("C", [S("OO"), L(rig_uid), L(0)]),
+        N("C", [S("OO"), L(cube_uid), L(rig_uid)]),
+        N("C", [S("OO"), L(geometry_uid), L(cube_uid)]),
+    ])
+
+    header = N("FBXHeaderExtension", [], [
+        N("FBXHeaderExtensionVersion", [I(1003)]),
+        N("FBXVersion", [I(version)]),
+        N("EncryptionType", [I(0)]),
+        N("Creator", [S("fbxtool test fixture")]),
+    ])
+
+    global_settings = N("GlobalSettings", [], [
+        N("Version", [I(1000)]),
+        N("Properties70", [], [
+            N("P", [S("UpAxis"), S("int"), S("Integer"), S(""), I(1)]),
+            N("P", [S("UpAxisSign"), S("int"), S("Integer"), S(""), I(1)]),
+            N("P", [S("UnitScaleFactor"), S("double"), S("Number"), S(""), D(1.0)]),
+        ]),
+    ])
+
+    return [header, N("Creator", [S("fbxtool test fixture")]),
+            global_settings, objects, connections]
+
+
+def build_rigged(version: int = 7400, *, deflate: bool = True) -> bytes:
+    """A complete binary FBX file holding the parented cube."""
+    return build_binary(rigged_nodes(version, deflate=deflate), version=version)
+
+
+# --------------------------------------------------------------------- glTF 2.0
+
+#: The hand-written glTF scene: a box and a speck, one material, one image.
+#:
+#: It deliberately uses what a plain exporter would not — attributes
+#: interleaved behind a byteStride, 16-bit indices, a sparse accessor, a
+#: primitive with no indices, a node placed by a quaternion and another by a
+#: matrix — so a reader that only handles the easy shapes fails on it.
+GLTF_TRIANGLES = 13
+GLTF_PRIMITIVES = 2
+GLTF_NODES = 3
+#: The box before its node's scale: the fifth unit of depth comes from the
+#: sparse accessor alone.
+GLTF_BOX_LOCAL = (2.0, 1.0, 5.0)
+GLTF_MATERIAL = "paint"
+GLTF_BASE_COLOR = (0.8, 0.1, 0.05, 0.5)
+GLTF_METALLIC = 0.25
+GLTF_ROUGHNESS = 0.4
+GLTF_IMAGE = "checker.png"
+#: A quarter turn about Y, as FBX Euler angles in degrees.
+GLTF_BOX_ROTATION = (0.0, 90.0, 0.0)
+GLTF_BOX_TRANSLATION = (5.0, 0.0, 0.0)
+GLTF_BOX_SCALE = (2.0, 2.0, 2.0)
+
+_GLTF_CORNERS = [
+    (-1, -0.5, -2), (1, -0.5, -2), (1, 0.5, -2), (-1, 0.5, -2),
+    (-1, -0.5, 2), (1, -0.5, 2), (1, 0.5, 2), (-1, 0.5, 2),
+]
+_GLTF_FACES = [
+    (0, 1, 2), (0, 2, 3), (5, 4, 7), (5, 7, 6), (4, 0, 3), (4, 3, 7),
+    (1, 5, 6), (1, 6, 2), (3, 2, 6), (3, 6, 7), (4, 5, 1), (4, 1, 0),
+]
+#: Where the sparse accessor puts corner 0.
+_GLTF_MOVED = (-1, -0.5, -3)
+
+
+def _gltf_buffer(image: bytes) -> tuple[bytes, dict[str, tuple[int, int]]]:
+    """The one buffer, and where each view sits in it."""
+    stride = 24
+    out = bytearray()
+    for x, y, z in _GLTF_CORNERS:
+        out += struct.pack("<3f", x, y, z)          # position
+        out += struct.pack("<3f", 0.0, 1.0, 0.0)    # normal
+    assert len(out) == len(_GLTF_CORNERS) * stride
+
+    views = {"attributes": (0, len(out))}
+    at = len(out)
+    out += struct.pack("<36H", *[i for face in _GLTF_FACES for i in face])
+    views["indices"] = (at, len(out) - at)
+
+    at = len(out)
+    out += struct.pack("<H", 0)
+    views["sparse_indices"] = (at, 2)
+    out += b"\x00\x00"                              # pad the values to 4 bytes
+    at = len(out)
+    out += struct.pack("<3f", *_GLTF_MOVED)
+    views["sparse_values"] = (at, 12)
+
+    at = len(out)
+    for corner in ((0, 0, 0), (0.1, 0, 0), (0, 0.1, 0)):
+        out += struct.pack("<3f", *corner)
+    views["speck"] = (at, len(out) - at)
+
+    at = len(out)
+    out += image
+    out += b"\x00" * (-len(image) % 4)
+    views["image"] = (at, len(image))
+    return bytes(out), views
+
+
+def gltf_document(image: bytes, *, buffer_uri: str | None,
+                  buffer_length: int, views: dict[str, tuple[int, int]]) -> dict:
+    """The JSON half, pointing either at a .bin or at the container's chunk."""
+    buffer: dict = {"byteLength": buffer_length}
+    if buffer_uri is not None:
+        buffer["uri"] = buffer_uri
+    return {
+        "asset": {"version": "2.0", "generator": "fbxtool test fixture"},
+        "scene": 0,
+        "scenes": [{"nodes": [2]}],
+        "nodes": [
+            {
+                "name": "box", "mesh": 0,
+                "translation": list(GLTF_BOX_TRANSLATION),
+                "rotation": [0.0, 2 ** -0.5, 0.0, 2 ** -0.5],
+                "scale": list(GLTF_BOX_SCALE),
+            },
+            {"name": "speck", "mesh": 1},
+            # Placed by a matrix rather than a TRS: the identity, so the parts
+            # below it stand where their own transforms put them.
+            {"name": "rig", "children": [0, 1],
+             "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]},
+        ],
+        "meshes": [
+            {"name": "box", "primitives": [
+                {"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2, "material": 0}]},
+            {"name": "speck", "primitives": [{"attributes": {"POSITION": 3}}]},
+        ],
+        "materials": [{
+            "name": GLTF_MATERIAL,
+            "alphaMode": "BLEND",
+            "pbrMetallicRoughness": {
+                "baseColorFactor": list(GLTF_BASE_COLOR),
+                "metallicFactor": GLTF_METALLIC,
+                "roughnessFactor": GLTF_ROUGHNESS,
+                "baseColorTexture": {"index": 0},
+            },
+        }],
+        "textures": [{"source": 0}],
+        "images": [{"name": GLTF_IMAGE, "mimeType": "image/png", "bufferView": 5}],
+        "buffers": [buffer],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": views["attributes"][0],
+             "byteLength": views["attributes"][1], "byteStride": 24},
+            {"buffer": 0, "byteOffset": views["indices"][0],
+             "byteLength": views["indices"][1]},
+            {"buffer": 0, "byteOffset": views["sparse_indices"][0],
+             "byteLength": views["sparse_indices"][1]},
+            {"buffer": 0, "byteOffset": views["sparse_values"][0],
+             "byteLength": views["sparse_values"][1]},
+            {"buffer": 0, "byteOffset": views["speck"][0],
+             "byteLength": views["speck"][1]},
+            {"buffer": 0, "byteOffset": views["image"][0],
+             "byteLength": views["image"][1]},
+        ],
+        "accessors": [
+            {"bufferView": 0, "byteOffset": 0, "componentType": 5126,
+             "count": len(_GLTF_CORNERS), "type": "VEC3",
+             "sparse": {
+                 "count": 1,
+                 "indices": {"bufferView": 2, "byteOffset": 0, "componentType": 5123},
+                 "values": {"bufferView": 3, "byteOffset": 0},
+             }},
+            {"bufferView": 0, "byteOffset": 12, "componentType": 5126,
+             "count": len(_GLTF_CORNERS), "type": "VEC3"},
+            {"bufferView": 1, "componentType": 5123,
+             "count": len(_GLTF_FACES) * 3, "type": "SCALAR"},
+            {"bufferView": 4, "componentType": 5126, "count": 3, "type": "VEC3"},
+        ],
+    }
+
+
+def build_gltf(image: bytes | None = None,
+               buffer_uri: str = "scene.bin") -> tuple[bytes, bytes]:
+    """A .gltf document and the .bin it names, as two files."""
+    image = checker_png() if image is None else image
+    buffer, views = _gltf_buffer(image)
+    document = gltf_document(image, buffer_uri=buffer_uri,
+                             buffer_length=len(buffer), views=views)
+    return json.dumps(document).encode("utf-8"), buffer
+
+
+def build_glb(image: bytes | None = None) -> bytes:
+    """The same scene as a .glb: JSON and buffer in one container."""
+    image = checker_png() if image is None else image
+    buffer, views = _gltf_buffer(image)
+    document = gltf_document(image, buffer_uri=None,
+                             buffer_length=len(buffer), views=views)
+    json_chunk = json.dumps(document).encode("utf-8")
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    binary = buffer + b"\x00" * (-len(buffer) % 4)
+
+    total = 12 + 8 + len(json_chunk) + 8 + len(binary)
+    out = bytearray(struct.pack("<4sII", b"glTF", 2, total))
+    out += struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
+    out += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return bytes(out)

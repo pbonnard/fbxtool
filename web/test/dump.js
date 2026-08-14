@@ -12,6 +12,7 @@ const path = require('path');
 
 const FbxWasm = require(path.join(__dirname, '..', 'app', 'wasm.js'));
 const FbxAscii = require(path.join(__dirname, '..', 'app', 'ascii.js'));
+const FbxGltfIn = require(path.join(__dirname, '..', 'app', 'gltfin.js'));
 
 const WASM = path.join(__dirname, '..', 'build', 'fbx.wasm');
 
@@ -47,7 +48,18 @@ async function main() {
   await FbxWasm.init(fs.readFileSync(WASM));
   const data = new Uint8Array(fs.readFileSync(target));
 
-  let doc = FbxWasm.parseBinary(data);
+  let doc = null;
+  if (FbxGltfIn.looksLikeGltf(data)) {
+    // A .gltf keeps its buffer beside it; the Python reader looks there too.
+    const files = new Map();
+    const directory = path.dirname(path.resolve(target));
+    for (const name of fs.readdirSync(directory)) {
+      if (/\.bin$/i.test(name)) {
+        files.set(name.toLowerCase(), new Uint8Array(fs.readFileSync(path.join(directory, name))));
+      }
+    }
+    doc = FbxGltfIn.parse(data, { files });
+  } else doc = FbxWasm.parseBinary(data);
   if (!doc) {
     const text = new TextDecoder('utf-8').decode(data);
     if (!FbxAscii.looksLikeAscii(text)) {
@@ -59,7 +71,7 @@ async function main() {
 
   console.log(JSON.stringify({
     encoding: doc.encoding,
-    version: doc.version,
+    version: doc.version === undefined ? null : doc.version,
     wide: doc.wideOffsets,
     hasFooter: doc.hasFooter,
     footerVersion: doc.footerVersion,

@@ -20,8 +20,6 @@ const FbxGltf = (function () {
   const ELEMENT_ARRAY_BUFFER = 34963;
   const OPAQUE = 0.996;
 
-  const luminance = (rgb) => 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-
   /**
    * Drop repeated vertices.
    *
@@ -136,12 +134,13 @@ const FbxGltf = (function () {
       out.pbrMetallicRoughness.baseColorTexture = { index: textureIndex };
     }
     // glTF fixes a dielectric's reflectance at 4% unless this extension says
-    // otherwise, and it tops out at 8% — which is where our own cap lands.
-    const reflectance = luminance(specular);
-    if (metallic < 0.5 && Math.abs(reflectance - 0.04) > 0.005) {
+    // otherwise. The extension defines it as 0.04 × specularColorFactor, so
+    // that is what the factor is, colour and all — writing the strength
+    // instead would lose a tinted reflectance and read low anywhere else.
+    if (metallic < 0.5 && specular.some((c) => Math.abs(c - 0.04) > 0.005)) {
       out.extensions = {
         KHR_materials_specular: {
-          specularFactor: Math.min(reflectance / 0.08, 1),
+          specularColorFactor: specular.map((c) => c / 0.04),
         },
       };
     }

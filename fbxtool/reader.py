@@ -9,6 +9,7 @@ from typing import BinaryIO
 from .ascii import is_ascii_fbx, parse_ascii
 from .binary import MAGIC, is_binary_fbx, parse_binary
 from .blend import is_blend, parse_blend
+from .gltf import is_gltf, parse_gltf
 from .model import Document, UnsupportedFormatError
 from .obj import is_obj, parse_obj
 
@@ -22,14 +23,16 @@ _MMAP_THRESHOLD = 8 * 1024 * 1024
 def detect_format(data: bytes) -> str:
     """Identify a file from its head.
 
-    Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"blend"``, or
-    ``"unknown"``. The FBX names are kept as they were so existing callers
-    continue to work.
+    Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"blend"``,
+    ``"gltf"``, or ``"unknown"``. The FBX names are kept as they were so
+    existing callers continue to work.
     """
     if is_binary_fbx(data[: len(MAGIC)]):
         return "binary"
     if is_blend(data):
         return "blend"
+    if is_gltf(data):
+        return "gltf"
     text = _decode(data)
     if text is None:
         return "unknown"
@@ -58,12 +61,16 @@ def read_model(
 ) -> Document:
     """Read the model file at *path*, choosing the reader by content sniffing.
 
-    Handles FBX (binary and ASCII), Wavefront OBJ and Blender .blend files.
+    Handles FBX (binary and ASCII), Wavefront OBJ, glTF 2.0 and Blender
+    .blend files.
     """
     path = os.fspath(path)
     with open(path, "rb") as handle:
         head = handle.read(_SNIFF_SIZE)
         kind = detect_format(head)
+        if kind == "gltf":
+            handle.seek(0)
+            return parse_gltf(handle.read(), path=path, load_arrays=load_arrays)
         if kind == "blend":
             handle.seek(0)
             return parse_blend(handle.read(), path=path,
@@ -95,7 +102,8 @@ def read_model(
             doc.file_size = len(raw)
             return doc
     raise UnsupportedFormatError(
-        f"{path}: unrecognised format — not FBX (binary or ASCII), OBJ or .blend"
+        f"{path}: unrecognised format — not FBX (binary or ASCII), OBJ, glTF "
+        "or .blend"
     )
 
 
@@ -161,8 +169,10 @@ def parse_bytes(
     load_arrays: bool = False,
     max_array_values: int | None = None,
 ) -> Document:
-    """Parse an in-memory FBX file of either encoding."""
+    """Parse an in-memory model file, in any format read from disk."""
     kind = detect_format(data[:_SNIFF_SIZE])
+    if kind == "gltf":
+        return parse_gltf(data, path=path, load_arrays=load_arrays)
     if kind == "blend":
         return parse_blend(data, path=path, load_arrays=load_arrays)
     if kind == "obj":
@@ -184,5 +194,5 @@ def parse_bytes(
         doc.file_size = len(data)
         return doc
     raise UnsupportedFormatError(
-        "unrecognised format — not FBX (binary or ASCII), OBJ or .blend"
+        "unrecognised format — not FBX (binary or ASCII), OBJ, glTF or .blend"
     )

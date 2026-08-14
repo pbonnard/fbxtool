@@ -379,8 +379,11 @@ check('a metal carries its reflectance as its base colour', (() => {
     && m.pbrMetallicRoughness.metallicFactor === 1;
 })());
 check('an unusual reflectance uses the specular extension', (() => {
-  const m = asGltf({ specular: [0.16, 0.16, 0.16] });
-  return m.extensions && m.extensions.KHR_materials_specular.specularFactor === 1;
+  // The extension defines F0 as 0.04 x specularColorFactor, so 16% is a
+  // factor of 4 — and a tint survives, which a single strength could not.
+  const m = asGltf({ specular: [0.16, 0.08, 0.04] });
+  const factor = m.extensions && m.extensions.KHR_materials_specular.specularColorFactor;
+  return factor && nearAll(factor, [4, 2, 1]);
 })());
 check('an ordinary dielectric does not need it', asGltf({}).extensions === undefined);
 

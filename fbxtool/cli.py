@@ -20,6 +20,7 @@ examples:
   fbxinfo scene.fbx                     summary: version, settings, objects, hierarchy
   fbxinfo model.obj                     the same report for a Wavefront OBJ
   fbxinfo scene.blend                   Blender container: version, blocks, DNA
+  fbxinfo model.glb                     glTF 2.0, either container
   fbxinfo scene.fbx --tree --depth 3    the record tree, three levels deep
   fbxinfo scene.fbx --objects --props   every object plus full property values
   fbxinfo scene.fbx --json > scene.json machine-readable output
@@ -38,13 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="fbxinfo",
         description=(
             "Report the format version and object structure of model files: "
-            "FBX (binary and ASCII), Wavefront OBJ, and Blender .blend."
+            "FBX (binary and ASCII), Wavefront OBJ, glTF 2.0, and Blender "
+            ".blend."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("files", metavar="FILE", nargs="+",
-                        help="model file(s) to inspect: .fbx, .obj or .blend")
+                        help="model file(s) to inspect: .fbx, .obj, .gltf, .glb or .blend")
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -181,6 +183,9 @@ def _brief(path: str, analysis) -> str:
         descriptor = "Wavefront OBJ"
     elif doc.format == "blend":
         descriptor = f"Blender {doc.extra.get('blender_version_text', '?')}"
+    elif doc.format == "gltf":
+        descriptor = ("glTF " + (doc.extra.get("gltf_version") or "2.0")
+                      + ("  |  .glb" if doc.encoding == "binary" else "  |  .gltf"))
     else:
         version = analysis.version
         descriptor = f"{doc.encoding}  |  " + (version.label if version

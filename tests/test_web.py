@@ -152,6 +152,33 @@ def test_wasm_reader_matches_the_python_reader(built, sample):
 
 @needs_clang
 @needs_node
+@pytest.mark.parametrize("container", ["glb", "gltf"])
+def test_the_two_gltf_readers_agree(built, tmp_path, container):
+    """glTF is read twice over — once here, once in the page — and the two
+    have to produce the same records, down to the embedded image."""
+    import fbxbuild as fb
+
+    if container == "glb":
+        path = tmp_path / "scene.glb"
+        path.write_bytes(fb.build_glb())
+    else:
+        document, buffer = fb.build_gltf()
+        path = tmp_path / "scene.gltf"
+        path.write_bytes(document)
+        (tmp_path / "scene.bin").write_bytes(buffer)
+
+    js = _wasm_dump(str(path))
+    python = _python_dump(str(path))
+    assert js["warnings"] == []
+    assert len(js["nodes"]) == len(python), (
+        f"record count differs: js={len(js['nodes'])} python={len(python)}"
+    )
+    for index, (a, b) in enumerate(zip(python, js["nodes"])):
+        assert a == b, f"record {index} differs:\n  python={a}\n  js    ={b}"
+
+
+@needs_clang
+@needs_node
 def test_wasm_reader_matches_on_a_real_file(built, real_fbx_path):
     wasm = _wasm_dump(real_fbx_path)
     python = _python_dump(real_fbx_path)
@@ -255,6 +282,34 @@ def test_gltf_export(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_gltf_import(built):
+    """Read glTF back: our own export, round-tripped, and a hand-written file
+    using what the exporter never writes — interleaving, 16-bit indices, a
+    sparse accessor, a quaternion, and a buffer in a separate .bin."""
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    files = [str(ROOT / "samples" / "cube_textured.fbx"),
+             str(ROOT / "samples" / "scene_parts.fbx"),
+             f"{ROOT / 'samples' / 'pyramid.obj'}+{ROOT / 'samples' / 'pyramid.mtl'}"
+             f"+{ROOT / 'samples' / 'checker.png'}"]
+    real = real_sample()
+    if real:
+        files.append(real)
+
+    result = _run(["node", str(WEB / "test" / "gltfin.js"), *files],
+                  env=_node_env(), timeout=900)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_legacy_scene_assembles_in_the_browser(built, tmp_path):
     """FBX 6.x renders too: objects named rather than numbered, the mesh on
     the model, and every number written as its own property."""
@@ -277,6 +332,37 @@ def test_legacy_scene_assembles_in_the_browser(built, tmp_path):
     assert f"{fb.LEGACY_PARTS} parts" in result.stdout
     assert f"{fb.LEGACY_TRIANGLES} triangles" in result.stdout
     assert f"{size} units" in result.stdout, f"expected a {size} scene"
+
+
+@needs_clang
+@needs_node
+def test_a_transform_on_a_parent_without_a_mesh_still_counts(built, tmp_path):
+    """A cube under a parent that holds nothing but a transform.
+
+    Exporters write this constantly — a rig, a pivot, or the root node a glTF
+    hangs its axis and unit conversion on. Assembling the scene by walking only
+    the models that own geometry drops it, and the model comes out at half the
+    size it should be, in the wrong place.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    path = tmp_path / "rigged.fbx"
+    path.write_bytes(fb.build_rigged())
+    result = _run(["node", str(WEB / "test" / "browser.js"), str(path)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+    size = " × ".join(f"{v:.1f}" for v in fb.RIGGED_SIZE)
+    assert f"{fb.RIGGED_TRIANGLES} triangles" in result.stdout
+    assert f"{size} units" in result.stdout, "the parent's scale was dropped"
 
 
 @needs_clang
