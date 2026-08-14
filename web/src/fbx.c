@@ -718,6 +718,17 @@ FBX_EXPORT("fbx_node_stride") u32 fbx_node_stride(void) { return NODE_STRIDE; }
 FBX_EXPORT("fbx_prop_stride") u32 fbx_prop_stride(void) { return PROP_STRIDE; }
 
 /* Inflate an array payload into a fresh heap block; returns its offset, or 0. */
+/* Gzip is a header, raw deflate and a trailer; the caller strips the two ends
+ * and this inflates what is between them. */
+FBX_EXPORT("fbx_inflate_raw") u32 fbx_inflate_raw(u32 src_off, u32 src_len,
+                                                  u32 out_len) {
+    u8 *dst = (u8 *)heap_alloc(out_len ? out_len : 1);
+    if (!dst) return 0;
+    i32 n = inflate_raw((const u8 *)at_off(src_off), src_len, dst, out_len);
+    if (n < 0) return 0;
+    return to_off(dst);
+}
+
 FBX_EXPORT("fbx_inflate") u32 fbx_inflate(u32 src_off, u32 src_len,
                                                             u32 out_len) {
     u8 *dst = (u8 *)heap_alloc(out_len ? out_len : 1);

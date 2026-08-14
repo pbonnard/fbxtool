@@ -1,0 +1,926 @@
+"""Reader for Autodesk 3ds Max scenes — ``.max``.
+
+There is no specification for this one.  A ``.max`` is a Microsoft compound
+file — the same OLE2 container Word and Excel used — holding a handful of
+streams, and everything that matters is in ``Scene``, which is a tree of
+chunks written by each plugin's own save routine.  What follows was worked out
+from the files themselves, and every rule here is one that reproduces a scene
+byte for byte rather than one taken on trust.
+
+The container
+=============
+
+The compound file gives named streams; six of them are read:
+
+======================  =====================================================
+``Scene``               the scene itself, as a chunk tree
+``ClassDirectory3``     the class table — what each chunk id in the scene *is*
+``DllDirectory``        the plugins those classes came from
+``FileAssetMetaData3``  every texture the scene refers to, and where it lived
+``\\x05SummaryInformation``  title, author, comments and the saved thumbnail
+``Config``, ``SaveConfigData``  the version that wrote it
+======================  =====================================================
+
+Chunks
+======
+
+A chunk is ``uint16 id; uint32 length``, the length counting its own header.
+Bit 31 of the length says the chunk holds child chunks rather than data.  A
+length of zero means the real length is a ``uint64`` that follows, and there
+the flag is bit 63 — which is how a 31 MB scene fits in a 32-bit field.
+
+The scene
+=========
+
+``Scene`` is one chunk holding a flat list of entities.  **A top-level chunk's
+id is its class**, indexing the class table, and its position in the list is
+how other entities refer to it.  So the 164th chunk with id 31 is the 164th
+Editable Poly, and a node that names entity 648 means the 649th chunk.
+
+Entities point at each other two ways: ``0x2034`` is a plain array of indices,
+``0x2035`` an array of (key, index) pairs where the key says what the reference
+is *for* — 0 the transform controller, 1 the object, 3 the material.
+
+A node
+======
+
+======  ==================================================================
+0x0962  its name
+0x0960  the entity index of its parent
+0x2035  its transform controller, its object, its material
+0x096a  the object offset: position, then ``0x096b`` rotation, ``0x096c`` scale
+======  ==================================================================
+
+An Editable Poly
+================
+
+Under ``0x08fe``:
+
+======  ==================================================================
+0x0100  vertices: ``uint32 count``, then per vertex a flag word and x, y, z
+0x011a  faces (below)
+0x010a  edges, which the reader counts but does not need
+0x0120  how many map channels follow, plus one
+0x0128  a channel's coordinates, laid out as the vertices are
+0x012b  a channel's faces: ``uint32 degree; uint32 index[degree]`` repeated
+======  ==================================================================
+
+A face is variable length, and this is the part that takes the explaining::
+
+    uint32 degree
+    uint32 vertex[degree]
+    uint16 flags
+    if flags & 0x01:  uint32                       (material and smoothing)
+    if flags & 0x08:  uint16
+    if flags & 0x10:  uint32
+    if flags & 0x20:  uint32 [2 * (degree - 3)]    (how the n-gon triangulates)
+
+Nothing is aligned: a quad is 34 bytes, so every second face starts on an odd
+half-word.  A reader that assumes four-byte alignment gets three faces in and
+then reads a vertex index as a degree.
+
+What is not decoded
+===================
+
+The modifier stack is not run.  A scene modelled with TurboSmooth stores the
+cage, and the cage is what comes out — the viewer's own smoothing is the way
+to see it as it was modelled.  Only Editable Poly geometry is read; primitives
+that were never collapsed (a Box, a Line) and Editable Mesh are counted and
+named in the report but have no vertices here.
+"""
+
+from __future__ import annotations
+
+import gzip
+import struct
+from typing import Iterator
+
+from zlib import error as zlib_error
+
+from .model import ArrayInfo, Document, Node, ParseError, Property
+
+__all__ = ["MAGIC", "is_compound", "is_max", "parse_max", "version_text"]
+
+MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+_FREE = 0xFFFFFFFF
+_END = 0xFFFFFFFE
+_CONTAINER = 0x80000000
+_WIDE_CONTAINER = 1 << 63
+
+#: Chunks inside an Editable Poly's mesh block.
+_MESH = 0x08FE
+_VERTS = 0x0100
+_EDGES = 0x010A
+_FACES = 0x011A
+_CHANNELS = 0x0120
+_MAP_VERTS = 0x0128
+_MAP_FACES = 0x012B
+
+#: The same block holds an Editable Mesh, which is a different shape: three
+#: corners to a face, and no flag word in front of a vertex.
+_TRI_VERTS = 0x0914
+_TRI_FACES = 0x0912
+_TRI_MAP_VERTS = 0x2394
+_TRI_MAP_FACES = 0x2396
+
+#: Chunks inside a node.
+_NAME = 0x0962
+_PARENT = 0x0960
+_REFS = 0x2034
+_TYPED_REFS = 0x2035
+_OFFSET_POS = 0x096A
+_OFFSET_ROT = 0x096B
+_OFFSET_SCALE = 0x096C
+
+#: Chunks inside a controller.
+_POINT3 = 0x2503
+_SCALE = 0x2505
+
+_CLASS_NAME = 0x2042
+_CLASS_IDS = 0x2060
+
+
+# ---------------------------------------------------------------- container
+
+
+class _Compound:
+    """The OLE2 compound file a .max is packed in."""
+
+    def __init__(self, data: bytes):
+        if data[:8] != MAGIC:
+            raise ParseError("not a compound file")
+        if len(data) < 512:
+            raise ParseError("compound file is truncated")
+        self.data = data
+        shift, mini_shift = struct.unpack_from("<HH", data, 0x1E)
+        if not 7 <= shift <= 20 or not 2 <= mini_shift <= shift:
+            raise ParseError(f"impossible sector size (1 << {shift})")
+        self.sector = 1 << shift
+        self.mini = 1 << mini_shift
+        (self.fat_count, self.dir_start, _, self.cutoff, self.mini_start,
+         self.mini_count, self.difat_start, self.difat_count) = struct.unpack_from(
+            "<8I", data, 0x2C)
+        self.fat = self._fat()
+        self.entries = self._directory()
+        root = self.entries[0] if self.entries else None
+        self.mini_stream = self._chain(root[2], root[3], mini=False) if root else b""
+        self.mini_fat = self._mini_fat()
+
+    def _sector(self, number: int) -> bytes:
+        """One sector, padded if it is the last and the file stops short.
+
+        Files in the wild do end mid-sector — a writer that counted its
+        payload and not its padding — and refusing to read the whole file over
+        the tail of one is worse than reading the tail as the zeros it would
+        have been.
+        """
+        at = (number + 1) * self.sector
+        if at >= len(self.data):
+            raise ParseError("a sector runs past the end of the file")
+        block = self.data[at:at + self.sector]
+        if len(block) < self.sector:
+            block += b"\x00" * (self.sector - len(block))
+        return block
+
+    def _fat(self) -> list[int]:
+        sectors = list(struct.unpack_from("<109I", self.data, 0x4C))
+        nxt, left = self.difat_start, self.difat_count
+        while nxt not in (_END, _FREE) and left:
+            block = self._sector(nxt)
+            values = struct.unpack_from("<%dI" % (self.sector // 4), block)
+            sectors.extend(values[:-1])
+            nxt = values[-1]
+            left -= 1
+        fat: list[int] = []
+        for number in sectors[:self.fat_count]:
+            if number in (_END, _FREE):
+                continue
+            fat.extend(struct.unpack_from("<%dI" % (self.sector // 4), self._sector(number)))
+        return fat
+
+    def _mini_fat(self) -> list[int]:
+        out: list[int] = []
+        sector, left = self.mini_start, self.mini_count
+        while sector not in (_END, _FREE) and left:
+            out.extend(struct.unpack_from("<%dI" % (self.sector // 4), self._sector(sector)))
+            sector = self.fat[sector] if sector < len(self.fat) else _END
+            left -= 1
+        return out
+
+    def _chain(self, start: int, size: int, mini: bool) -> bytes:
+        """Follow a sector chain, gathering at most *size* bytes."""
+        out = bytearray()
+        sector = start
+        table = self.mini_fat if mini else self.fat
+        seen = 0
+        while sector not in (_END, _FREE) and len(out) < size:
+            if mini:
+                at = sector * self.mini
+                out += self.mini_stream[at:at + self.mini]
+            else:
+                out += self._sector(sector)
+            sector = table[sector] if sector < len(table) else _END
+            seen += 1
+            if seen > len(table) + 2:
+                raise ParseError("a stream loops back on itself")
+        return bytes(out[:size])
+
+    def _directory(self) -> list[tuple[str, int, int, int]]:
+        """(name, kind, start sector, size) for every entry."""
+        raw = bytearray()
+        sector = self.dir_start
+        while sector not in (_END, _FREE):
+            raw += self._sector(sector)
+            sector = self.fat[sector] if sector < len(self.fat) else _END
+            if len(raw) > 1 << 22:
+                break
+        out = []
+        for index in range(len(raw) // 128):
+            block = raw[index * 128:(index + 1) * 128]
+            length = struct.unpack_from("<H", block, 64)[0]
+            kind = block[66]
+            if kind == 0:
+                continue
+            name = bytes(block[:max(0, min(length - 2, 64))]).decode("utf-16-le", "replace")
+            start, size = struct.unpack_from("<IQ", block, 116)
+            out.append((name, kind, start, size))
+        return out
+
+    def stream(self, name: str) -> bytes:
+        """The named stream, inflated when it is compressed.
+
+        3ds Max 2022 and later can gzip what it writes, stream by stream, and
+        it is the same scene underneath — so the compression is undone here
+        rather than everywhere that reads one.
+        """
+        for index, (found, kind, start, size) in enumerate(self.entries):
+            if found == name and kind == 2:
+                data = self._chain(start, size, mini=size < self.cutoff)
+                if data[:2] == b"\x1f\x8b":
+                    try:
+                        return gzip.decompress(data)
+                    except (OSError, EOFError, zlib_error) as error:
+                        raise ParseError(f"{name} is compressed and will not "
+                                         f"inflate: {error}") from None
+                return data
+        return b""
+
+    @property
+    def names(self) -> list[str]:
+        return [name for name, kind, _, _ in self.entries if kind == 2]
+
+
+# ------------------------------------------------------------------- chunks
+
+
+def _chunks(data: bytes, start: int, end: int) -> Iterator[tuple[int, int, int, bool]]:
+    """Yield (id, body start, body end, has children) over a range."""
+    at = start
+    while at + 6 <= end:
+        idn, length = struct.unpack_from("<HI", data, at)
+        container = bool(length & _CONTAINER)
+        length &= ~_CONTAINER
+        head = 6
+        if length == 0:
+            if at + 14 > end:
+                return
+            wide = struct.unpack_from("<Q", data, at + 6)[0]
+            container = bool(wide & _WIDE_CONTAINER)
+            length = wide & ~_WIDE_CONTAINER
+            head = 14
+        if length < head or at + length > end:
+            return
+        yield idn, at + head, at + length, container
+        at += length
+
+
+def _text(data: bytes) -> str:
+    """A chunk's payload as the UTF-16 string it usually is."""
+    try:
+        return data.decode("utf-16-le").rstrip("\x00")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _find(data: bytes, start: int, end: int, wanted: int) -> tuple[int, int] | None:
+    for idn, body, tail, _ in _chunks(data, start, end):
+        if idn == wanted:
+            return body, tail
+    return None
+
+
+# ------------------------------------------------------------------ streams
+
+
+def _read_classes(data: bytes) -> list[dict]:
+    """The class table: what every entity in the scene is."""
+    out = []
+    for _, body, tail, container in _chunks(data, 0, len(data)):
+        if not container:
+            continue
+        entry = {"name": "", "class_id": 0, "super_id": 0, "dll": -1}
+        for idn, cb, ct, _ in _chunks(data, body, tail):
+            if idn == _CLASS_NAME:
+                entry["name"] = _text(data[cb:ct])
+            elif idn == _CLASS_IDS and ct - cb >= 16:
+                dll, low, high, super_id = struct.unpack_from("<iIII", data, cb)
+                entry.update(dll=dll, class_id=low, class_id2=high, super_id=super_id)
+        out.append(entry)
+    return out
+
+
+def _read_dlls(data: bytes) -> list[dict]:
+    """The plugins the classes came out of, in the order classes name them."""
+    out: list[dict] = []
+    for _, body, tail, container in _chunks(data, 0, len(data)):
+        if not container:
+            continue
+        entry = {"description": "", "file": ""}
+        for idn, cb, ct, _ in _chunks(data, body, tail):
+            if idn == 0x2039:
+                entry["description"] = _text(data[cb:ct])
+            elif idn == 0x2037:
+                entry["file"] = _text(data[cb:ct])
+        if entry["description"] or entry["file"]:
+            out.append(entry)
+    return out
+
+
+def _read_assets(data: bytes) -> list[dict]:
+    """Every file the scene refers to: its kind, its name and where it lived.
+
+    The stream is a run of records, each a 16-byte identifier followed by
+    length-prefixed strings.  The lengths count characters, and the strings are
+    UTF-16 with a terminator, which is what makes the walk self-correcting: a
+    record whose length does not land on a terminator is not a record.
+    """
+    out: list[dict] = []
+    at = 16
+    while at + 4 <= len(data):
+        strings = []
+        while len(strings) < 3 and at + 4 <= len(data):
+            count = struct.unpack_from("<I", data, at)[0]
+            if count == 0 or count > 4096 or at + 6 + count * 2 > len(data):
+                break
+            text = data[at + 4:at + 4 + count * 2].decode("utf-16-le", "replace")
+            at += 4 + count * 2 + 2       # the string, then its terminator
+            strings.append(text)
+        if len(strings) >= 3:
+            out.append({"kind": strings[0], "name": strings[1], "path": strings[2]})
+            at += 16          # the identifier of the record that follows
+        elif strings:
+            continue
+        else:
+            break
+    return out
+
+
+def _read_summary(data: bytes) -> dict:
+    """Title, author and comments out of the OLE property set."""
+    out: dict = {}
+    if len(data) < 48:
+        return out
+    try:
+        count = struct.unpack_from("<I", data, 24)[0]
+        if count < 1:
+            return out
+        section = struct.unpack_from("<I", data, 44)[0]
+        if section + 8 > len(data):
+            return out
+        properties = struct.unpack_from("<I", data, section + 4)[0]
+        names = {2: "title", 3: "subject", 4: "author", 6: "comments",
+                 8: "last_saved_by", 18: "application"}
+        for index in range(min(properties, 64)):
+            at = section + 8 + index * 8
+            if at + 8 > len(data):
+                break
+            ident, offset = struct.unpack_from("<II", data, at)
+            if ident not in names or section + offset + 8 > len(data):
+                continue
+            kind, length = struct.unpack_from("<II", data, section + offset)
+            start = section + offset + 8
+            if kind == 30 and start + length <= len(data):        # VT_LPSTR
+                out[names[ident]] = data[start:start + length].split(b"\0")[0] \
+                    .decode("latin-1", "replace")
+            elif kind == 31 and start + length * 2 <= len(data):  # VT_LPWSTR
+                out[names[ident]] = data[start:start + length * 2] \
+                    .decode("utf-16-le", "replace").split("\x00")[0]
+    except struct.error:
+        return out
+    return out
+
+
+def version_text(stamp: int | None) -> str:
+    """What a saved version number says, as 3ds Max counts them.
+
+    The high half is the release times a thousand — 20000 for the 20.0 that
+    was sold as 3ds Max 2018 — and the low half is the build.  The product
+    year is the release plus 1998, which has held since 3ds Max 9.
+    """
+    if not stamp:
+        return "unknown"
+    release, build = stamp >> 16, stamp & 0xFFFF
+    if not 1000 <= release <= 60000:
+        return f"{stamp}"
+    major, minor = divmod(release, 1000)
+    return f"{major}.{minor} (3ds Max {1998 + major}), build {build}"
+
+
+def _read_version(config: bytes, save_config: bytes) -> int | None:
+    """The build that wrote the file, where it says so."""
+    for data in (save_config, config):
+        for idn, body, tail, _ in _chunks(data, 0, len(data)):
+            if idn == 0x2170 and tail - body >= 4:
+                return struct.unpack_from("<I", data, body)[0]
+    return None
+
+
+# --------------------------------------------------------------------- mesh
+
+
+class _Mesh:
+    """One Editable Poly, as read."""
+
+    __slots__ = ("positions", "polygons", "uvs", "face_uvs", "faces", "edges",
+                 "materials")
+
+    def __init__(self) -> None:
+        self.positions: list[float] = []
+        self.polygons: list[int] = []
+        self.uvs: list[float] = []
+        self.face_uvs: list[int] = []
+        self.faces = 0
+        self.edges = 0
+        self.materials: list[int] = []
+
+
+def _read_points(data: bytes, start: int, end: int, stride: int) -> list[float]:
+    """``uint32 count``, then that many points.
+
+    A vertex is sixteen bytes — a flag word, then x, y and z — while a map
+    coordinate is the three floats alone.  The stride is the whole difference
+    between the two, and reading one as the other gets a count it cannot have.
+    """
+    if end - start < 4:
+        return []
+    count = struct.unpack_from("<I", data, start)[0]
+    if count > (end - start - 4) // stride:
+        raise ParseError(f"a point array claims {count} points it has not got")
+    lead = stride - 12
+    out: list[float] = []
+    at = start + 4 + lead
+    for _ in range(count):
+        out.extend(struct.unpack_from("<3f", data, at))
+        at += stride
+    return out
+
+
+def _read_faces(data: bytes, start: int, end: int, vertices: int
+                ) -> tuple[list[list[int]], list[int]]:
+    """The face list, and the material each face wears.
+
+    Every face is a run of vertex indices and then whatever its flag word says
+    it carries.  The flags are read for their length as much as their meaning:
+    get one wrong and the next face is read out of the middle of this one.
+    """
+    if end - start < 4:
+        return [], []
+    count = struct.unpack_from("<I", data, start)[0]
+    faces: list[list[int]] = []
+    materials: list[int] = []
+    at = start + 4
+    for _ in range(count):
+        if at + 4 > end:
+            break
+        degree = struct.unpack_from("<I", data, at)[0]
+        at += 4
+        if not 3 <= degree <= 4096 or at + 4 * degree + 2 > end:
+            raise ParseError(f"a face of {degree} corners at byte {at}")
+        corners = list(struct.unpack_from("<%dI" % degree, data, at))
+        at += 4 * degree
+        if max(corners) >= vertices:
+            raise ParseError("a face names a vertex the mesh has not got")
+        flags = struct.unpack_from("<H", data, at)[0]
+        at += 2
+        material = 0
+        if flags & 0x01:
+            if at + 4 > end:
+                break
+            material = struct.unpack_from("<I", data, at)[0] & 0xFFFF
+            at += 4
+        if flags & 0x08:
+            at += 2
+        if flags & 0x10:
+            at += 4
+        if flags & 0x20:
+            at += 8 * (degree - 3)
+        faces.append(corners)
+        materials.append(material)
+    return faces, materials
+
+
+def _read_map_faces(data: bytes, start: int, end: int) -> list[list[int]]:
+    """``uint32 degree; uint32 index[degree]`` until the chunk runs out."""
+    out: list[list[int]] = []
+    at = start
+    while at + 4 <= end:
+        degree = struct.unpack_from("<I", data, at)[0]
+        at += 4
+        if not 3 <= degree <= 4096 or at + 4 * degree > end:
+            break
+        out.append(list(struct.unpack_from("<%dI" % degree, data, at)))
+        at += 4 * degree
+    return out
+
+
+def _read_triangles(data: bytes, start: int, end: int, vertices: int) -> list[list[int]]:
+    """An Editable Mesh face: three corners and two words about them."""
+    if end - start < 4:
+        return []
+    count = struct.unpack_from("<I", data, start)[0]
+    if count > (end - start - 4) // 20:
+        raise ParseError(f"a face array claims {count} faces it has not got")
+    out = []
+    at = start + 4
+    for _ in range(count):
+        corners = list(struct.unpack_from("<3I", data, at))
+        if max(corners) >= vertices:
+            raise ParseError("a face names a vertex the mesh has not got")
+        out.append(corners)
+        at += 20
+    return out
+
+
+def _read_index_triples(data: bytes, start: int, end: int) -> list[int]:
+    """A map channel's faces, three indices each and no more."""
+    if end - start < 4:
+        return []
+    count = struct.unpack_from("<I", data, start)[0]
+    if count > (end - start - 4) // 12:
+        return []
+    return list(struct.unpack_from("<%dI" % (count * 3), data, start + 4))
+
+
+def _read_mesh(data: bytes, start: int, end: int) -> _Mesh | None:
+    """The geometry of one object, as a polygon list.
+
+    Two classes are read, and they share nothing but the block they sit in:
+    an Editable Poly keeps n-gons and a flag word per vertex, an Editable Mesh
+    keeps triangles and three bare floats.
+    """
+    mesh = _Mesh()
+    channels: list[tuple[list[float], list[list[int]]]] = []
+    pending_points: list[float] = []
+    order = list(_chunks(data, start, end))
+    # Vertices first whatever the order in the file: a face is checked against
+    # them, and an Editable Mesh writes its faces first.
+    order.sort(key=lambda c: c[0] not in (_VERTS, _TRI_VERTS))
+    for idn, body, tail, container in order:
+        if idn == _VERTS and not mesh.positions:
+            mesh.positions = _read_points(data, body, tail, 16)
+        elif idn == _EDGES and tail - body >= 4:
+            mesh.edges = struct.unpack_from("<I", data, body)[0]
+        elif idn == _FACES:
+            faces, materials = _read_faces(data, body, tail, len(mesh.positions) // 3)
+            mesh.faces = len(faces)
+            mesh.materials = materials
+            for corners in faces:
+                for at, corner in enumerate(corners):
+                    mesh.polygons.append(corner if at < len(corners) - 1 else ~corner)
+        elif idn == _MAP_VERTS:
+            pending_points = _read_points(data, body, tail, 12)
+        elif idn == _MAP_FACES:
+            channels.append((pending_points, _read_map_faces(data, body, tail)))
+            pending_points = []
+        elif idn == _TRI_VERTS and not mesh.positions:
+            mesh.positions = _read_points(data, body, tail, 12)
+        elif idn == _TRI_FACES:
+            triangles = _read_triangles(data, body, tail, len(mesh.positions) // 3)
+            mesh.faces = len(triangles)
+            mesh.materials = [0] * len(triangles)
+            for corners in triangles:
+                mesh.polygons.extend((corners[0], corners[1], ~corners[2]))
+        elif idn == _TRI_MAP_VERTS:
+            pending_points = _read_points(data, body, tail, 12)
+        elif idn == _TRI_MAP_FACES:
+            triples = _read_index_triples(data, body, tail)
+            channels.append((pending_points, [triples[i:i + 3]
+                                              for i in range(0, len(triples), 3)]))
+            pending_points = []
+    if not mesh.positions or not mesh.polygons:
+        return None
+
+    # The first map channel is the texture coordinates; the rest are data the
+    # scene carries per corner and nothing here can draw.
+    for points, faces in channels:
+        if not points or not faces:
+            continue
+        mesh.uvs = points
+        for corners in faces:
+            mesh.face_uvs.extend(corners)
+        break
+    if len(mesh.face_uvs) != len(mesh.polygons):
+        mesh.uvs, mesh.face_uvs = [], []
+    return mesh
+
+
+# -------------------------------------------------------------------- scene
+
+
+class _Entity:
+    __slots__ = ("index", "cls", "start", "end", "refs", "typed")
+
+    def __init__(self, index: int, cls: dict, start: int, end: int):
+        self.index = index
+        self.cls = cls
+        self.start = start
+        self.end = end
+        self.refs: list[int] = []
+        self.typed: dict[int, int] = {}
+
+
+def _read_entities(scene: bytes, classes: list[dict]) -> list[_Entity]:
+    """The scene list: one entity per top-level chunk, in file order."""
+    outer = next(_chunks(scene, 0, len(scene)), None)
+    if outer is None:
+        return []
+    _, start, end, _ = outer
+    out: list[_Entity] = []
+    for index, (idn, body, tail, container) in enumerate(_chunks(scene, start, end)):
+        cls = classes[idn] if idn < len(classes) else {"name": f"class {idn}",
+                                                       "super_id": 0, "class_id": 0}
+        entity = _Entity(index, cls, body, tail)
+        for cid, cb, ct, _ in _chunks(scene, body, tail):
+            if cid == _REFS:
+                entity.refs = list(struct.unpack_from("<%dI" % ((ct - cb) // 4), scene, cb))
+            elif cid == _TYPED_REFS and ct - cb >= 4:
+                words = struct.unpack_from("<%dI" % ((ct - cb) // 4), scene, cb)
+                for at in range(1, len(words) - 1, 2):
+                    entity.typed[words[at]] = words[at + 1]
+                entity.refs = list(entity.typed.values())
+        out.append(entity)
+    return out
+
+
+def _controller_value(scene: bytes, entity: _Entity, wanted: int,
+                      default: tuple[float, float, float]) -> tuple[float, float, float]:
+    found = _find(scene, entity.start, entity.end, wanted)
+    if found and found[1] - found[0] >= 12:
+        return struct.unpack_from("<3f", scene, found[0])
+    return default
+
+
+def _node_transform(scene: bytes, entities: list[_Entity], node: _Entity) -> dict:
+    """Where a node stands: what its controller says, or nothing at all.
+
+    Most scenes of this kind put the geometry in world space and leave every
+    node at the origin, so an absent controller is the common case and not a
+    failure.
+    """
+    out = {"translation": (0.0, 0.0, 0.0), "rotation": (0.0, 0.0, 0.0),
+           "scale": (1.0, 1.0, 1.0)}
+    at = node.typed.get(0)
+    if at is None or at >= len(entities):
+        return out
+    controller = entities[at]
+    parts = [entities[i] for i in controller.refs if i < len(entities)]
+    for part in parts:
+        name = (part.cls.get("name") or "").lower()
+        if "position" in name:
+            out["translation"] = _controller_value(scene, part, _POINT3, out["translation"])
+        elif "euler" in name or "rotation" in name:
+            out["rotation"] = _controller_value(scene, part, _POINT3, out["rotation"])
+        elif "scale" in name:
+            out["scale"] = _controller_value(scene, part, _SCALE, out["scale"])
+    return out
+
+
+# -------------------------------------------------------------------- build
+
+
+def _node(name: str, props: list[Property] | None = None,
+          children: list[Node] | None = None) -> Node:
+    return Node(name=name, props=props or [], children=children or [])
+
+
+def _s(value: str) -> Property:
+    return Property("S", value)
+
+
+def _i(value: int) -> Property:
+    return Property("I", int(value))
+
+
+def _l(value: int) -> Property:
+    return Property("L", int(value))
+
+
+def _d(value: float) -> Property:
+    return Property("D", float(value))
+
+
+def _array(code: str, values, load: bool) -> Property:
+    width = 8 if code == "d" else 4
+    info = ArrayInfo(length=len(values), encoding=0, byte_length=len(values) * width)
+    return Property(code, list(values) if load else None, info)
+
+
+def _p70(name: str, kind: str, *values) -> Node:
+    return _node("P", [_s(name), _s(kind), _s(""), _s("A"), *values])
+
+
+def _degrees(radians: float) -> float:
+    return radians * 57.29577951308232
+
+
+def is_compound(head: bytes) -> bool:
+    """True for any OLE2 compound file — a .max, but also a .doc or an .xls.
+
+    Detection works off a file's head, and the streams that say which kind it
+    is live at an offset the head does not reach; this is what the head can
+    honestly answer, and `is_max` settles it once the whole file is there.
+    """
+    return head[:8] == MAGIC
+
+
+def is_max(data: bytes) -> bool:
+    """True when *data* is a 3ds Max scene rather than another compound file."""
+    if data[:8] != MAGIC:
+        return False
+    try:
+        names = set(_Compound(data).names)
+    except (ParseError, struct.error, IndexError):
+        return False
+    return "Scene" in names and any(n.startswith("ClassDirectory") for n in names)
+
+
+def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
+              ) -> Document:
+    """Read a .max file into the record tree the rest of the tool works on."""
+    compound = _Compound(data)
+    scene = compound.stream("Scene")
+    if not scene:
+        raise ParseError("no Scene stream — this compound file is not a 3ds Max scene")
+
+    classes = _read_classes(compound.stream("ClassDirectory3")
+                            or compound.stream("ClassDirectory"))
+    dlls = _read_dlls(compound.stream("DllDirectory"))
+    assets = _read_assets(compound.stream("FileAssetMetaData3"))
+    summary = _read_summary(compound.stream("\x05SummaryInformation"))
+    build = _read_version(compound.stream("Config"), compound.stream("SaveConfigData"))
+
+    root = Node(name="")
+    doc = Document(root=root, encoding="binary", format="max", path=path,
+                   file_size=len(data), version=build)
+    entities = _read_entities(scene, classes)
+
+    # ---- the meshes, and the nodes that place them
+    meshes: dict[int, _Mesh] = {}
+    undecoded: dict[str, int] = {}
+    for entity in entities:
+        if (entity.cls.get("super_id") or 0) != 0x10:
+            continue
+        block = _find(scene, entity.start, entity.end, _MESH)
+        if block is None:
+            name = entity.cls.get("name") or "object"
+            undecoded[name] = undecoded.get(name, 0) + 1
+            continue
+        try:
+            mesh = _read_mesh(scene, block[0], block[1])
+        except (ParseError, struct.error) as error:
+            doc.warn(f"{entity.cls.get('name')} at entity {entity.index}: {error}")
+            continue
+        if mesh is not None:
+            meshes[entity.index] = mesh
+
+    nodes = [e for e in entities if (e.cls.get("name") or "") == "Node"]
+    placed = []
+    for node in nodes:
+        found = _find(scene, node.start, node.end, _NAME)
+        name = _text(scene[found[0]:found[1]]) if found else ""
+        target = node.typed.get(1)
+        mesh = meshes.get(target) if target is not None else None
+        if mesh is None and target is not None and target < len(entities):
+            # A modifier sits between the node and its mesh; the base object is
+            # what it was built from, so follow the references down to it.
+            seen = set()
+            queue = [target]
+            while queue and mesh is None:
+                at = queue.pop(0)
+                if at in seen or at >= len(entities):
+                    continue
+                seen.add(at)
+                mesh = meshes.get(at)
+                if mesh is None:
+                    queue.extend(entities[at].refs)
+        if mesh is None:
+            continue
+        placed.append((node, name, mesh, _node_transform(scene, entities, node)))
+
+    # ---- the record tree
+    creator = summary.get("application") or "Autodesk 3ds Max"
+    header = [_node("Creator", [_s(creator)])]
+    root.children.append(_node("FBXHeaderExtension", [], header))
+
+    objects_node = _node("Objects", [], [])
+    connections: list[Node] = []
+    uid = 1000
+    for at, (entity, name, mesh, placement) in enumerate(placed):
+        geometry_uid, model_uid = uid + 1, uid + 2
+        uid += 2
+        label = name or f"object{at + 1}"
+        geometry_children = [
+            _node("Vertices", [_array("d", mesh.positions, load_arrays)]),
+            _node("PolygonVertexIndex", [_array("i", mesh.polygons, load_arrays)]),
+            _node("GeometryVersion", [_i(124)]),
+        ]
+        if mesh.uvs and mesh.face_uvs:
+            geometry_children.append(_node("LayerElementUV", [_i(0)], [
+                _node("Version", [_i(101)]),
+                _node("Name", [_s("map1")]),
+                _node("MappingInformationType", [_s("ByPolygonVertex")]),
+                _node("ReferenceInformationType", [_s("IndexToDirect")]),
+                _node("UV", [_array("d", mesh.uvs, load_arrays)]),
+                _node("UVIndex", [_array("i", mesh.face_uvs, load_arrays)]),
+            ]))
+        if mesh.materials and max(mesh.materials) > 0:
+            geometry_children.append(_node("LayerElementMaterial", [_i(0)], [
+                _node("Version", [_i(101)]),
+                _node("MappingInformationType", [_s("ByPolygon")]),
+                _node("ReferenceInformationType", [_s("IndexToDirect")]),
+                _node("Materials", [_array("i", mesh.materials, load_arrays)]),
+            ]))
+        geometry_children.append(_node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
+
+        objects_node.children.append(
+            _node("Geometry", [_l(geometry_uid), _s(f"{label}\x00\x01Geometry"), _s("Mesh")],
+                  geometry_children))
+
+        model_props = []
+        translation = placement["translation"]
+        rotation = placement["rotation"]
+        scale = placement["scale"]
+        if any(translation):
+            model_props.append(_p70("Lcl Translation", "Lcl Translation",
+                                    *(_d(v) for v in translation)))
+        if any(rotation):
+            model_props.append(_p70("Lcl Rotation", "Lcl Rotation",
+                                    *(_d(_degrees(v)) for v in rotation)))
+        if scale != (1.0, 1.0, 1.0):
+            model_props.append(_p70("Lcl Scaling", "Lcl Scaling",
+                                    *(_d(v) for v in scale)))
+        objects_node.children.append(
+            _node("Model", [_l(model_uid), _s(f"{label}\x00\x01Model"), _s("Mesh")],
+                  [_node("Version", [_i(232)]),
+                   _node("Properties70", [], model_props)]))
+        connections.append(_node("C", [_s("OO"), _l(model_uid), _l(0)]))
+        connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
+
+    root.children.append(_node("GlobalSettings", [], [
+        _node("Version", [_i(1000)]),
+        _node("Properties70", [], [
+            # 3ds Max is Z up, right handed.
+            _node("P", [_s("UpAxis"), _s("int"), _s("Integer"), _s(""), _i(2)]),
+            _node("P", [_s("UpAxisSign"), _s("int"), _s("Integer"), _s(""), _i(1)]),
+            _node("P", [_s("FrontAxis"), _s("int"), _s("Integer"), _s(""), _i(1)]),
+            _node("P", [_s("FrontAxisSign"), _s("int"), _s("Integer"), _s(""), _i(-1)]),
+            _node("P", [_s("CoordAxis"), _s("int"), _s("Integer"), _s(""), _i(0)]),
+            _node("P", [_s("CoordAxisSign"), _s("int"), _s("Integer"), _s(""), _i(1)]),
+            _node("P", [_s("UnitScaleFactor"), _s("double"), _s("Number"), _s(""), _d(1.0)]),
+        ]),
+    ]))
+    root.children.append(_node("Definitions", [], [
+        _node("Version", [_i(100)]),
+        _node("Count", [_i(len(objects_node.children))]),
+        _node("ObjectType", [_s("Geometry")], [_node("Count", [_i(len(placed))])]),
+        _node("ObjectType", [_s("Model")], [_node("Count", [_i(len(placed))])]),
+    ]))
+    root.children.append(objects_node)
+    root.children.append(_node("Connections", [], connections))
+
+    triangles = sum(max(0, len(f) - 2) for _, _, mesh, _ in placed
+                    for f in [[0] * 3]) if False else 0
+    vertices = sum(len(mesh.positions) // 3 for _, _, mesh, _ in placed)
+    doc.extra = {
+        "streams": compound.names,
+        "sector": compound.sector,
+        "classes": [c for c in classes if c.get("name")],
+        "dlls": dlls,
+        "assets": assets,
+        "summary": summary,
+        "entities": len(entities),
+        "nodes": len(nodes),
+        "meshes": len(meshes),
+        "placed": len(placed),
+        "vertices": vertices,
+        "faces": sum(mesh.faces for mesh in meshes.values()),
+        "undecoded": undecoded,
+        "build": build,
+    }
+    if undecoded:
+        doc.warn("no geometry read from "
+                 + ", ".join(f"{count} {name}" for name, count in sorted(undecoded.items())))
+    if not placed:
+        doc.warn("no Editable Poly geometry in this scene")
+    return doc

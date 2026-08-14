@@ -244,7 +244,11 @@
       const started = performance.now();
 
       let doc = null;
-      if (FbxBlend.looksLikeBlend(buffer)) {
+      if (FbxMax.looksLikeMax(buffer)) {
+        // A .max is a compound file, which nothing else here reads, so the
+        // eight bytes of its container are enough to know it.
+        doc = FbxMax.parse(buffer);
+      } else if (FbxBlend.looksLikeBlend(buffer)) {
         doc = FbxBlend.parse(buffer);
       } else if (FbxGltfIn.looksLikeGltf(buffer)) {
         // Both containers, .glb and .gltf, are recognised from the bytes.
@@ -297,6 +301,7 @@
         : doc.format === 'blend' ? `Blender ${doc.extra.blenderVersionText || '?'}`
         : doc.format === 'gltf'
           ? `glTF ${doc.extra.gltfVersion || '2.0'} ${doc.encoding === 'binary' ? '.glb' : '.gltf'}`
+        : doc.format === 'max' ? `3ds Max ${doc.extra.buildText || ''}`
         : `FBX ${doc.version || '?'} ${doc.encoding}`;
       const label = `${what} · ${currentAnalysis.totalRecords.toLocaleString()} records · `
         + `${doc.parseMilliseconds.toFixed(0)} ms`;

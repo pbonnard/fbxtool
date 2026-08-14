@@ -9,9 +9,10 @@ with **no dependencies** and without the Autodesk FBX SDK.
 | **Wavefront OBJ** (+ `.mtl`) | full — inspect and render |
 | **glTF 2.0** (`.gltf` and `.glb`) | full — inspect, render and export; Draco-compressed geometry is decompressed |
 | **Blender `.blend`** | inspect and render, for the `MVert`/`MPoly`/`MLoop` layout |
+| **3ds Max `.max`** | inspect and render, for Editable Poly and Editable Mesh geometry |
 
-OBJ, glTF and `.blend` are normalised into the same record tree as FBX, so
-every option and the viewer apply to them unchanged.
+OBJ, glTF, `.blend` and `.max` are normalised into the same record tree as FBX,
+so every option and the viewer apply to them unchanged.
 
 ```
 $ fbxinfo samples/cube_binary.fbx
@@ -172,6 +173,76 @@ fbxinfo *.fbx --brief                  # one line per file
 fbxinfo scene.fbx --json | jq .objects.by_kind
 ```
 
+### 3ds Max files
+
+`.max` has no specification, no SDK-free reader and no documentation. What is
+here was worked out from the files themselves, and it reads them: geometry,
+node names and placement, the class table, the plugins, and every texture the
+scene names with the path it had on the machine that made it.
+
+A `.max` is a **Microsoft compound file** — the OLE2 container Word and Excel
+used — holding a handful of streams. The scene is one of them, and it is a
+tree of chunks written by each plugin's own save routine:
+
+```
+uint16 id
+uint32 length          — counts its own header; bit 31 = holds child chunks
+uint64 length          — when the 32-bit one is zero; there the flag is bit 63
+```
+
+The scene stream is a flat list of entities, and the rule that unlocks it is
+that **a top-level chunk's id is its class**, indexing the class table, while
+its *position* in the list is how other entities name it. So the 164th chunk
+with id 31 is the 164th Editable Poly, and a node that refers to entity 648
+means the 649th chunk. Entities point at each other through `0x2034`, an array
+of indices, and `0x2035`, an array of (key, index) pairs where the key says
+what the reference is *for* — 0 the transform, 1 the object, 3 the material.
+
+Two geometry classes are read, and they share nothing but the block they sit
+in:
+
+| | Editable Poly | Editable Mesh |
+| --- | --- | --- |
+| vertices | `0x0100`, a flag word then x, y, z | `0x0914`, three floats |
+| faces | `0x011a`, n-gons | `0x0912`, triangles |
+| a face is | variable length | twenty bytes |
+| UVs | `0x0128` + `0x012b` | `0x2394` + `0x2396` |
+
+The face record of an Editable Poly is where the work was:
+
+```
+uint32 degree
+uint32 vertex[degree]
+uint16 flags
+if flags & 0x01:  uint32                    material and smoothing
+if flags & 0x08:  uint16
+if flags & 0x10:  uint32
+if flags & 0x20:  uint32 [2 * (degree - 3)] how the n-gon triangulates
+```
+
+Nothing is aligned. A quad is 34 bytes, so every second face starts on an odd
+half-word, and a reader that assumes four-byte alignment gets three faces in
+before it reads a vertex index as a degree. The `0x20` payload is what makes
+the record variable: a mesh of nothing but quads parses under a fixed 14-byte
+trailer and hides the rule until the first pentagon.
+
+3ds Max 2022 and later can gzip each stream, which is undone on the way in —
+in the browser by the same WebAssembly inflater that unpacks an FBX array.
+Files that stop mid-sector are read to the end rather than refused; writers do
+it, and the tail of one sector is no reason to lose 98 MB.
+
+**What is not decoded**: the modifier stack is not run, so a scene modelled
+with TurboSmooth gives its cage — which is what the viewer's own smoothing is
+for — and materials come out unassigned, so a `.max` draws in clay. Primitives
+nobody collapsed (a Box, a Line) and classes from plugins are counted and named
+in the report but have no vertices here.
+
+Read on twelve car scenes from as many sources — 2016 to 2018 releases, 30 MB
+to 449 MB, compressed and not — all twelve give geometry: 17 to 209 objects
+each, and up to 2,025,975 vertices in 6.9 s. On the one that ships an FBX
+export of the same scene beside it, the two agree exactly: 217,930 vertices and
+the same bounds to the decimal.
+
 ### What gets reported
 
 | Section | Contents |
@@ -232,7 +303,7 @@ CDN and no network. Open it and drop a file in; nothing is uploaded anywhere.
 | Layer | Where it runs |
 | --- | --- |
 | DEFLATE, binary record walking, polygon triangulation, normal generation | WebAssembly (`web/src/fbx.c`, freestanding, no libc, **no imports**) |
-| ASCII FBX, OBJ and .blend reading, scene analysis, report | JavaScript — text and structure work with no hot loop |
+| ASCII FBX, OBJ, .blend and .max reading, scene analysis, report | JavaScript — text and structure work with no hot loop |
 | Rendering | WebGL2 with an orbit camera and per-material shading |
 
 Every reader produces the same record tree, so the analysis and the geometry

@@ -33,6 +33,7 @@ SCRIPTS = [
     "obj.js",
     "blend.js",
     "gltfin.js",
+    "max.js",
     "transform.js",
     "analyze.js",
     "palette.js",

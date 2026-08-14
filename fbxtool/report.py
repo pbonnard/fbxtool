@@ -114,6 +114,7 @@ FORMAT_NAMES = {
     "obj": "Wavefront OBJ",
     "blend": "Blender",
     "gltf": "glTF 2.0",
+    "max": "Autodesk 3ds Max",
 }
 
 
@@ -137,6 +138,10 @@ def _render_file(out: _Out, analysis: Analysis) -> None:
         return
     if doc.format == "gltf":
         _render_gltf_rows(rows, doc)
+        out.pairs(rows)
+        return
+    if doc.format == "max":
+        _render_max_rows(rows, doc)
         out.pairs(rows)
         return
 
@@ -220,6 +225,38 @@ def _render_gltf_rows(rows: list[tuple[str, Any]], doc) -> None:
         rows.append(("Extensions used", ", ".join(extra["extensions_used"])))
     if extra.get("extensions_required"):
         rows.append(("Extensions required", ", ".join(extra["extensions_required"])))
+
+
+def _render_max_rows(rows: list[tuple[str, Any]], doc) -> None:
+    from .maxfile import version_text
+
+    extra = doc.extra
+    rows.append(("Container", f"compound file, {extra.get('sector', 0):,}-byte sectors"))
+    rows.append(("Written by", version_text(extra.get("build"))))
+    summary = extra.get("summary") or {}
+    for label, key in (("Title", "title"), ("Author", "author"),
+                       ("Last saved by", "last_saved_by"), ("Comments", "comments")):
+        if summary.get(key):
+            rows.append((label, summary[key]))
+    rows.append(("Scene", f"{extra.get('entities', 0):,} entities, "
+                          f"{extra.get('nodes', 0):,} nodes"))
+    meshes = extra.get("meshes", 0)
+    rows.append(("Geometry", f"{meshes:,} mesh object{'' if meshes == 1 else 's'}, "
+                             f"{extra.get('vertices', 0):,} vertices, "
+                             f"{extra.get('faces', 0):,} faces"))
+    undecoded = extra.get("undecoded") or {}
+    if undecoded:
+        rows.append(("Not read", ", ".join(f"{count} {name}"
+                                           for name, count in sorted(undecoded.items()))))
+    rows.append(("Classes", f"{len(extra.get('classes') or []):,} in "
+                            f"{len(extra.get('dlls') or []):,} plugin(s)"))
+    assets = extra.get("assets") or []
+    if assets:
+        rows.append(("Assets", f"{len(assets):,}: "
+                               + ", ".join(a["name"] for a in assets[:4])
+                               + (" …" if len(assets) > 4 else "")))
+    rows.append(("Streams", ", ".join(name.replace("\x05", "")
+                                      for name in extra.get("streams", []))))
 
 
 def _render_blend_rows(rows: list[tuple[str, Any]], doc) -> None:

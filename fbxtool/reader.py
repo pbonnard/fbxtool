@@ -10,6 +10,7 @@ from .ascii import is_ascii_fbx, parse_ascii
 from .binary import MAGIC, is_binary_fbx, parse_binary
 from .blend import is_blend, parse_blend
 from .gltf import is_gltf, parse_gltf
+from .maxfile import is_compound, parse_max
 from .model import Document, UnsupportedFormatError
 from .obj import is_obj, parse_obj
 
@@ -24,11 +25,17 @@ def detect_format(data: bytes) -> str:
     """Identify a file from its head.
 
     Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"blend"``,
-    ``"gltf"``, or ``"unknown"``. The FBX names are kept as they were so
-    existing callers continue to work.
+    ``"gltf"``, ``"max"``, or ``"unknown"``. The FBX names are kept as they
+    were so existing callers continue to work.
+
+    A ``.max`` is answered from its container alone, since what distinguishes
+    it from another compound file is a stream too deep in to sniff; reading it
+    is where that is settled.
     """
     if is_binary_fbx(data[: len(MAGIC)]):
         return "binary"
+    if is_compound(data):
+        return "max"
     if is_blend(data):
         return "blend"
     if is_gltf(data):
@@ -61,13 +68,16 @@ def read_model(
 ) -> Document:
     """Read the model file at *path*, choosing the reader by content sniffing.
 
-    Handles FBX (binary and ASCII), Wavefront OBJ, glTF 2.0 and Blender
-    .blend files.
+    Handles FBX (binary and ASCII), Wavefront OBJ, glTF 2.0, Blender .blend
+    and 3ds Max .max files.
     """
     path = os.fspath(path)
     with open(path, "rb") as handle:
         head = handle.read(_SNIFF_SIZE)
         kind = detect_format(head)
+        if kind == "max":
+            handle.seek(0)
+            return parse_max(handle.read(), path=path, load_arrays=load_arrays)
         if kind == "gltf":
             handle.seek(0)
             return parse_gltf(handle.read(), path=path, load_arrays=load_arrays)
@@ -102,8 +112,8 @@ def read_model(
             doc.file_size = len(raw)
             return doc
     raise UnsupportedFormatError(
-        f"{path}: unrecognised format — not FBX (binary or ASCII), OBJ, glTF "
-        "or .blend"
+        f"{path}: unrecognised format — not FBX (binary or ASCII), OBJ, glTF, "
+        ".blend or .max"
     )
 
 
@@ -171,6 +181,8 @@ def parse_bytes(
 ) -> Document:
     """Parse an in-memory model file, in any format read from disk."""
     kind = detect_format(data[:_SNIFF_SIZE])
+    if kind == "max":
+        return parse_max(data, path=path, load_arrays=load_arrays)
     if kind == "gltf":
         return parse_gltf(data, path=path, load_arrays=load_arrays)
     if kind == "blend":
@@ -194,5 +206,6 @@ def parse_bytes(
         doc.file_size = len(data)
         return doc
     raise UnsupportedFormatError(
-        "unrecognised format — not FBX (binary or ASCII), OBJ, glTF or .blend"
+        "unrecognised format — not FBX (binary or ASCII), OBJ, glTF, "
+        ".blend or .max"
     )

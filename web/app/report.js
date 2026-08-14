@@ -43,6 +43,7 @@ const FbxReport = (function () {
 
   const FORMAT_NAMES = {
     fbx: 'Autodesk FBX', obj: 'Wavefront OBJ', blend: 'Blender', gltf: 'glTF 2.0',
+    max: 'Autodesk 3ds Max',
   };
 
   function objRows(doc, pairs) {
@@ -70,6 +71,26 @@ const FbxReport = (function () {
     pairs.push(['Datablocks', number(e.datablocks || 0)]);
     pairs.push(['DNA', `${number(e.structCount || 0)} structs, `
       + `${number(e.typeCount || 0)} types, ${number(e.nameCount || 0)} field names`]);
+  }
+
+  function maxRows(doc, pairs) {
+    const e = doc.extra || {};
+    pairs.push(['Container', `compound file, ${number(e.sector || 0)}-byte sectors`]);
+    pairs.push(['Written by', e.buildText || 'unknown']);
+    pairs.push(['Scene', `${number(e.entities || 0)} entities, ${number(e.nodes || 0)} nodes`]);
+    pairs.push(['Geometry', `${number(e.meshes || 0)} mesh object`
+      + `${e.meshes === 1 ? '' : 's'}, `
+      + `${number(e.vertices || 0)} vertices, ${number(e.faces || 0)} faces`]);
+    if ((e.undecoded || []).length) {
+      pairs.push(['Not read', e.undecoded.map((u) => `${u.count} ${u.name}`).join(', ')]);
+    }
+    pairs.push(['Classes', `${number((e.classes || []).length)} in `
+      + `${number((e.dlls || []).length)} plugin(s)`]);
+    if ((e.assets || []).length) {
+      pairs.push(['Assets', `${number(e.assets.length)}: `
+        + e.assets.slice(0, 4).map((a) => a.name).join(', ')
+        + (e.assets.length > 4 ? ' …' : '')]);
+    }
   }
 
   function gltfRows(doc, pairs) {
@@ -106,6 +127,13 @@ const FbxReport = (function () {
     }
     if (doc.format === 'blend') {
       blendRows(doc, pairs);
+      return section('File', rows(pairs));
+    }
+    if (doc.format === 'max') {
+      maxRows(doc, pairs);
+      if (doc.parseMilliseconds !== undefined) {
+        pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
+      }
       return section('File', rows(pairs));
     }
     if (doc.format === 'gltf') {

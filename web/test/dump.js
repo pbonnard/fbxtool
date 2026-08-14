@@ -13,6 +13,7 @@ const path = require('path');
 const FbxWasm = require(path.join(__dirname, '..', 'app', 'wasm.js'));
 const FbxAscii = require(path.join(__dirname, '..', 'app', 'ascii.js'));
 const FbxGltfIn = require(path.join(__dirname, '..', 'app', 'gltfin.js'));
+const FbxMax = require(path.join(__dirname, '..', 'app', 'max.js'));
 
 const WASM = path.join(__dirname, '..', 'build', 'fbx.wasm');
 
@@ -49,7 +50,9 @@ async function main() {
   const data = new Uint8Array(fs.readFileSync(target));
 
   let doc = null;
-  if (FbxGltfIn.looksLikeGltf(data)) {
+  if (FbxMax.looksLikeMax(data)) {
+    doc = FbxMax.parse(data);
+  } else if (FbxGltfIn.looksLikeGltf(data)) {
     // A .gltf keeps its buffer beside it; the Python reader looks there too.
     const files = new Map();
     const directory = path.dirname(path.resolve(target));

@@ -180,6 +180,53 @@ def test_the_two_gltf_readers_agree(built, tmp_path, container):
 
 @needs_clang
 @needs_node
+def test_the_two_max_readers_agree(built, tmp_path):
+    """A .max is read twice over — once here, once in the page — and the two
+    have to produce the same records, down to the last vertex.
+
+    Nothing about this format is documented, so there is no third party to
+    check against: what the two readers share is one account of the format,
+    and this is what keeps them from drifting apart.
+    """
+    import fbxbuild as fb
+
+    path = tmp_path / "scene.max"
+    path.write_bytes(fb.build_max())
+
+    js = _wasm_dump(str(path))
+    python = _python_dump(str(path))
+    assert js["warnings"] == []
+    assert len(js["nodes"]) == len(python), (
+        f"record count differs: js={len(js['nodes'])} python={len(python)}"
+    )
+    for index, (a, b) in enumerate(zip(python, js["nodes"])):
+        assert a == b, f"record {index} differs:\n  python={a}\n  js    ={b}"
+
+
+@needs_clang
+@needs_node
+def test_a_max_scene_is_drawn(built, tmp_path):
+    """The cube out of a 3ds Max scene, on screen and the right way up."""
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    path = tmp_path / "scene.max"
+    path.write_bytes(fb.build_max(name="body_shell"))
+    result = _run(["node", str(WEB / "test" / "browser.js"), str(path)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_wasm_reader_matches_on_a_real_file(built, real_fbx_path):
     wasm = _wasm_dump(real_fbx_path)
     python = _python_dump(real_fbx_path)

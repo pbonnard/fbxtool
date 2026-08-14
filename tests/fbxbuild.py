@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import gzip
 import struct
 import zlib
 
@@ -1365,3 +1366,238 @@ def build_glb(image: bytes | None = None) -> bytes:
     out += struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
     out += struct.pack("<II", len(binary), 0x004E4942) + binary
     return bytes(out)
+
+# ---------------------------------------------------------------- 3ds Max
+
+
+_MAX_SECTOR = 512
+_MAX_MINI = 64
+_MAX_CUTOFF = 4096
+_MAX_END = 0xFFFFFFFE
+_MAX_FREE = 0xFFFFFFFF
+_MAX_FAT = 0xFFFFFFFD
+
+
+def _max_chunk(idn: int, payload: bytes, container: bool = False) -> bytes:
+    """One chunk: its id, its length counting this header, and its payload.
+
+    Bit 31 of the length is what says the payload is more chunks — which is
+    the whole of how a reader knows a tree from a leaf.
+    """
+    length = 6 + len(payload)
+    if container:
+        length |= 0x80000000
+    return struct.pack("<HI", idn, length) + payload
+
+
+def _max_wide_chunk(idn: int, payload: bytes, container: bool = True) -> bytes:
+    """The long form: a zero length, then the real one as 64 bits."""
+    length = 14 + len(payload)
+    if container:
+        length |= 1 << 63
+    return struct.pack("<HIQ", idn, 0, length) + payload
+
+
+def _max_utf16(text: str) -> bytes:
+    return text.encode("utf-16-le") + b"\x00\x00"
+
+
+def _max_compound(streams: "dict[str, bytes]") -> bytes:
+    """Pack named streams into an OLE2 compound file.
+
+    Every stream here is small, so they all live in the mini stream — which is
+    the arrangement a real .max uses for everything but its scene, and the one
+    worth having a fixture exercise.
+    """
+    mini = bytearray()
+    starts = {}
+    for name, data in streams.items():
+        starts[name] = len(mini) // _MAX_MINI
+        mini += data + b"\x00" * (-len(data) % _MAX_MINI)
+
+    mini_sectors = max(1, -(-len(mini) // _MAX_SECTOR))
+    # 0 is the mini FAT, then the mini stream, then the directory, then the FAT.
+    mini_start = 1
+    dir_start = mini_start + mini_sectors
+    dir_sectors = -(-(len(streams) + 1) * 128 // _MAX_SECTOR)
+    fat_sector = dir_start + dir_sectors
+    total = fat_sector + 1
+
+    fat = [_MAX_FREE] * total
+    fat[0] = _MAX_END
+    for i in range(mini_sectors):
+        fat[mini_start + i] = mini_start + i + 1 if i + 1 < mini_sectors else _MAX_END
+    for i in range(dir_sectors):
+        fat[dir_start + i] = dir_start + i + 1 if i + 1 < dir_sectors else _MAX_END
+    fat[fat_sector] = _MAX_FAT
+
+    mini_fat = []
+    for name, data in streams.items():
+        run = max(1, -(-len(data) // _MAX_MINI))
+        at = starts[name]
+        for i in range(run):
+            mini_fat.append(at + i + 1 if i + 1 < run else _MAX_END)
+
+    header = bytearray(_MAX_SECTOR)
+    header[0:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    struct.pack_into("<HH", header, 0x18, 0x003E, 3)
+    struct.pack_into("<H", header, 0x1C, 0xFFFE)
+    struct.pack_into("<HH", header, 0x1E, 9, 6)
+    struct.pack_into("<I", header, 0x2C, 1)              # one FAT sector
+    struct.pack_into("<I", header, 0x30, dir_start)
+    struct.pack_into("<I", header, 0x38, _MAX_CUTOFF)
+    struct.pack_into("<I", header, 0x3C, 0)              # the mini FAT
+    struct.pack_into("<I", header, 0x40, 1)
+    struct.pack_into("<I", header, 0x44, _MAX_END)       # no DIFAT sectors
+    struct.pack_into("<I", header, 0x48, 0)
+    for i in range(109):
+        struct.pack_into("<I", header, 0x4C + i * 4, fat_sector if i == 0 else _MAX_FREE)
+
+    def entry(name: str, kind: int, start: int, size: int, child: int = _MAX_FREE) -> bytes:
+        block = bytearray(128)
+        encoded = name.encode("utf-16-le") + b"\x00\x00"
+        block[0:len(encoded)] = encoded
+        struct.pack_into("<H", block, 64, len(encoded))
+        block[66] = kind
+        block[67] = 1                                    # black
+        struct.pack_into("<III", block, 68, _MAX_FREE, _MAX_FREE, child)
+        struct.pack_into("<I", block, 116, start)
+        struct.pack_into("<Q", block, 120, size)
+        return bytes(block)
+
+    directory = bytearray()
+    directory += entry("Root Entry", 5, mini_start, len(mini), child=1)
+    for index, (name, data) in enumerate(streams.items()):
+        # A flat chain rather than a red-black tree: every reader walks the
+        # whole directory anyway, and a tree would only obscure the fixture.
+        nxt = index + 2 if index + 1 < len(streams) else _MAX_FREE
+        block = bytearray(entry(name, 2, starts[name], len(data)))
+        struct.pack_into("<I", block, 72, nxt)           # right sibling
+        directory += bytes(block)
+    directory += b"\x00" * (-len(directory) % _MAX_SECTOR)
+
+    out = bytearray(header)
+    out += struct.pack("<%dI" % (_MAX_SECTOR // 4),
+                       *(mini_fat + [_MAX_FREE] * (_MAX_SECTOR // 4 - len(mini_fat))))
+    out += bytes(mini) + b"\x00" * (-len(mini) % _MAX_SECTOR)
+    out += bytes(directory)
+    out += struct.pack("<%dI" % (_MAX_SECTOR // 4),
+                       *(fat + [_MAX_FREE] * (_MAX_SECTOR // 4 - len(fat))))
+    return bytes(out)
+
+
+def _max_class(name: str, super_id: int, class_id: int, dll: int = -1) -> bytes:
+    return _max_chunk(0x2040,
+                      _max_chunk(0x2060, struct.pack("<iIII", dll, class_id, 0, super_id))
+                      + _max_chunk(0x2042, _max_utf16(name)),
+                      container=True)
+
+
+def _max_face(corners: "list[int]", material: int = 0) -> bytes:
+    """A face: its degree, its corners, then the members its flags select.
+
+    0x01 carries the material, 0x20 the triangulation of an n-gon — which is
+    two ints per triangle past the first, and the reason a face is not a fixed
+    size.
+    """
+    flags = 0x01 | (0x20 if len(corners) > 3 else 0)
+    out = struct.pack("<I", len(corners))
+    out += struct.pack("<%dI" % len(corners), *corners)
+    out += struct.pack("<H", flags)
+    out += struct.pack("<I", material)
+    if flags & 0x20:
+        out += struct.pack("<%dI" % (2 * (len(corners) - 3)), *([0] * 2 * (len(corners) - 3)))
+    return out
+
+
+def build_max(*, name: str = "cube001", with_uvs: bool = True,
+              build: int = (20 * 1000) << 16 | 966,
+              kind: str = "poly", compressed: bool = False) -> bytes:
+    """A .max holding one cube under one node.
+
+    The cube is a unit cube, which is enough to exercise every rule the reader
+    depends on: the container, the chunk tree, the class table, the entity
+    list, the face record and a map channel.
+
+    ``kind`` chooses which class holds it — ``"poly"`` for an Editable Poly of
+    six quads, ``"mesh"`` for an Editable Mesh of twelve triangles, which is a
+    different layout in the same block. ``compressed`` gzips every stream, as
+    a newer 3ds Max does.
+    """
+    points = [
+        (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+        (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+    ]
+    quads = [
+        [0, 1, 2, 3], [4, 7, 6, 5], [0, 4, 5, 1],
+        [1, 5, 6, 2], [2, 6, 7, 3], [3, 7, 4, 0],
+    ]
+
+    if kind == "mesh":
+        # An Editable Mesh: three bare floats a vertex, and a face of three
+        # corners and two words about them.
+        verts = struct.pack("<I", len(points))
+        for x, y, z in points:
+            verts += struct.pack("<3f", x, y, z)
+        triangles = [q[:3] for q in quads] + [[q[0], q[2], q[3]] for q in quads]
+        faces = struct.pack("<I", len(triangles))
+        for a, b, c in triangles:
+            faces += struct.pack("<5I", a, b, c, 0, 1)
+        mesh = _max_chunk(0x0914, verts) + _max_chunk(0x0912, faces)
+        if with_uvs:
+            uvs = struct.pack("<I", 4)
+            for u, v in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                uvs += struct.pack("<3f", u, v, 0)
+            uv_faces = struct.pack("<I", len(triangles))
+            uv_faces += b"".join(struct.pack("<3I", 0, 1, 2) for _ in triangles)
+            mesh += _max_chunk(0x2394, uvs) + _max_chunk(0x2396, uv_faces)
+        class_name = "Editable Mesh"
+    else:
+        verts = struct.pack("<I", len(points))
+        for x, y, z in points:
+            verts += struct.pack("<I3f", 0, x, y, z)
+        faces = struct.pack("<I", len(quads)) + b"".join(_max_face(q) for q in quads)
+        # Edges are counted but not needed; a plausible count keeps the report
+        # true.
+        edges = struct.pack("<I", 12) + b"\x00" * (12 * 12)
+        mesh = (_max_chunk(0x0100, verts) + _max_chunk(0x010A, edges)
+                + _max_chunk(0x011A, faces))
+        if with_uvs:
+            uvs = struct.pack("<I", 4)
+            for u, v in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                uvs += struct.pack("<3f", u, v, 0)
+            uv_faces = b"".join(struct.pack("<I4I", 4, 0, 1, 2, 3) for _ in quads)
+            mesh += (_max_chunk(0x0120, struct.pack("<I", 2))
+                     + _max_chunk(0x0128, uvs) + _max_chunk(0x012B, uv_faces))
+        class_name = "Editable Poly"
+
+    poly = _max_chunk(0x0000, _max_chunk(0x08FE, mesh, container=True), container=True)
+    node = _max_chunk(0x0001,
+                      _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, 0))
+                      + _max_chunk(0x0962, _max_utf16(name)),
+                      container=True)
+    scene = _max_wide_chunk(0x2023, poly + node)
+
+    classes = (_max_class(class_name, 0x10, 0x1BF8338D, dll=0)
+               + _max_class("Node", 0x01, 0x01))
+    dlls = _max_chunk(0x2038,
+                      _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
+                      + _max_chunk(0x2037, _max_utf16("epoly.dlo")),
+                      container=True)
+    assets = (b"\x00" * 16 + struct.pack("<I", 6) + _max_utf16("Bitmap")
+              + struct.pack("<I", 9) + _max_utf16("paint.jpg")
+              + struct.pack("<I", 19) + _max_utf16("C:\\models\\paint.jpg")
+              + b"\x00" * 16)
+    config = _max_chunk(0x2170, struct.pack("<I", build))
+
+    streams = {
+        "Scene": scene,
+        "ClassDirectory3": classes,
+        "DllDirectory": dlls,
+        "FileAssetMetaData3": assets,
+        "SaveConfigData": config,
+    }
+    if compressed:
+        # mtime zero so the same scene is the same bytes twice running.
+        streams = {name: gzip.compress(data, mtime=0) for name, data in streams.items()}
+    return _max_compound(streams)

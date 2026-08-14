@@ -16,7 +16,7 @@
     <span id="status" class="status">Loading WebAssembly…</span>
     <button id="picker" type="button" class="primary">Open model</button>
     <input id="file-input" type="file"
-           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.bin,.json,image/*" multiple hidden>
+           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.max,.bin,.json,image/*" multiple hidden>
   </div>
 </header>
 
@@ -72,8 +72,8 @@
       <div class="drop-inner">
         <h1>Drop a model file</h1>
         <p>FBX (binary or ASCII), Wavefront OBJ, glTF 2.0
-           (<code>.gltf</code> or <code>.glb</code>), or a Blender
-           <code>.blend</code>. Everything runs in this tab — parsed by a
+           (<code>.gltf</code> or <code>.glb</code>), a Blender
+           <code>.blend</code> or a 3ds Max <code>.max</code>. Everything runs in this tab — parsed by a
            WebAssembly module and drawn with WebGL, never leaving your
            machine.</p>
         <p class="hint">Embedded textures load automatically. Files that

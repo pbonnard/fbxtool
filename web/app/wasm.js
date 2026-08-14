@@ -481,11 +481,29 @@ const FbxWasm = (function () {
   }
 
   /** Mark the allocator so scratch from one build can be rewound after use. */
+  /**
+   * Inflate a raw deflate stream — no zlib header, which is what a gzip
+   * wrapper holds. The heap mark is taken and released around it, so nothing
+   * of either the input or the output is left behind.
+   */
+  function inflateRaw(bytes, expected) {
+    const at = mark();
+    try {
+      const block = exports_.fbx_alloc(Math.max(bytes.length, 1));
+      new Uint8Array(exports_.memory.buffer, block, bytes.length).set(bytes);
+      const out = exports_.fbx_inflate_raw(block, bytes.length, expected);
+      if (!out) throw new Error('a compressed stream would not inflate');
+      return new Uint8Array(exports_.memory.buffer, out, expected).slice();
+    } finally {
+      release(at);
+    }
+  }
+
   function mark() { return exports_.fbx_heap_mark(); }
   function release(at) { exports_.fbx_heap_release(at); }
 
   return {
-    init, parseBinary, buildMesh, subdivide, decodeDraco, decodeKtx2,
+    init, parseBinary, buildMesh, subdivide, decodeDraco, decodeKtx2, inflateRaw,
     payloadOffset, asFloat64, asInt32,
     uploadFloat64, uploadInt32, mark, release,
     get exports() { return exports_; },
