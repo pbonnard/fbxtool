@@ -134,6 +134,38 @@ async function main() {
     `yaw ${reset.toFixed(2)}`);
   await setLevel(page, 0);
 
+  console.log('\nthe up axis');
+  // Files declare this wrongly often enough that the answer is worth keeping.
+  const wrongWayUp = await page.evaluate(() => document.getElementById('up-select').value);
+  const other = wrongWayUp === 'z' ? 'y' : 'z';
+  await page.selectOption('#up-select', other);
+  await page.waitForTimeout(300);
+  await setLevel(page, 1);
+  check('a hand-picked axis survives a rebuild',
+    await page.evaluate(() => window.fbxtool.viewer.upAxis) === other,
+    `${wrongWayUp} -> ${other}`);
+  await setLevel(page, 0);
+
+  // Re-opening the same file should not need the same correction again.
+  const beforeReload = await page.evaluate(() => window.fbxtool.loadCount);
+  // Setting the same file again is not a change; empty it first.
+  await page.setInputFiles('#file-input', []);
+  await page.setInputFiles('#file-input', [cubeFile]);
+  await page.waitForFunction((s) => window.fbxtool.loadCount > s, beforeReload,
+    { timeout: 60000 });
+  await page.waitForTimeout(400);
+  const remembered = await page.evaluate(() => ({
+    axis: window.fbxtool.viewer.upAxis,
+    select: document.getElementById('up-select').value,
+  }));
+  check('and is remembered when the file is opened again',
+    remembered.axis === other && remembered.select === other,
+    `${remembered.axis} on the viewer, ${remembered.select} in the control`);
+  // Leave nothing behind for the next file.
+  await page.evaluate(() => {
+    try { window.localStorage.clear(); } catch (error) { /* file:// */ }
+  });
+
   console.log('\na scene of several parts');
   const parts = await load(sceneFile);
   check('the setting does not survive a new file',

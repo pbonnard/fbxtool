@@ -224,7 +224,10 @@ something.
 The viewer picks the up axis from the geometry when the vertex data clearly
 disagrees with the declared `UpAxis`, which happens in practice: a model
 resting on a ground plane has its minimum at zero along the up axis. The
-choice is shown, and can be overridden.
+choice is shown, and can be overridden — and an override outranks both the
+declaration and the guess from then on. It is remembered per file, so a model
+the viewer reads the wrong way up is corrected once rather than on every open,
+and nothing that rebuilds the mesh takes the correction back.
 
 ### Legacy 6.x files
 
@@ -290,9 +293,17 @@ and every n-sided polygon replaced by n quads.
 ```
 
 An open border is smoothed as a curve on its own, so two meshes that share an
-edge do not part company. Normals and UVs are subdivided linearly rather than
-smoothed, which keeps hard edges and texture seams exactly where the file put
-them; materials follow the polygon they came from.
+edge do not part company — and where several borders meet at one point, which
+exported car parts are full of, their neighbours are averaged rather than
+summed. Normals and UVs are subdivided linearly rather than smoothed, which
+keeps hard edges and texture seams exactly where the file put them; materials
+follow the polygon they came from.
+
+Because the normals are the file's own, what changes is the *shape*, not the
+shading: a cage is usually smooth-shaded already, and what gave it away was the
+angular outline. Expect a rounder silhouette and softer creases rather than a
+different-looking surface — at a whole-car zoom that is around 6% of the
+pixels, so the triangle count in the viewport is the reliable tell.
 
 Each round turns every corner into a quad, so the triangle count comes to
 twice the corners that went in — quads quadruple, triangles sextuple. The

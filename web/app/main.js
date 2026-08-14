@@ -46,6 +46,9 @@
   let unsmoothedParts = 0;
   /** Whether the shading mode on screen is the user's choice or ours. */
   let modeChosen = false;
+  /** The same, for the up axis — remembered per file, so reopening a model
+   *  that the viewer reads wrongly does not need correcting twice. */
+  let upAxisChosen = false;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
@@ -126,6 +129,7 @@
     materialGroups = [];
     sceneParts = [];
     modeChosen = false;
+    upAxisChosen = false;
     objectIndex = emptyIndex();
     missingTextures = [];
 
@@ -182,6 +186,11 @@
       currentAnalysis = FbxAnalyze.analyze(doc);
       // Whatever was assigned to this file last time it was open.
       materialOverrides = FbxPalette.load(doc.fileName);
+      const savedAxis = recallUpAxis(doc.fileName);
+      if (savedAxis) {
+        dom.upSelect.value = savedAxis;
+        upAxisChosen = true;
+      }
       objectIndex = buildObjectIndex(currentAnalysis.objects);
 
       dom.panel.innerHTML = FbxReport.render(currentAnalysis);
@@ -383,8 +392,41 @@
     return { axis: declared, fromGeometry: false };
   }
 
-  /** Choose the up axis for a freshly built mesh and put the viewer on it. */
+  /* Which way up a file is drawn is remembered per file: the declaration is
+   * often wrong, the geometry is only a guess, and correcting the same model
+   * on every open is worse than either. */
+  const upAxisKey = (name) => `fbxtool:upaxis:${name || 'unnamed'}`;
+
+  function rememberUpAxis(axis) {
+    if (!currentDoc) return;
+    try {
+      window.localStorage.setItem(upAxisKey(currentDoc.fileName), axis);
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallUpAxis(fileName) {
+    try {
+      const saved = window.localStorage.getItem(upAxisKey(fileName));
+      return saved === 'y' || saved === 'z' ? saved : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Choose the up axis for a freshly built mesh and put the viewer on it —
+   * unless the axis on screen was picked by hand, which outranks both the
+   * file's declaration and our reading of the geometry. Files get this wrong
+   * often enough that having the answer undone by a rebuild is worse than
+   * guessing again.
+   */
   function applyUpAxis(mesh) {
+    if (upAxisChosen) {
+      viewer.setUpAxis(dom.upSelect.value);
+      return { axis: dom.upSelect.value, fromGeometry: false, byHand: true };
+    }
     // A .blend has no axis declaration — Blender is natively Z-up — so there
     // is nothing to disagree with there.
     const declared = currentAnalysis.globalSettings.upAxis
@@ -1163,7 +1205,11 @@
       subdivisionLevel = Number(dom.subdivSelect.value) || 0;
       redraw();
     });
-    dom.upSelect.addEventListener('change', () => viewer.setUpAxis(dom.upSelect.value));
+    dom.upSelect.addEventListener('change', () => {
+      upAxisChosen = true;
+      viewer.setUpAxis(dom.upSelect.value);
+      rememberUpAxis(dom.upSelect.value);
+    });
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
     dom.groundToggle.addEventListener('change',
       () => viewer.setShowGround(dom.groundToggle.checked));

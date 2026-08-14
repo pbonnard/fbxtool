@@ -1011,8 +1011,18 @@ static int subdivide_once(const Cage *in, Cage *out) {
             if (!n) {
                 vertex_out[v * 3 + k] = p;                       /* loose vertex */
             } else if (border[v] >= 2) {
-                /* Along a border the surface follows the border curve alone. */
-                vertex_out[v * 3 + k] = (p * 6.0 + border_sum[v * 3 + k]) / 8.0;
+                /* Along a border the surface follows the border curve alone:
+                 * three quarters of the way to the point, an eighth towards
+                 * each neighbour along it. Where several border loops meet —
+                 * and they do, in exported car parts — those neighbours are
+                 * averaged first, or the sum alone would throw the point clear
+                 * of the mesh. */
+                f64 neighbours = border_sum[v * 3 + k] / (f64)border[v];
+                vertex_out[v * 3 + k] = (p * 6.0 + neighbours * 2.0) / 8.0;
+            } else if (border[v] || n < 3) {
+                /* A single border edge, or too few neighbours to average:
+                 * nothing sensible to smooth towards, so it stays put. */
+                vertex_out[v * 3 + k] = p;
             } else {
                 f64 f_avg = face_sum[v * 3 + k] / (f64)n;
                 f64 r_avg = edge_sum[v * 3 + k] / (f64)n;

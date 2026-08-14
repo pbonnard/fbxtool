@@ -185,6 +185,50 @@ def test_an_open_border_follows_its_own_curve(heap):
     assert all(p[2] == pytest.approx(0.0) for p in points)
 
 
+def test_several_borders_meeting_at_a_point(heap):
+    """Two quads joined at one corner — which real car parts are full of.
+
+    That corner sits on four border edges, not the two the border rule is
+    written for. Summing all four instead of averaging them throws the point
+    away from the mesh: one part of a Smart Brabus grew nearly four times
+    across before this was handled.
+    """
+    positions = [
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+        2.0, 1.0, 0.0, 2.0, 2.0, 0.0, 1.0, 2.0, 0.0,
+    ]
+    # The second quad hangs off vertex 2, sharing nothing else.
+    out = heap.subdivide(positions, [0, 1, 2, ~3, 2, 4, 5, ~6])
+    points = [tuple(out["positions"][i * 3:i * 3 + 3])
+              for i in range(out["pos_count"] // 3)]
+
+    shared = points[2]
+    assert shared == pytest.approx((1.0, 1.0, 0.0)), "the shared corner should stay put"
+    for axis in range(3):
+        lowest = min(positions[axis::3])
+        highest = max(positions[axis::3])
+        assert min(p[axis] for p in points) >= lowest - 1e-9
+        assert max(p[axis] for p in points) <= highest + 1e-9
+
+
+@pytest.mark.parametrize("name,positions,indices", [
+    ("cube", fb.CUBE_VERTICES, CUBE_QUADS),
+    ("triangle", [0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0, 0.0], [0, 1, ~2]),
+    ("quad", [0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 2.0, 0.0], [0, 1, 2, ~3]),
+])
+def test_nothing_lands_outside_the_cage(heap, name, positions, indices):
+    """Every point of a subdivided mesh is a weighted average of cage points,
+    all the weights positive — so nothing can end up beyond the cage's box."""
+    out = heap.subdivide(positions, indices, levels=2)
+    points = [tuple(out["positions"][i * 3:i * 3 + 3])
+              for i in range(out["pos_count"] // 3)]
+    for axis in range(3):
+        lowest = min(positions[axis::3])
+        highest = max(positions[axis::3])
+        assert min(p[axis] for p in points) >= lowest - 1e-9, f"{name} spilled below"
+        assert max(p[axis] for p in points) <= highest + 1e-9, f"{name} spilled above"
+
+
 def test_materials_follow_their_polygon(heap):
     """Each new quad belongs to the material of the polygon it came from."""
     out = heap.subdivide(fb.CUBE_VERTICES, CUBE_QUADS,
