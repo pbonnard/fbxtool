@@ -41,6 +41,10 @@
         <option value="y">Y up</option>
         <option value="z">Z up</option>
       </select>
+      <label class="slider" title="Pull the parts away from each other">
+        explode
+        <input id="explode-slider" type="range" min="0" max="150" value="0" step="1" disabled>
+      </label>
       <label class="check"><input id="texture-toggle" type="checkbox" checked disabled>
         textures</label>
       <label class="check"><input id="ground-toggle" type="checkbox" checked>
@@ -50,6 +54,7 @@
       <button id="export-gltf" type="button" disabled>Export glTF</button>
     </div>
     <p id="mesh-info" class="mesh-info">no file loaded</p>
+    <p id="part-info" class="part-info" hidden></p>
     <div id="drop" class="drop">
       <div class="drop-inner">
         <h1>Drop a model file</h1>
@@ -61,6 +66,9 @@
         <p class="hint">Embedded textures load automatically. Files that
            reference images, an <code>.mtl</code> or a <code>.bin</code> by name
            need those dropped in too — together or afterwards.</p>
+        <p class="hint">Drag to orbit, shift-drag to pan, scroll to zoom. Click
+           a part to pick it out; pull the <em>explode</em> slider to take the
+           model apart.</p>
       </div>
     </div>
   </section>

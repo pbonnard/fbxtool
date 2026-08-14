@@ -297,6 +297,41 @@ by several models — four wheels from one wheel — is drawn once per model.
 instanced by a chain of three models, the last of them mirrored. Any single
 record can still be picked from the dropdown to see it on its own.
 
+### Taking it apart
+
+Once a scene is assembled it is one solid object, and the parts inside it are
+hidden by the ones in front. The **explode** slider pulls them out: each part
+slides away from the middle of the model, along the line from the model's
+centre to its own —
+
+```
+position += (partCentre - modelCentre) * explode      // 0 … 1.5
+```
+
+— so parts move apart in proportion to how far out they already are, nothing
+crosses anything else, and each piece ends up on the side it came from. A part
+is one placed model, the same unit the dropdown lists: 3 for `scene_parts`, 44
+for the Shelby, 34 for the Pantera. The shift happens in the vertex shader,
+reading a texture of part centres, so a 240,000-triangle scene comes apart at
+frame rate; the shadow pass and the ground plane read the same centres, so the
+shadow follows each part and the floor stays under the lowest one.
+
+**Click a part to select it.** The click is answered by drawing the scene again
+into an offscreen buffer where each pixel holds the part index it belongs to,
+and reading back the one pixel under the cursor. That is exact rather than a
+guess — no ray to intersect, no tolerance to tune — and because it is the same
+geometry through the same vertex shader, it keeps working through the explode,
+the up-axis correction and the smoothing without knowing about any of them. The
+part is washed blue in the render — a different colour from the orange a
+material picked out of the list uses — and named underneath:
+
+```
+Body_Shell · 30 140 triangles · 4.4 × 1.1 × 1.9 units · CarPaint, Chrome
+```
+
+Dragging orbits the camera as before — only a press and release without a drag
+counts as a pick. `Escape`, or a click on empty space, lets go.
+
 ### Smoothing a cage
 
 A model can look faceted not because the viewer is dropping detail but because
@@ -766,6 +801,7 @@ node web/test/subdivide.js model.fbx                 # smoothing through the mod
 node web/test/smoothing.js samples/cube_binary.fbx samples/scene_parts.fbx
 node web/test/gltfin.js samples/cube_textured.fbx     # export, then read it back
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
+node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks

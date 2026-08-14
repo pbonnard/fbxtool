@@ -18,6 +18,8 @@
     modeSelect: $('mode-select'),
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
+    explodeSlider: $('explode-slider'),
+    partInfo: $('part-info'),
     spinToggle: $('spin-toggle'),
     groundToggle: $('ground-toggle'),
     textureToggle: $('texture-toggle'),
@@ -62,6 +64,9 @@
   let materialOverrides = {};
   /** The mesh on screen, kept for the glTF export. */
   let currentMesh = null;
+  /** The parts of what is on screen, and which one the mouse picked. */
+  let partTable = [];
+  let selectedPart = -1;
   let lastExport = null;
   /** The empty state of each panel, as the page was served. */
   const placeholders = {
@@ -138,6 +143,8 @@
     currentPalette = [];
     materialGroups = [];
     sceneParts = [];
+    setSelectedPart(-1);
+    partTable = [];
     modeChosen = false;
     upAxisChosen = false;
     objectIndex = emptyIndex();
@@ -152,6 +159,8 @@
     dom.exportGltf.disabled = true;
     dom.geometrySelect.innerHTML = '';
     dom.geometrySelect.disabled = true;
+    dom.explodeSlider.value = '0';
+    dom.explodeSlider.disabled = true;
     dom.meshInfo.textContent = 'no file loaded';
     if (viewer) {
       viewer.clear();
@@ -392,6 +401,8 @@
         polygonCount: mesh.polygonCount,
         min: mesh.min,
         max: mesh.max,
+        name: part.model.displayName || part.geometry.displayName || 'part',
+        materialNames: part.materials.map((material) => material.displayName),
       });
       FbxWasm.release(heapMark);
     }
@@ -403,33 +414,48 @@
     const normals = new Float32Array(triangleCount * 9);
     const uvs = new Float32Array(triangleCount * 6);
     const materials = new Float32Array(triangleCount * 3);
+    // Which part each corner belongs to: what the explode moves and what a
+    // click reports.
+    const partOf = new Float32Array(triangleCount * 3);
+    const table = [];
     const min = [Infinity, Infinity, Infinity];
     const max = [-Infinity, -Infinity, -Infinity];
 
     let vertexAt = 0;
     let cornerAt = 0;
-    for (const piece of pieces) {
+    pieces.forEach((piece, index) => {
       positions.set(piece.positions, vertexAt);
       normals.set(piece.normals, vertexAt);
       uvs.set(piece.uvs, cornerAt * 2);
       materials.set(piece.materials, cornerAt);
+      partOf.fill(index, cornerAt, cornerAt + piece.materials.length);
       vertexAt += piece.positions.length;
       cornerAt += piece.materials.length;
       for (let k = 0; k < 3; k++) {
         if (piece.min[k] < min[k]) min[k] = piece.min[k];
         if (piece.max[k] > max[k]) max[k] = piece.max[k];
       }
-    }
+      table.push({
+        name: piece.name,
+        centre: [0, 1, 2].map((k) => (piece.min[k] + piece.max[k]) / 2),
+        min: piece.min.slice(),
+        max: piece.max.slice(),
+        triangles: piece.triangleCount,
+        materials: piece.materialNames,
+      });
+    });
 
     return {
       mesh: {
         triangleCount, polygonCount, min, max,
         hasUv: pieces.some((p) => p.hasUv),
         positions, normals, uvs, materials,
+        parts: partOf,
         degenerate: 0,
       },
       palette,
       parts: pieces.length,
+      table,
     };
   }
 
@@ -881,6 +907,35 @@
     }
   }
 
+  /**
+   * Say which part the mouse picked, and pick it out on the model.
+   *
+   * A part is one model's mesh: what the file calls a part, not a material and
+   * not a triangle. -1 is nothing selected.
+   */
+  function setSelectedPart(index) {
+    const part = index >= 0 ? partTable[index] : null;
+    selectedPart = part ? index : -1;
+    if (viewer) viewer.setSelectedPart(selectedPart);
+    if (!part) {
+      dom.partInfo.hidden = true;
+      dom.partInfo.textContent = '';
+      return;
+    }
+    const size = [0, 1, 2].map((k) => part.max[k] - part.min[k]);
+    const materials = (part.materials || []).filter(Boolean);
+    // Exporters write names like a filing system; show enough to recognise the
+    // part and keep the whole of it for the tooltip.
+    const shorten = (text) => (text.length > 44 ? `${text.slice(0, 43)}…` : text);
+    dom.partInfo.textContent = `${shorten(part.name)} · `
+      + `${part.triangles.toLocaleString()} triangles · `
+      + `${size.map((v) => (Math.abs(v) >= 1 ? v.toFixed(1) : v.toFixed(3))).join(' × ')} units`
+      + (materials.length ? ` · ${shorten(materials.slice(0, 2).join(', '))}` : '');
+    dom.partInfo.title = part.name
+      + (materials.length ? `\n${materials.join(', ')}` : '');
+    dom.partInfo.hidden = false;
+  }
+
   /** Mark on the model whichever material the pointer or the open row names. */
   function updateHighlight() {
     if (!viewer) return;
@@ -1219,6 +1274,13 @@
       }
       const elapsed = performance.now() - started;
       viewer.setMesh(built.mesh, { keepCamera });
+      partTable = built.table || [];
+      viewer.setParts(partTable);
+      setSelectedPart(-1);
+      // Only a scene of several parts has anything to pull apart.
+      dom.explodeSlider.disabled = partTable.length < 2;
+      if (dom.explodeSlider.disabled) dom.explodeSlider.value = '0';
+      viewer.setExplode(Number(dom.explodeSlider.value) / 100);
 
       const textures = await resolveTextures(built.palette);
       missingTextures = textures.missing;
@@ -1365,6 +1427,23 @@
       }
       const elapsed = performance.now() - started;
       viewer.setMesh(mesh, { keepCamera });
+      // One geometry on its own is still one part — clicking it should say
+      // what it is — but there is nothing to pull it apart from.
+      const [name] = FbxAnalyze.splitObjectName(
+        entry.props.map((prop) => prop.value).find((v) => typeof v === 'string') || '');
+      partTable = [{
+        name: name || entry.name,
+        centre: [0, 1, 2].map((k) => (mesh.min[k] + mesh.max[k]) / 2),
+        min: mesh.min.slice(),
+        max: mesh.max.slice(),
+        triangles: mesh.triangleCount,
+        materials: [],
+      }];
+      viewer.setParts(partTable);
+      setSelectedPart(-1);
+      dom.explodeSlider.disabled = true;
+      dom.explodeSlider.value = '0';
+      viewer.setExplode(0);
 
       const palette = materialPalette(entry);
       const textures = await resolveTextures(palette);
@@ -1455,6 +1534,27 @@
       viewer.setUpAxis(dom.upSelect.value);
       rememberUpAxis(dom.upSelect.value);
     });
+    dom.explodeSlider.addEventListener('input',
+      () => viewer.setExplode(Number(dom.explodeSlider.value) / 100));
+
+    // A click picks a part; a drag is the camera, so the two are told apart by
+    // how far the pointer travelled between going down and coming up.
+    let pressedAt = null;
+    dom.canvas.addEventListener('pointerdown', (event) => {
+      pressedAt = { x: event.clientX, y: event.clientY };
+    });
+    dom.canvas.addEventListener('pointerup', (event) => {
+      const from = pressedAt;
+      pressedAt = null;
+      if (!from || event.button !== 0) return;
+      if (Math.hypot(event.clientX - from.x, event.clientY - from.y) > 4) return;
+      const box = dom.canvas.getBoundingClientRect();
+      setSelectedPart(viewer.pickPart(event.clientX - box.left, event.clientY - box.top));
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && selectedPart >= 0) setSelectedPart(-1);
+    });
+
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
     dom.groundToggle.addEventListener('change',
       () => viewer.setShowGround(dom.groundToggle.checked));
@@ -1499,6 +1599,9 @@
       get loadCount() { return loadCount; },
       get palette() { return currentPalette; },
       get parts() { return sceneParts.length; },
+      get partTable() { return partTable; },
+      get selectedPart() { return selectedPart; },
+      selectPart: setSelectedPart,
       get lastExport() { return lastExport; },
       exportMesh: () => currentMesh,
       exportGltf,

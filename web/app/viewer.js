@@ -97,10 +97,27 @@ const FbxViewer = (function () {
   const SHADOW_VERTEX = `#version 300 es
   precision highp float;
   layout(location = 0) in vec3 aPosition;
+  layout(location = 4) in float aPart;
   uniform mat4 uShadowMatrix;
   uniform mat4 uModel;
+
+  /* Pulling a scene apart: every part slides away from the middle, along the
+   * line from the model's centre to its own, so nothing crosses anything else
+   * and each piece ends up where you would expect to find it. */
+  uniform highp sampler2D uParts;   // one texel per part: its centre
+  uniform int uPartCount;
+  uniform float uExplode;
+  uniform vec3 uCentre;
+
+  vec3 explode(vec3 position, float part) {
+    if (uExplode <= 0.0 || uPartCount <= 0) return position;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return position;
+    vec3 centre = texelFetch(uParts, ivec2(index, 0), 0).xyz;
+    return position + (centre - uCentre) * uExplode;
+  }
   void main() {
-    gl_Position = uShadowMatrix * uModel * vec4(aPosition, 1.0);
+    gl_Position = uShadowMatrix * uModel * vec4(explode(aPosition, aPart), 1.0);
   }`;
 
   const SHADOW_FRAGMENT = `#version 300 es
@@ -171,6 +188,7 @@ ${ENVIRONMENT}
   layout(location = 1) in vec3 aNormal;
   layout(location = 2) in float aMaterial;
   layout(location = 3) in vec2 aUv;
+  layout(location = 4) in float aPart;
 
   uniform mat4 uModelView;
   uniform mat4 uProjection;
@@ -182,17 +200,81 @@ ${ENVIRONMENT}
   out vec3 vWorld;
   out float vMaterial;
   out vec2 vUv;
+  flat out int vPart;
+
+  /* Pulling a scene apart: every part slides away from the middle, along the
+   * line from the model's centre to its own, so nothing crosses anything else
+   * and each piece ends up where you would expect to find it. */
+  uniform highp sampler2D uParts;   // one texel per part: its centre
+  uniform int uPartCount;
+  uniform float uExplode;
+  uniform vec3 uCentre;
+
+  vec3 explode(vec3 position, float part) {
+    if (uExplode <= 0.0 || uPartCount <= 0) return position;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return position;
+    vec3 centre = texelFetch(uParts, ivec2(index, 0), 0).xyz;
+    return position + (centre - uCentre) * uExplode;
+  }
 
   void main() {
-    vec4 viewPosition = uModelView * vec4(aPosition, 1.0);
+    vec3 position = explode(aPosition, aPart);
+    vec4 viewPosition = uModelView * vec4(position, 1.0);
     vViewPosition = viewPosition.xyz;
     // The same space the environment and the shadow map are in: the model
     // placed and turned the right way up, before the camera.
-    vWorld = (uModel * vec4(aPosition, 1.0)).xyz;
+    vWorld = (uModel * vec4(position, 1.0)).xyz;
     vNormal = uNormalMatrix * aNormal;
     vMaterial = aMaterial;
     vUv = aUv;
+    vPart = int(aPart + 0.5);
     gl_Position = uProjection * viewPosition;
+  }`;
+
+  /* The same geometry again, drawn as part numbers rather than as a picture,
+   * so a click can be answered with the part under it. */
+  const PICK_VERTEX = `#version 300 es
+  precision highp float;
+  layout(location = 0) in vec3 aPosition;
+  layout(location = 4) in float aPart;
+  uniform mat4 uModelView;
+  uniform mat4 uProjection;
+  flat out int vPart;
+
+  /* Pulling a scene apart: every part slides away from the middle, along the
+   * line from the model's centre to its own, so nothing crosses anything else
+   * and each piece ends up where you would expect to find it. */
+  uniform highp sampler2D uParts;   // one texel per part: its centre
+  uniform int uPartCount;
+  uniform float uExplode;
+  uniform vec3 uCentre;
+
+  vec3 explode(vec3 position, float part) {
+    if (uExplode <= 0.0 || uPartCount <= 0) return position;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return position;
+    vec3 centre = texelFetch(uParts, ivec2(index, 0), 0).xyz;
+    return position + (centre - uCentre) * uExplode;
+  }
+
+  void main() {
+    vPart = int(aPart + 0.5);
+    gl_Position = uProjection * uModelView * vec4(explode(aPosition, aPart), 1.0);
+  }`;
+
+  const PICK_FRAGMENT = `#version 300 es
+  precision highp float;
+  flat in int vPart;
+  out vec4 fragColour;
+  void main() {
+    // Numbered from one, so that nothing at all reads as zero.
+    int id = vPart + 1;
+    fragColour = vec4(
+      float(id & 255) / 255.0,
+      float((id >> 8) & 255) / 255.0,
+      float((id >> 16) & 255) / 255.0,
+      1.0);
   }`;
 
   const FRAGMENT_SHADER = `#version 300 es
@@ -203,6 +285,7 @@ ${ENVIRONMENT}
   in vec3 vWorld;
   in float vMaterial;
   in vec2 vUv;
+  flat in int vPart;
 
   uniform int uMode;          // 0 file colours, 1 index colours, 2 clay, 3 normals
   uniform vec3 uClayColour;
@@ -215,6 +298,7 @@ ${ENVIRONMENT}
   uniform int uPass;          // 0 opaque, 1 blended
   uniform float uOpaqueLimit;
   uniform int uHighlight;     // material group to pick out, or -1
+  uniform int uSelected;      // part picked with the mouse, or -1
 
   out vec4 fragColour;
 ${ENVIRONMENT}
@@ -313,6 +397,11 @@ ${SHADOW_LOOKUP}
     // Picking a material out of the list marks where it is on the model.
     bool marked = uHighlight >= 0 && group == uHighlight;
     if (marked) albedo = mix(albedo, vec3(1.0, 0.42, 0.05), 0.85);
+    // A part chosen with the mouse, kept a different colour from a material
+    // picked out of the list, and kept light enough to still read as itself.
+    if (uSelected >= 0 && vPart == uSelected) {
+      albedo = mix(albedo, vec3(0.15, 0.62, 1.0), 0.55);
+    }
 
     // Each pass takes the half of the scene it is set up to draw.
     bool blended = opacity < uOpaqueLimit;
@@ -545,6 +634,21 @@ ${SHADOW_LOOKUP}
         pass: gl.getUniformLocation(program, 'uPass'),
         opaqueLimit: gl.getUniformLocation(program, 'uOpaqueLimit'),
         highlight: gl.getUniformLocation(program, 'uHighlight'),
+        selected: gl.getUniformLocation(program, 'uSelected'),
+        parts: gl.getUniformLocation(program, 'uParts'),
+        partCount: gl.getUniformLocation(program, 'uPartCount'),
+        explode: gl.getUniformLocation(program, 'uExplode'),
+        centre: gl.getUniformLocation(program, 'uCentre'),
+      };
+
+      this.pickProgram = this._link(PICK_VERTEX, PICK_FRAGMENT, 'pick');
+      this.pickUniforms = {
+        modelView: gl.getUniformLocation(this.pickProgram, 'uModelView'),
+        projection: gl.getUniformLocation(this.pickProgram, 'uProjection'),
+        parts: gl.getUniformLocation(this.pickProgram, 'uParts'),
+        partCount: gl.getUniformLocation(this.pickProgram, 'uPartCount'),
+        explode: gl.getUniformLocation(this.pickProgram, 'uExplode'),
+        centre: gl.getUniformLocation(this.pickProgram, 'uCentre'),
       };
 
       const background = gl.createProgram();
@@ -564,6 +668,10 @@ ${SHADOW_LOOKUP}
 
       this.shadowProgram = this._link(SHADOW_VERTEX, SHADOW_FRAGMENT, 'shadow');
       this.shadowUniforms = {
+        parts: gl.getUniformLocation(this.shadowProgram, 'uParts'),
+        partCount: gl.getUniformLocation(this.shadowProgram, 'uPartCount'),
+        explode: gl.getUniformLocation(this.shadowProgram, 'uExplode'),
+        centre: gl.getUniformLocation(this.shadowProgram, 'uCentre'),
         shadowMatrix: gl.getUniformLocation(this.shadowProgram, 'uShadowMatrix'),
         model: gl.getUniformLocation(this.shadowProgram, 'uModel'),
       };
@@ -658,6 +766,7 @@ ${SHADOW_LOOKUP}
       this.normalBuffer = gl.createBuffer();
       this.materialBuffer = gl.createBuffer();
       this.uvBuffer = gl.createBuffer();
+      this.partBuffer = gl.createBuffer();
 
       const attach = (buffer, location, size) => {
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -668,6 +777,7 @@ ${SHADOW_LOOKUP}
       attach(this.normalBuffer, 1, 3);
       attach(this.materialBuffer, 2, 1);
       attach(this.uvBuffer, 3, 2);
+      attach(this.partBuffer, 4, 1);
       gl.bindVertexArray(null);
 
       this.paletteTexture = gl.createTexture();
@@ -684,6 +794,63 @@ ${SHADOW_LOOKUP}
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
+
+      // One texel per part, holding where its middle is: the explode reads it
+      // per vertex, so pulling the scene apart costs nothing to rebuild.
+      this.partTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      this.parts = [];
+      this.partCount = 0;
+      this.explode = 0;
+      this.selectedPart = -1;
+      this.pickBuffer = null;
+      this.pickTexture = null;
+      this.pickDepth = null;
+      this.pickSize = [0, 0];
+    }
+
+    /**
+     * The scene's parts: what each is called, where its middle is, and how big
+     * it is. The centres drive the explode; the rest is what a click reports.
+     */
+    setParts(parts) {
+      const gl = this.gl;
+      this.parts = Array.isArray(parts) ? parts : [];
+      this.partCount = this.parts.length;
+      this.selectedPart = -1;
+      if (!this.partCount) { this.dirty = true; return; }
+      const data = new Float32Array(this.partCount * 4);
+      this.parts.forEach((part, i) => {
+        const centre = part.centre || [0, 0, 0];
+        data[i * 4] = centre[0];
+        data[i * 4 + 1] = centre[1];
+        data[i * 4 + 2] = centre[2];
+        data[i * 4 + 3] = 1;
+      });
+      gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 1, 0,
+        gl.RGBA, gl.FLOAT, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      this._updateRadius();
+      this.dirty = true;
+    }
+
+    /** Hand a program everything the explode needs. */
+    _bindParts(uniforms) {
+      const gl = this.gl;
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
+      gl.uniform1i(uniforms.parts, 3);
+      gl.uniform1i(uniforms.partCount, this.partCount);
+      gl.uniform1f(uniforms.explode, this.explode || 0);
+      const centre = this.modelCentre || [0, 0, 0];
+      gl.uniform3f(uniforms.centre, centre[0], centre[1], centre[2]);
+      gl.activeTexture(gl.TEXTURE0);
     }
 
     /**
@@ -795,6 +962,9 @@ ${SHADOW_LOOKUP}
       gl.bufferData(gl.ARRAY_BUFFER, mesh.materials, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, mesh.uvs, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.partBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER,
+        mesh.parts || new Float32Array(mesh.triangleCount * 3), gl.STATIC_DRAW);
       gl.bindVertexArray(null);
       this.hasUv = mesh.hasUv;
 
@@ -820,8 +990,34 @@ ${SHADOW_LOOKUP}
     measure(min, max) {
       this.modelCentre = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
       const size = [0, 1, 2].map((i) => Math.abs(max[i] - min[i]));
-      this.radius = Math.max(Math.hypot(size[0], size[1], size[2]) / 2, 1e-4);
+      this.baseRadius = Math.max(Math.hypot(size[0], size[1], size[2]) / 2, 1e-4);
+      this._updateRadius();
       this.dirty = true;
+    }
+
+    /** How far the model reaches once the explode has moved its parts. */
+    _updateRadius() {
+      this.radius = this.baseRadius || this.radius || 1e-4;
+      if (!(this.explode > 0) || !this.parts.length || !this.modelCentre) return;
+      const centre = this.modelCentre;
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      for (const part of this.parts) {
+        if (!part.min || !part.max || !part.centre) continue;
+        for (let k = 0; k < 3; k++) {
+          const shift = (part.centre[k] - centre[k]) * this.explode;
+          if (part.min[k] + shift < min[k]) min[k] = part.min[k] + shift;
+          if (part.max[k] + shift > max[k]) max[k] = part.max[k] + shift;
+        }
+      }
+      if (!Number.isFinite(min[0])) return;
+      // Measured from the centre the model is drawn around, which does not
+      // move: it is what everything else moves away from.
+      let reach = 0;
+      for (let k = 0; k < 3; k++) {
+        reach += Math.max(Math.abs(max[k] - centre[k]), Math.abs(centre[k] - min[k])) ** 2;
+      }
+      this.radius = Math.max(Math.sqrt(reach), this.baseRadius);
     }
 
     /** Point the camera at a bounding box. */
@@ -835,6 +1031,27 @@ ${SHADOW_LOOKUP}
     }
 
     setMode(mode) { this.mode = mode; this.dirty = true; }
+
+    /** How far apart to pull the parts: 0 is the model as it was built. */
+    setExplode(amount) {
+      const next = Math.max(0, Number(amount) || 0);
+      if (next === this.explode) return;
+      this.explode = next;
+      // A scene pulled apart is a bigger scene: the floor spreads with it, and
+      // so does the box the sun's view is fitted to.
+      this._updateRadius();
+      this.shadowStale = true;
+      this.dirty = true;
+    }
+
+    /** Pick one part out on the model, or -1 for none. */
+    setSelectedPart(index) {
+      const next = Number.isInteger(index) && index >= 0 && index < this.partCount
+        ? index : -1;
+      if (next === this.selectedPart) return;
+      this.selectedPart = next;
+      this.dirty = true;
+    }
     /** Pick a material group out on the model, or -1 for none. */
     setHighlight(group) {
       const next = Number.isInteger(group) ? group : -1;
@@ -936,7 +1153,18 @@ ${SHADOW_LOOKUP}
       if (!this.meshMin) return 0;
       const axis = this.upAxis === 'z' ? 2 : 1;
       // The model matrix centres the mesh, so its lowest point ends up here.
-      return -(this.meshMax[axis] - this.meshMin[axis]) / 2;
+      let lowest = this.meshMin[axis];
+      // Pulled apart, the lowest part is not the one it was: the floor drops
+      // to meet whichever piece now hangs the furthest down.
+      if (this.explode > 0) {
+        const centre = this.modelCentre || [0, 0, 0];
+        for (const part of this.parts) {
+          if (!part.min || !part.centre) continue;
+          const moved = part.min[axis] + (part.centre[axis] - centre[axis]) * this.explode;
+          if (moved < lowest) lowest = moved;
+        }
+      }
+      return lowest - (this.meshMin[axis] + this.meshMax[axis]) / 2;
     }
 
     /** Draw the model into the depth buffer, seen from the sun. */
@@ -948,6 +1176,7 @@ ${SHADOW_LOOKUP}
       gl.useProgram(this.shadowProgram);
       gl.uniformMatrix4fv(this.shadowUniforms.shadowMatrix, false, shadowMatrix);
       gl.uniformMatrix4fv(this.shadowUniforms.model, false, model);
+      this._bindParts(this.shadowUniforms);
       // Only back faces go in the map, which keeps a surface from shadowing
       // itself along every edge it faces the sun with.
       gl.cullFace(gl.FRONT);
@@ -975,12 +1204,8 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE0);
     }
 
-    render() {
-      const gl = this.gl;
-      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      if (!this.triangleCount) return;
-
+    /** Where the model, the camera and the sun are: the same for every pass. */
+    _camera() {
       const centre = this.modelCentre || [0, 0, 0];
 
       let model = identity();
@@ -1002,8 +1227,95 @@ ${SHADOW_LOOKUP}
       const aspect = this.canvas.width / Math.max(this.canvas.height, 1);
       const near = Math.max(this.radius * 0.005, 1e-3);
       const projection = perspective(0.9, aspect, near, this.radius * 100 + 10);
-      const toWorld = viewToWorld(view);
-      const shadowMatrix = this._shadowMatrix();
+      return {
+        model,
+        view,
+        modelView,
+        projection,
+        toWorld: viewToWorld(view),
+        shadowMatrix: this._shadowMatrix(),
+      };
+    }
+
+    /**
+     * Which part is under a point on the canvas, or -1.
+     *
+     * The scene is drawn again into a buffer of part numbers rather than
+     * colours and one pixel is read back, so the answer accounts for whatever
+     * the picture accounts for — the explode, the up axis, what is in front of
+     * what — without a second copy of any of it.
+     */
+    pickPart(x, y) {
+      const gl = this.gl;
+      if (!this.triangleCount || !this.partCount) return -1;
+      const ratio = this.canvas.width / Math.max(this.canvas.clientWidth, 1);
+      const px = Math.round(x * ratio);
+      const py = Math.round(y * ratio);
+      if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return -1;
+
+      if (!this.pickBuffer || this.pickSize[0] !== this.canvas.width
+        || this.pickSize[1] !== this.canvas.height) {
+        if (this.pickBuffer) {
+          gl.deleteFramebuffer(this.pickBuffer);
+          gl.deleteTexture(this.pickTexture);
+          gl.deleteRenderbuffer(this.pickDepth);
+        }
+        this.pickTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.pickTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, this.canvas.width, this.canvas.height,
+          0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        this.pickDepth = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, this.pickDepth);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16,
+          this.canvas.width, this.canvas.height);
+        this.pickBuffer = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickBuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D,
+          this.pickTexture, 0);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER,
+          this.pickDepth);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        this.pickSize = [this.canvas.width, this.canvas.height];
+      }
+
+      const camera = this._camera();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickBuffer);
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.useProgram(this.pickProgram);
+      gl.uniformMatrix4fv(this.pickUniforms.modelView, false, camera.modelView);
+      gl.uniformMatrix4fv(this.pickUniforms.projection, false, camera.projection);
+      this._bindParts(this.pickUniforms);
+      gl.bindVertexArray(this.vao);
+      // Both sides: a part seen through its own back face is still that part.
+      gl.disable(gl.CULL_FACE);
+      gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
+      gl.enable(gl.CULL_FACE);
+      gl.bindVertexArray(null);
+
+      const pixel = new Uint8Array(4);
+      gl.readPixels(px, this.canvas.height - 1 - py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      // The picture was drawn over; put it back on the next frame.
+      this.dirty = true;
+
+      const id = pixel[0] | (pixel[1] << 8) | (pixel[2] << 16);
+      return id > 0 && id <= this.partCount ? id - 1 : -1;
+    }
+
+    render() {
+      const gl = this.gl;
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (!this.triangleCount) return;
+
+      const { model, view, modelView, projection, toWorld, shadowMatrix } = this._camera();
 
       // The sun's view of the model, redrawn only when the model changes —
       // orbiting the camera leaves the shadows exactly where they were.
@@ -1062,6 +1374,8 @@ ${SHADOW_LOOKUP}
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,
         Number.isInteger(this.highlight) ? this.highlight : -1);
+      gl.uniform1i(this.uniforms.selected, this.selectedPart);
+      this._bindParts(this.uniforms);
 
       gl.bindVertexArray(this.vao);
       const vertices = this.triangleCount * 3;

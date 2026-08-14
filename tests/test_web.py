@@ -454,6 +454,33 @@ def test_smoothing_control(built):
 
 @needs_clang
 @needs_node
+def test_parts_explode_and_pick(built):
+    """Taking the scene apart, and clicking a part out of it.
+
+    The three-part sample is three cubes that touch, so "detached" is
+    measurable: a line of picks across the model crosses one stretch of model
+    when the scene is whole and separate stretches once it is pulled apart.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = _run(
+        ["node", str(WEB / "test" / "parts.js"),
+         str(ROOT / "samples" / "scene_parts.fbx"),
+         str(ROOT / "samples" / "cube_binary.fbx")],
+        env=_node_env(), timeout=600)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+    assert "1 run(s) together, 2 apart" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_ground_and_shadows(built):
     """The model stands on a floor and drops a shadow onto it."""
     try:

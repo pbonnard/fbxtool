@@ -121,6 +121,9 @@ main {
   transition: opacity 0.15s;
 }
 body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
+/* A list of parts is as wide as its longest name, which an exporter may have
+   written as a sentence. Kept to a width the row can hold. */
+.viewport-controls select { max-width: 210px; }
 .viewport-controls button { font-size: 12px; padding: 5px 10px; background: rgba(20, 23, 29, 0.92); }
 
 .check {
@@ -134,6 +137,46 @@ body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
   border-radius: 6px;
   padding: 5px 9px;
 }
+
+.slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(20, 23, 29, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 9px;
+}
+
+.slider input[type="range"] {
+  width: 92px;
+  accent-color: var(--accent, #2f81f7);
+}
+
+.slider input[type="range"]:disabled { opacity: 0.4; }
+
+/* What the mouse picked out, said plainly under the model. */
+.part-info {
+  position: absolute;
+  left: 12px;
+  bottom: 38px;
+  margin: 0;
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(13, 15, 19, 0.85);
+  border-left: 3px solid #2f9ef7;
+  padding: 5px 9px;
+  border-radius: 4px;
+}
+
+.part-info[hidden] { display: none; }
 
 .mesh-info {
   position: absolute;
