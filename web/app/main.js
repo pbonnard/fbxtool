@@ -67,6 +67,9 @@
   /** The palette on screen, its materials grouped, and the user's edits. */
   let currentPalette = [];
   let materialGroups = [];
+  /** Triangles per palette slot, counted once per mesh: grouping the list
+   *  again after a rename must not walk half a million triangles to do it. */
+  let slotTriangles = [];
   let materialOverrides = {};
   /** The mesh on screen, kept for the glTF export. */
   let currentMesh = null;
@@ -460,8 +463,11 @@
       let piece = FbxEdits.slice(source, segment.faces);
       if (!piece.triangleCount) continue;
       if (segment.material != null && palette[segment.material]) {
+        const material = palette[segment.material];
         piece = FbxEdits.paint(piece, segment.material);
-        piece.materialNames = [palette[segment.material].name];
+        // Under the name it was read by, like every other part: what it is
+        // called now is looked up when it is shown.
+        piece.materialNames = [material.fromFile.name || material.name];
       }
       pieces.push(segment.name ? { ...piece, name: segment.name } : piece);
       kept.push(segment);
@@ -800,6 +806,7 @@
       metallic: 0,
       // Nothing in the file to go back to, so its own values stand as that.
       fromFile: {
+        name,
         colour: colour.slice(),
         specular: [0.04, 0.04, 0.04],
         roughness: 0.4,
@@ -824,6 +831,16 @@
       `Added ${name}${part ? ` and put it on ${part.name}` : ''} `
       + '— the Materials tab is where to colour it.');
     if (index >= 0) setSelectedPart(index);
+  }
+
+  /**
+   * What a material read out of the file is called now. A part carries the
+   * names it was built with, and a rename must not make it look like the part
+   * wears something that is no longer there.
+   */
+  function shownMaterial(name) {
+    const set = materialOverrides[name];
+    return set && typeof set.name === 'string' && set.name ? set.name : name;
   }
 
   /** What the material in a slot is called, for naming a split. */
@@ -876,7 +893,7 @@
    */
   function fillMaterialChoices(part) {
     const worn = part && part.segment ? part.segment.material : null;
-    const own = (part && part.materials) || [];
+    const own = ((part && part.materials) || []).map(shownMaterial);
     // What the list should be sitting on: the material given by hand, or the
     // one the file gave it where there is only one to name.
     let chosen = -1;
@@ -1083,10 +1100,18 @@
     currentPalette = palette;
     currentMesh = mesh;
     dom.exportGltf.disabled = !mesh || !mesh.triangleCount;
-    materialGroups = FbxPalette.groups(palette, trianglesPerSlot(mesh, palette.length));
+    // Settings first, grouping second: a renamed material has to be grouped
+    // and sorted under the name it now goes by.
     FbxPalette.apply(palette, materialOverrides);
+    slotTriangles = trianglesPerSlot(mesh, palette.length);
+    materialGroups = FbxPalette.groups(palette, slotTriangles);
     viewer.setPalette(palette);
     renderMaterials();
+  }
+
+  /** Group the palette again, without counting the triangles again. */
+  function regroup() {
+    materialGroups = FbxPalette.groups(currentPalette, slotTriangles);
   }
 
   /** Re-upload after an edit. The mesh is untouched: this is a few texels. */
@@ -1121,7 +1146,7 @@
 
     const row = dom.materials.querySelector(`.material[data-key="${CSS.escape(name)}"]`);
     if (row) {
-      const group = materialGroups.find((g) => g.name === name);
+      const group = materialGroups.find((g) => g.origin === name);
       const settings = FbxPalette.settingsFor(group, materialOverrides);
       row.classList.add('edited');
       const swatch = row.querySelector('.swatch');
@@ -1142,12 +1167,56 @@
     dom.materialsClear.disabled = false;
   }
 
+  /**
+   * Call a material something else.
+   *
+   * The name is what the export writes and what the model is read by, but it
+   * is not what the material is filed under: settings stay under the name the
+   * file gave it, so renaming loses nothing and *From file* undoes it with
+   * everything else. An empty name means the file's own.
+   *
+   * Two materials of the same name are one material to a glTF, so a rename
+   * onto a name already in use is refused rather than quietly merging them.
+   */
+  function renameMaterial(key, value) {
+    const group = materialGroups.find((entry) => entry.origin === key);
+    if (!group) return;
+    const wanted = String(value || '').trim().slice(0, 120);
+    if (wanted === group.name) return;
+    const clash = materialGroups.find((entry) => entry !== group && entry.name === wanted);
+    if (clash) {
+      setStatus(`Another material is already called ${wanted}.`, 'warn');
+      renderMaterials();
+      return;
+    }
+    // Renaming to what the file called it is the same as not renaming it.
+    const set = Object.assign({}, materialOverrides[key]);
+    if (!wanted || wanted === key) delete set.name;
+    else set.name = wanted;
+    if (Object.keys(set).length) materialOverrides[key] = set;
+    else delete materialOverrides[key];
+
+    FbxPalette.apply(currentPalette, materialOverrides);
+    viewer.setPalette(currentPalette);
+    regroup();
+    renderMaterials();
+    // The readout names the part's materials, so it has to hear about it.
+    if (selectedPart >= 0) setSelectedPart(selectedPart);
+    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    setStatus(wanted && wanted !== key
+      ? `${key} is now called ${wanted}.`
+      : `${group.name} goes back to ${key}.`, 'ok');
+  }
+
   /** Put every material back to what the file said. */
   function clearMaterials() {
     materialOverrides = {};
     if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
     refreshPalette();
+    // Names go back to the file's along with everything else.
+    regroup();
     renderMaterials();
+    if (selectedPart >= 0) setSelectedPart(selectedPart);
   }
 
   /** Apply a saved assignment, from storage or a dropped file. */
@@ -1155,7 +1224,9 @@
     materialOverrides = overrides;
     if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
     if (currentPalette.length) refreshPalette();
+    regroup();
     renderMaterials();
+    if (selectedPart >= 0) setSelectedPart(selectedPart);
   }
 
   /** Hand the browser a file to save. */
@@ -1462,7 +1533,7 @@
       return;
     }
     const size = [0, 1, 2].map((k) => part.max[k] - part.min[k]);
-    const materials = (part.materials || []).filter(Boolean);
+    const materials = (part.materials || []).filter(Boolean).map(shownMaterial);
     // Exporters write names like a filing system; show enough to recognise the
     // part and keep the whole of it for the tooltip.
     const shorten = (text) => (text.length > 44 ? `${text.slice(0, 43)}…` : text);
@@ -1494,9 +1565,26 @@
     dom.materials.addEventListener('input', (event) => {
       const field = event.target.dataset.field;
       const name = keyOf(event);
-      if (!name || !field) return;
+      if (!name || !field || field === 'name') return;
       if (field === 'colour') editMaterial(name, { colour: FbxPalette.fromHex(event.target.value) });
       else editMaterial(name, { [field]: Number(event.target.value) });
+    });
+
+    // A name is committed when it is finished with, not letter by letter: the
+    // list is rebuilt around it, and rebuilding it under a half-typed name
+    // would take the field away mid-word.
+    dom.materials.addEventListener('change', (event) => {
+      if (event.target.dataset.field !== 'name') return;
+      const key = keyOf(event);
+      if (key) renameMaterial(key, event.target.value);
+    });
+    dom.materials.addEventListener('keydown', (event) => {
+      if (event.target.dataset.field !== 'name') return;
+      if (event.key === 'Enter') event.target.blur();
+      else if (event.key === 'Escape') {
+        event.target.value = event.target.defaultValue;
+        event.target.blur();
+      }
     });
 
     dom.materials.addEventListener('change', (event) => {
@@ -1547,8 +1635,11 @@
       // A .blend states metalness; FBX and OBJ leave it to be inferred, and
       // nothing infers it, so those export as dielectrics.
       metallic: typeof props.Metallic === 'number' ? props.Metallic : 0,
-      // Kept so an assignment can always be undone back to the file itself.
+      // Kept so an assignment can always be undone back to the file itself —
+      // the name included, since a material can be renamed and its settings
+      // still have to be found under what the file called it.
       fromFile: {
+        name: material.displayName,
         colour: look.colour.slice(),
         specular: look.specular.slice(),
         roughness: look.roughness,
@@ -2218,6 +2309,7 @@
       loadFile,
       loadFiles,
       editMaterial,
+      renameMaterial,
       useAssignment,
       clearMaterials,
     };

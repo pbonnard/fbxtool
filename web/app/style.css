@@ -452,5 +452,28 @@ ul.record-tree .count { color: var(--muted); }
   font-family: var(--mono);
   font-size: 11px;
 }
+.material-field input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: #12151b;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+.material-field input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* What the file called it, kept in view under the name it now goes by. */
+.material-was {
+  margin: -4px 0 0 60px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .material-actions { display: flex; gap: 8px; padding-top: 2px; }
 .material-actions select, .material-actions button { font-size: 12px; padding: 3px 8px; }

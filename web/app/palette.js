@@ -61,7 +61,14 @@ const FbxPalette = (function () {
 
   /** A material's identity: its UID where the file has one, else its name. */
   const keyOf = (entry) => (entry.uid === undefined || entry.uid === null
-    ? `name:${entry.name}` : `uid:${entry.uid}`);
+    ? `name:${originOf(entry)}` : `uid:${entry.uid}`);
+
+  /**
+   * The name a material was read under, which is what its settings are filed
+   * against. A material can be renamed, and everything it wears has to follow
+   * the rename rather than be lost by it.
+   */
+  const originOf = (entry) => ((entry.fromFile && entry.fromFile.name) || entry.name);
 
   /**
    * Group palette slots by material, largest surface first.
@@ -76,7 +83,15 @@ const FbxPalette = (function () {
       const key = keyOf(entry);
       let group = byKey.get(key);
       if (!group) {
-        group = { key, name: entry.name || '(unnamed)', slots: [], triangles: 0, entry };
+        group = {
+          key,
+          // What it is called now, and what it is filed under.
+          name: entry.name || '(unnamed)',
+          origin: originOf(entry),
+          slots: [],
+          triangles: 0,
+          entry,
+        };
         byKey.set(key, group);
       }
       group.slots.push(slot);
@@ -105,7 +120,10 @@ const FbxPalette = (function () {
   function apply(palette, overrides) {
     const settings = overrides || {};
     for (const entry of palette) {
-      const set = settings[entry.name];
+      const origin = originOf(entry);
+      const set = settings[origin];
+      // A rename is a setting like any other, so it comes and goes with them.
+      entry.name = set && typeof set.name === 'string' && set.name ? set.name : origin;
       if (!set) {
         entry.colour = entry.fromFile.colour.slice();
         entry.specular = entry.fromFile.specular.slice();
@@ -128,13 +146,15 @@ const FbxPalette = (function () {
 
   /** What a group's controls should read, given the current override. */
   function settingsFor(group, overrides) {
-    const set = (overrides || {})[group.name] || {};
+    const set = (overrides || {})[group.origin || group.name] || {};
     const file = group.entry.fromFile;
     return {
       colour: set.colour || file.colour,
       metallic: typeof set.metallic === 'number' ? set.metallic : 0,
       roughness: typeof set.roughness === 'number' ? set.roughness : file.roughness,
       opacity: typeof set.opacity === 'number' ? set.opacity : file.opacity,
+      name: typeof set.name === 'string' && set.name ? set.name : (group.origin || group.name),
+      renamed: typeof set.name === 'string' && !!set.name,
       edited: Object.keys(set).length > 0,
     };
   }
@@ -194,6 +214,11 @@ const FbxPalette = (function () {
           set[field] = Math.min(1, Math.max(0, value[field]));
         }
       }
+      // A material can be renamed; the file's own name stays the key, so an
+      // assignment written here still finds it.
+      if (typeof value.name === 'string' && value.name.trim()) {
+        set.name = value.name.trim().slice(0, 120);
+      }
       if (Object.keys(set).length) out[name] = set;
     }
     return out;
@@ -210,7 +235,7 @@ const FbxPalette = (function () {
   function slider(group, field, value, label) {
     return `<label class="material-field"><span>${label}</span>`
       + `<input type="range" min="0" max="1" step="0.01" value="${value.toFixed(2)}"`
-      + ` data-key="${escape(group.name)}" data-field="${field}">`
+      + ` data-key="${escape(group.origin)}" data-field="${field}">`
       + `<output>${value.toFixed(2)}</output></label>`;
   }
 
@@ -228,24 +253,34 @@ const FbxPalette = (function () {
         ? `<span class="material-slots">${group.slots.length} parts</span>` : '';
       const options = PRESETS.map((p) => `<option value="${p.id}">${escape(p.label)}</option>`)
         .join('');
+      // Renamed rows say what the file called it, so the report and the
+      // records that still use that name can be found from here.
+      const was = set.renamed
+        ? `<span class="material-was" title="the name in the file">was `
+          + `${escape(group.origin)}</span>` : '';
       return `<details class="material${set.edited ? ' edited' : ''}"`
-        + ` data-key="${escape(group.name)}" data-index="${group.index}">`
+        + ` data-key="${escape(group.origin)}" data-index="${group.index}">`
         + '<summary>'
         + `<span class="swatch" style="background:${hex}"></span>`
         + `<span class="material-name">${escape(group.name)}</span>${slots}`
         + `<span class="material-share">${percent(group.share)}</span>`
         + '</summary>'
         + '<div class="material-edit">'
+        + '<label class="material-field material-rename"><span>Name</span>'
+        + `<input type="text" value="${escape(set.name)}" spellcheck="false"`
+        + ` data-key="${escape(group.origin)}" data-field="name"`
+        + ' aria-label="Material name"></label>'
+        + was
         + '<label class="material-field"><span>Colour</span>'
-        + `<input type="color" value="${hex}" data-key="${escape(group.name)}"`
+        + `<input type="color" value="${hex}" data-key="${escape(group.origin)}"`
         + ' data-field="colour"></label>'
         + slider(group, 'metallic', set.metallic, 'Metal')
         + slider(group, 'roughness', set.roughness, 'Rough')
         + slider(group, 'opacity', set.opacity, 'Opacity')
         + '<div class="material-actions">'
-        + `<select data-key="${escape(group.name)}" data-field="preset">`
+        + `<select data-key="${escape(group.origin)}" data-field="preset">`
         + `<option value="">Preset…</option>${options}</select>`
-        + `<button type="button" data-key="${escape(group.name)}" data-action="reset">`
+        + `<button type="button" data-key="${escape(group.origin)}" data-action="reset">`
         + 'From file</button>'
         + '</div></div></details>';
     }).join('');

@@ -380,9 +380,15 @@ async function main() {
       // A material of the viewer's own, on a part that came out of the file.
       window.fbxtool.selectPart(0);
       window.fbxtool.addMaterial(0);
-      return window.fbxtool.viewer.triangleCount;
+      // And one of the file's own, called something else — but only one that
+      // still covers something, since the export drops materials that clothe
+      // no triangles and a scene this small can be left wearing nothing else.
+      const used = window.fbxtool.materials
+        .filter((group) => group.triangles > 0 && group.name !== 'New material');
+      if (used.length) window.fbxtool.renameMaterial(used[0].origin, 'Renamed for export');
+      return { triangles: window.fbxtool.viewer.triangleCount, renamed: used.length > 0 };
     });
-    if (left) {
+    if (left && left.triangles) {
       const [edited] = await Promise.all([
         page.waitForEvent('download', { timeout: 180000 }),
         page.click('#export-gltf'),
@@ -394,21 +400,30 @@ async function main() {
       const remaining = placements(cut.json).reduce((sum, p) => sum
         + cut.json.meshes[p.mesh].primitives
           .reduce((n, prim) => n + cut.json.accessors[prim.indices].count / 3, 0), 0);
-      check('an edited scene exports as what is left of it', remaining === left,
-        `${remaining.toLocaleString()} of ${left.toLocaleString()}`);
+      check('an edited scene exports as what is left of it', remaining === left.triangles,
+        `${remaining.toLocaleString()} of ${left.triangles.toLocaleString()}`);
       const invented = (cut.json.materials || []).find((m) => m.name === 'New material');
       const wears = placements(cut.json).some((p) => cut.json.meshes[p.mesh].primitives
         .some((prim) => cut.json.materials[prim.material]
           && cut.json.materials[prim.material].name === 'New material'));
       check('with a material the file never had, on the part it was given to',
         !!invented && wears, invented ? 'written and used' : 'missing');
+      if (left.renamed) {
+        check('and a renamed material written under the name it now goes by',
+          (cut.json.materials || []).some((m) => m.name === 'Renamed for export'),
+          (cut.json.materials || []).map((m) => m.name).slice(0, 3).join(', '));
+      }
       if (validator) {
         const report = await validator.validateBytes(editedBytes);
         check('and what comes out is still a valid glTF',
           report.issues.numErrors === 0 && report.issues.numWarnings === 0,
           `${report.issues.numErrors} error(s), ${report.issues.numWarnings} warning(s)`);
       }
-      await page.evaluate(() => window.fbxtool.restoreAll());
+      // Both halves put back: the scene, and the names it goes by.
+      await page.evaluate(() => {
+        window.fbxtool.restoreAll();
+        window.fbxtool.clearMaterials();
+      });
     }
 
     console.log(`       ${(stats.bytes / 1048576).toFixed(1)} MiB · `

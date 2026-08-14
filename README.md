@@ -390,8 +390,8 @@ The dropdown in the part readout says what the selected part wears and gives it
 something else — any material already in the file, or **+ new material**, which
 adds one to the palette and puts it on. A new material starts as a plain grey
 so that adding one shows; the **Materials** tab is where it becomes what it
-needs to be, and it is edited, saved and reset there like any material the file
-brought with it.
+needs to be, and it is edited, renamed, saved and reset there like any material
+the file brought with it.
 
 The whole part takes the material, because a part is the unit being dressed. To
 repaint only some of it, split it first — `by material` on a body that ships
@@ -670,13 +670,27 @@ Editing is instant even on a 553,006-triangle scene: materials live in a
 texture the shader reads per fragment, so a change is a few texels and the
 geometry is never touched.
 
+A material can also be **renamed** — files call things `Material.002`, or call
+them in a language you do not read — and the name is what the glTF export
+writes. What it is *filed* under does not change: settings stay keyed on the
+name the file gave it, so a colour set before a rename and one set after land
+on the same material, *From file* undoes the rename along with everything else,
+and the row keeps saying `was Chrome` so the name in the Records tab is still
+findable. Renaming a material onto a name already in use is refused rather than
+done, since two materials of one name are one material to a glTF.
+
 Assignments are remembered per file, and **Save assignment** writes them out as
 JSON:
 
 ```json
 { "fbxtoolMaterials": 1,
-  "materials": { "Carroserie": { "colour": [0.02, 0.05, 0.26], "roughness": 0.25 } } }
+  "materials": {
+    "Carroserie": { "colour": [0.02, 0.05, 0.26], "roughness": 0.25 },
+    "Material.002": { "name": "Wheel black", "roughness": 0.8 } } }
 ```
+
+The key is always the file's own name — that is what makes a rename portable —
+and `name` is what to call it instead.
 
 Drop that file back in — on its own or alongside the model — to apply it again,
 so an assignment can travel with a model that does not carry its own.

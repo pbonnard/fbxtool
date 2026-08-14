@@ -283,6 +283,60 @@ async function main() {
     check('undo takes it back off the palette, redo puts it back',
       added.undone === added.before && added.redone === added.before + 1,
       `${added.before} -> ${added.grown} -> ${added.undone} -> ${added.redone}`);
+    // ---- renaming
+    const renamed = await page.evaluate(async () => {
+      const row = document.querySelector('.material');
+      if (!row) return null;
+      const was = row.dataset.key;
+      const shown = row.querySelector('.material-name').textContent;
+      // Through the field, the way it is actually used.
+      row.open = true;
+      const field = row.querySelector('input[data-field="name"]');
+      field.value = 'Renamed by hand';
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+      const after = document.querySelector(`.material[data-key="${CSS.escape(was)}"]`);
+      // A setting made after the rename must land on the same material.
+      window.fbxtool.editMaterial(was, { roughness: 0.77 });
+      const wearing = window.fbxtool.palette
+        .filter((material) => material.fromFile.name === was);
+      return {
+        was,
+        shown,
+        key: after && after.dataset.key,
+        now: after && after.querySelector('.material-name').textContent,
+        note: after && after.querySelector('.material-was')
+          ? after.querySelector('.material-was').textContent : '',
+        named: wearing.length && wearing.every((material) => material.name === 'Renamed by hand'),
+        rough: wearing.length && wearing.every((material) => material.roughness === 0.77),
+        override: JSON.stringify(window.fbxtool.overrides[was] || null),
+      };
+    });
+    if (renamed) {
+      check('a material can be called something else',
+        renamed.now === 'Renamed by hand' && renamed.named,
+        `${renamed.shown} -> ${renamed.now}`);
+      check('while staying filed under the name the file gave it',
+        renamed.key === renamed.was && renamed.rough
+        && /"name":"Renamed by hand"/.test(renamed.override) && /0.77/.test(renamed.override),
+        renamed.override);
+      check('and the row says what it used to be called',
+        renamed.note.includes(renamed.was), renamed.note);
+      const clash = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('.material')];
+        if (rows.length < 2) return null;
+        window.fbxtool.renameMaterial(rows[1].dataset.key, 'Renamed by hand');
+        return {
+          status: document.getElementById('status').textContent,
+          name: rows[1].querySelector('.material-name').textContent,
+        };
+      });
+      if (clash) {
+        check('but not the same thing as another material',
+          /already called/.test(clash.status) && clash.name !== 'Renamed by hand',
+          clash.status);
+      }
+    }
+
     const dressedExport = await exported(page);
     check('and an export writes the scene wearing it',
       dressedExport && dressedExport.triangles === (await state(page)).drawn,

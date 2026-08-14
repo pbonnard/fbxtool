@@ -296,6 +296,34 @@ check('a metal takes its reflectance from its colour',
 FbxPalette.apply(slots, { paint: { colour: [0.9, 0.8, 0.5], metallic: 0 } });
 check('a dielectric reflects four per cent', nearAll(slots[0].specular, [0.04, 0.04, 0.04]));
 
+console.log('\npalette: renaming');
+// The real shape: an entry remembers the name it was read under.
+const named = (name, uid) => {
+  const made = entry(name, uid);
+  made.fromFile.name = name;
+  return made;
+};
+const two = [named('paint', 10), named('glass', 11)];
+FbxPalette.apply(two, { paint: { name: 'Body red', colour: [0.3, 0.02, 0.02] } });
+check('a renamed material answers to its new name', two[0].name === 'Body red', two[0].name);
+check('and its settings are still filed under the name the file gave it',
+  nearAll(two[0].colour, [0.3, 0.02, 0.02]) && two[1].name === 'glass');
+const renamedRows = FbxPalette.groups(two, [10, 5]);
+check('the list shows the new name and keeps the old one to file under',
+  renamedRows[0].name === 'Body red' && renamedRows[0].origin === 'paint',
+  `${renamedRows[0].name} was ${renamedRows[0].origin}`);
+const renamedSettings = FbxPalette.settingsFor(renamedRows[0], { paint: { name: 'Body red' } });
+check('the editor reads the new name back',
+  renamedSettings.name === 'Body red' && renamedSettings.renamed === true);
+FbxPalette.apply(two, {});
+check('and clearing the assignment gives the file\'s name back', two[0].name === 'paint');
+const savedName = FbxPalette.parse(
+  FbxPalette.serialise({ paint: { name: 'Body red', opacity: 0.5 } }));
+check('a saved assignment carries the name with the rest',
+  savedName.paint.name === 'Body red' && savedName.paint.opacity === 0.5);
+check('a blank name is not a rename',
+  !FbxPalette.parse(FbxPalette.serialise({ paint: { name: '   ' } })).paint);
+
 const glassPreset = FbxPalette.preset('glass');
 check('presets carry an opacity', glassPreset && glassPreset.opacity < 1,
   glassPreset ? String(glassPreset.opacity) : 'missing');
