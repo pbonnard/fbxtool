@@ -141,6 +141,19 @@ const FbxEdits = (function () {
     };
   }
 
+  /**
+   * The same piece wearing one material throughout.
+   *
+   * A copy rather than a repaint in place: a piece cut from a part that has
+   * not been split is that part's own piece, and the part must still be there
+   * to go back to.
+   */
+  function paint(piece, slot) {
+    const materials = new Float32Array(piece.triangleCount * 3);
+    materials.fill(slot);
+    return { ...piece, materials };
+  }
+
   /** Read a list of triangles back through the one it was taken from. */
   function through(outer, inner) {
     if (!outer) return inner;
@@ -156,7 +169,7 @@ const FbxEdits = (function () {
     return faces;
   }
 
-  return { shells, byMaterial, slice, through, every, weldCorners };
+  return { shells, byMaterial, slice, paint, through, every, weldCorners };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxEdits;

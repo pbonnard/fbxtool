@@ -191,6 +191,18 @@ body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
   gap: 4px;
 }
 
+/* Material names are as long as the file made them; the list is not. */
+.part-actions select {
+  max-width: 170px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: #1c2028;
+  border: 1px solid #2c313b;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
 .part-actions button {
   font-family: var(--mono);
   font-size: 11px;

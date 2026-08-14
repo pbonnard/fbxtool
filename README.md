@@ -384,6 +384,30 @@ whole scene back at once. Changing the smoothing level rebuilds the geometry
 and so renumbers its triangles; the edits cannot survive that, so the scene
 comes back whole and says so.
 
+### Changing what a part is made of
+
+The dropdown in the part readout says what the selected part wears and gives it
+something else — any material already in the file, or **+ new material**, which
+adds one to the palette and puts it on. A new material starts as a plain grey
+so that adding one shows; the **Materials** tab is where it becomes what it
+needs to be, and it is edited, saved and reset there like any material the file
+brought with it.
+
+The whole part takes the material, because a part is the unit being dressed. To
+repaint only some of it, split it first — `by material` on a body that ships
+with its glass merged in gives two parts, and each can then be dressed on its
+own. `as the file has it` puts a part back in what it came in.
+
+This is the same kind of edit as a delete: it lives in the segment list, so
+`Ctrl+Z` undoes it, **Restore all** clears it, and the Report's **Edits**
+section counts the parts wearing something new and names the materials added.
+The export follows too — a material given by hand is written onto the end of
+that part's own palette and its triangles pointed at it, so a part reassigned
+no longer shares a mesh with the untouched instances of the same geometry,
+while everything else goes on sharing as before. A material the file never had
+comes out as a material in the `.glb`, used by the part it was given to, and
+the Khronos validator reports nothing.
+
 ### Smoothing a cage
 
 A model can look faceted not because the viewer is dropping detail but because
@@ -656,6 +680,11 @@ JSON:
 
 Drop that file back in — on its own or alongside the model — to apply it again,
 so an assignment can travel with a model that does not carry its own.
+
+What that file records is how a material *looks*. Which part *wears* it, and
+any material added by hand, are edits to the scene rather than to the palette:
+they live with the deletes and splits above, undo with them, and are gone when
+the model is opened afresh.
 
 ### Transparency
 

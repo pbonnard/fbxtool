@@ -38,6 +38,8 @@ const state = (page) => page.evaluate(() => {
     edits: window.fbxtool.edits && {
       removed: window.fbxtool.edits.removed.map((r) => r.name),
       split: window.fbxtool.edits.split.length,
+      assigned: window.fbxtool.edits.assigned,
+      added: window.fbxtool.edits.added,
       parts: window.fbxtool.edits.parts,
       triangles: window.fbxtool.edits.triangles,
     },
@@ -234,6 +236,58 @@ async function main() {
     } else {
       console.log('  --   no part in this file wears more than one material');
     }
+
+    // ---- materials
+    const beforeMaterials = await state(page);
+    const dressed = await page.evaluate(() => {
+      const groups = window.fbxtool.materials;
+      if (groups.length < 2) return null;
+      const worn = (window.fbxtool.partTable[0].materials || [])[0];
+      const target = groups.find((group) => group.name !== worn) || groups[0];
+      window.fbxtool.selectPart(0);
+      window.fbxtool.assignMaterial(0, target.slots[0]);
+      return {
+        name: target.name,
+        wearing: window.fbxtool.partTable[0].materials,
+        triangles: window.fbxtool.viewer.triangleCount,
+        palette: window.fbxtool.palette.length,
+      };
+    });
+    if (dressed) {
+      const after = await state(page);
+      check('a part can be given a different material',
+        dressed.wearing.length === 1 && dressed.wearing[0] === dressed.name,
+        `${after.names[0]} wears ${dressed.wearing.join(', ')}`);
+      check('and the geometry is untouched by it',
+        dressed.triangles === beforeMaterials.drawn && after.parts === beforeMaterials.parts,
+        `${dressed.triangles.toLocaleString()} triangles, ${after.parts} parts`);
+      check('the report counts it as a change to the scene',
+        after.edits && after.edits.assigned === 1, `${after.edits && after.edits.assigned}`);
+    }
+
+    const added = await page.evaluate(() => {
+      const before = window.fbxtool.palette.length;
+      window.fbxtool.selectPart(0);
+      window.fbxtool.addMaterial(0);
+      const name = window.fbxtool.edits.added[0];
+      const wearing = window.fbxtool.partTable[0].materials.slice();
+      const grown = window.fbxtool.palette.length;
+      window.fbxtool.undo();
+      const undone = window.fbxtool.palette.length;
+      window.fbxtool.redo();
+      return { before, name, wearing, grown, undone, redone: window.fbxtool.palette.length };
+    });
+    check('a material that is not in the file can be added and worn',
+      added.grown === added.before + 1 && added.wearing.length === 1
+      && added.wearing[0] === added.name, `${added.name} on the first part`);
+    check('undo takes it back off the palette, redo puts it back',
+      added.undone === added.before && added.redone === added.before + 1,
+      `${added.before} -> ${added.grown} -> ${added.undone} -> ${added.redone}`);
+    const dressedExport = await exported(page);
+    check('and an export writes the scene wearing it',
+      dressedExport && dressedExport.triangles === (await state(page)).drawn,
+      dressedExport ? `${dressedExport.triangles.toLocaleString()} written, `
+        + `${dressedExport.materials} material(s)` : 'nothing written');
 
     // ---- restore
     // Whatever the file allowed above, leave the scene edited so that putting

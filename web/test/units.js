@@ -519,6 +519,17 @@ check('carrying its materials, normals and UVs across',
   `uvs start ${middle.uvs[0]}, ${middle.uvs[6]}`);
 check('slicing nothing keeps the part it was given',
   FbxEdits.slice(piecePart, null) === piecePart);
+
+const oneMaterial = FbxEdits.paint(piecePart, 7);
+check('a part can be given one material throughout',
+  [...oneMaterial.materials].every((slot) => slot === 7)
+  && oneMaterial.triangleCount === piecePart.triangleCount);
+check('and the part it was painted from is left as it was',
+  [...piecePart.materials].join('') === '000000111111111000',
+  [...piecePart.materials].join(''));
+check('painting keeps the geometry itself untouched',
+  oneMaterial.positions === piecePart.positions
+  && oneMaterial.normals === piecePart.normals);
 check('a split of a split still points at the original triangles',
   // The second shell is triangles 3 and 4; its own first triangle is 3.
   [...FbxEdits.through(shells[1], Int32Array.from([0]))].join(',') === '3');

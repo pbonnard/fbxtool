@@ -253,6 +253,10 @@ const FbxReport = (function () {
         + `${number(edits.removed.reduce((sum, p) => sum + p.triangles, 0))} triangles` : null],
       ['Split', edits.split.length
         ? edits.split.map((s) => `${s.name} into ${s.into}`).join(', ') : null],
+      ['Materials changed', edits.assigned
+        ? `${number(edits.assigned)} part(s) wear a material the file did not give them` : null],
+      ['Materials added', edits.added && edits.added.length
+        ? edits.added.join(', ') : null],
     ];
     let body = rows(pairs);
     if (edits.removed.length) {

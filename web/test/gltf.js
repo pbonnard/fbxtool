@@ -377,6 +377,9 @@ async function main() {
       window.fbxtool.splitPart(biggest, 'shells');   // refused if it is all one piece
       window.fbxtool.selectPart(0);
       window.fbxtool.deletePart(0);
+      // A material of the viewer's own, on a part that came out of the file.
+      window.fbxtool.selectPart(0);
+      window.fbxtool.addMaterial(0);
       return window.fbxtool.viewer.triangleCount;
     });
     if (left) {
@@ -393,6 +396,12 @@ async function main() {
           .reduce((n, prim) => n + cut.json.accessors[prim.indices].count / 3, 0), 0);
       check('an edited scene exports as what is left of it', remaining === left,
         `${remaining.toLocaleString()} of ${left.toLocaleString()}`);
+      const invented = (cut.json.materials || []).find((m) => m.name === 'New material');
+      const wears = placements(cut.json).some((p) => cut.json.meshes[p.mesh].primitives
+        .some((prim) => cut.json.materials[prim.material]
+          && cut.json.materials[prim.material].name === 'New material'));
+      check('with a material the file never had, on the part it was given to',
+        !!invented && wears, invented ? 'written and used' : 'missing');
       if (validator) {
         const report = await validator.validateBytes(editedBytes);
         check('and what comes out is still a valid glTF',

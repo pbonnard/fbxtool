@@ -197,6 +197,18 @@ body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
   gap: 4px;
 }
 
+/* Material names are as long as the file made them; the list is not. */
+.part-actions select {
+  max-width: 170px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: #1c2028;
+  border: 1px solid #2c313b;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
 .part-actions button {
   font-family: var(--mono);
   font-size: 11px;
@@ -503,6 +515,7 @@ ul.record-tree .count { color: var(--muted); }
     <div id="part-info" class="part-info" hidden>
       <span id="part-name" class="part-name"></span>
       <span class="part-actions">
+        <select id="part-material" title="The material this part wears"></select>
         <button id="part-split" type="button"
           title="Cut this part into the loose pieces it is made of (S)">split</button>
         <button id="part-split-material" type="button"
@@ -4445,6 +4458,19 @@ const FbxEdits = (function () {
     };
   }
 
+  /**
+   * The same piece wearing one material throughout.
+   *
+   * A copy rather than a repaint in place: a piece cut from a part that has
+   * not been split is that part's own piece, and the part must still be there
+   * to go back to.
+   */
+  function paint(piece, slot) {
+    const materials = new Float32Array(piece.triangleCount * 3);
+    materials.fill(slot);
+    return { ...piece, materials };
+  }
+
   /** Read a list of triangles back through the one it was taken from. */
   function through(outer, inner) {
     if (!outer) return inner;
@@ -4460,7 +4486,7 @@ const FbxEdits = (function () {
     return faces;
   }
 
-  return { shells, byMaterial, slice, through, every, weldCorners };
+  return { shells, byMaterial, slice, paint, through, every, weldCorners };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxEdits;
@@ -4721,6 +4747,10 @@ const FbxReport = (function () {
         + `${number(edits.removed.reduce((sum, p) => sum + p.triangles, 0))} triangles` : null],
       ['Split', edits.split.length
         ? edits.split.map((s) => `${s.name} into ${s.into}`).join(', ') : null],
+      ['Materials changed', edits.assigned
+        ? `${number(edits.assigned)} part(s) wear a material the file did not give them` : null],
+      ['Materials added', edits.added && edits.added.length
+        ? edits.added.join(', ') : null],
     ];
     let body = rows(pairs);
     if (edits.removed.length) {
@@ -6296,6 +6326,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     explodeSlider: $('explode-slider'),
     partInfo: $('part-info'),
     partName: $('part-name'),
+    partMaterial: $('part-material'),
     partSplit: $('part-split'),
     partSplitMaterial: $('part-split-material'),
     partDelete: $('part-delete'),
@@ -6355,6 +6386,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   let segments = null;
   let baseSegments = null;
   const history = { past: [], future: [] };
+  /** Materials added to the file's own, and how many of them the scene is
+   *  currently using: undo hides the last one rather than renumbering the
+   *  palette underneath the parts that were assigned earlier slots. */
+  let extraMaterials = [];
+  let extraCount = 0;
   /** Segments are told apart by identity, which the glTF export needs to keep
    *  instancing: two parts cut from one geometry share a mesh only while
    *  neither has been edited. */
@@ -6718,17 +6754,23 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    * triangles it kept. A part deleted is a segment gone from the list.
    */
   function assemble(built, segments) {
+    // Materials added by hand sit after the file's own, so a slot means the
+    // same thing however many are added.
+    const palette = built.palette.concat(extraMaterials.slice(0, extraCount));
     const pieces = [];
     const kept = [];
     for (const segment of segments) {
       const source = built.pieces[segment.source];
       if (!source) continue;
-      const piece = FbxEdits.slice(source, segment.faces);
+      let piece = FbxEdits.slice(source, segment.faces);
       if (!piece.triangleCount) continue;
+      if (segment.material != null && palette[segment.material]) {
+        piece = FbxEdits.paint(piece, segment.material);
+        piece.materialNames = [palette[segment.material].name];
+      }
       pieces.push(segment.name ? { ...piece, name: segment.name } : piece);
       kept.push(segment);
     }
-    const palette = built.palette;
     if (!pieces.length) return null;
 
     const triangleCount = pieces.reduce((sum, p) => sum + p.triangleCount, 0);
@@ -6795,8 +6837,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    * export writes and what the report counts all read the same list.
    */
 
-  const newSegment = (source, name, faces) => (
-    { id: ++segmentSerial, source, name, faces });
+  const newSegment = (source, name, faces, material = null) => (
+    { id: ++segmentSerial, source, name, faces, material });
+
+  /** Everything an edit can change, and everything undo has to put back. */
+  const snapshot = () => ({ segments, extras: extraCount });
+
+  function restore(state) {
+    segments = state.segments;
+    extraCount = state.extras;
+  }
 
   /**
    * Number the parts afresh: the scene exactly as the file holds it.
@@ -6812,6 +6862,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         .filter(Boolean)
       : [];
     segments = baseSegments;
+    extraMaterials = [];
+    extraCount = 0;
     history.past.length = 0;
     history.future.length = 0;
   }
@@ -6819,11 +6871,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   const currentSegments = () => segments || [];
 
   /** Whether what is on screen still is what the file holds. */
-  const edited = () => segments !== null && segments !== baseSegments;
+  const edited = () => (segments !== null && segments !== baseSegments) || extraCount > 0;
 
   function resetEdits() {
     segments = null;
     baseSegments = null;
+    extraMaterials = [];
+    extraCount = 0;
     history.past.length = 0;
     history.future.length = 0;
   }
@@ -6838,6 +6892,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     }
     const removed = [];
     const split = [];
+    const assigned = segments.filter((segment) => segment.material != null).length;
     // The models themselves, not their names or their keys: the report holds
     // the same objects, so identity is the one test that cannot drift.
     const removedModels = new Set();
@@ -6854,12 +6909,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         return;
       }
       if (here.length > 1) split.push({ name: piece.name, into: here.length });
-      if (model && (here.length > 1 || held < piece.triangleCount)) editedModels.add(model);
+      if (model && (here.length > 1 || held < piece.triangleCount
+        || here.some((segment) => segment.material != null))) editedModels.add(model);
     });
-    if (!removed.length && !split.length) return null;
+    if (!removed.length && !split.length && !assigned && !extraCount) return null;
     return {
       removed,
       split,
+      assigned,
+      added: extraMaterials.slice(0, extraCount).map((material) => material.name),
       removedModels,
       editedModels,
       parts: partTable.length,
@@ -6918,14 +6976,21 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const bits = [];
     if (summary.removed.length) bits.push(`${summary.removed.length} removed`);
     if (summary.split.length) bits.push(`${summary.split.length} split`);
+    if (summary.assigned) bits.push(`${summary.assigned} reassigned`);
+    if (summary.added.length) bits.push(`${summary.added.length} new material`
+      + (summary.added.length === 1 ? '' : 's'));
     return ` · ${bits.join(', ')} — Ctrl+Z to undo`;
   }
 
-  /** Put a new scene in place, keeping the way back to the old one. */
+  /**
+   * Put a new scene in place, keeping the way back to the old one. A plain
+   * list of segments leaves the palette alone; an edit that adds a material
+   * passes both halves of the state.
+   */
   function applyEdit(next, note) {
-    history.past.push(segments);
+    history.past.push(snapshot());
     history.future.length = 0;
-    segments = next;
+    restore(Array.isArray(next) ? { segments: next, extras: extraCount } : next);
     refreshEdited(note);
   }
 
@@ -6989,24 +7054,102 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     setSelectedPart(partTable.findIndex((entry) => entry.segment === made[0]));
   }
 
+  /**
+   * Give a part a different material.
+   *
+   * The whole part takes it — a part wearing several materials is one part,
+   * and this is what it wears now. To repaint only some of it, split it by
+   * material first and assign to the piece.
+   */
+  function assignMaterial(index, slot) {
+    const part = partTable[index];
+    if (!part || !part.segment) return;
+    const name = nameOfSlot(slot);
+    const next = currentSegments().map((segment) => (segment === part.segment
+      ? { ...segment, material: slot } : segment));
+    applyEdit(next, `${part.name} wears ${name}.`);
+    setSelectedPart(index);
+  }
+
+  /** Put the part back in whatever the file dressed it in. */
+  function unassignMaterial(index) {
+    const part = partTable[index];
+    if (!part || !part.segment || part.segment.material == null) return;
+    const next = currentSegments().map((segment) => (segment === part.segment
+      ? { ...segment, material: null } : segment));
+    applyEdit(next, `${part.name} is back in the file's own materials.`);
+    setSelectedPart(index);
+  }
+
+  /**
+   * A material that is not in the file, added to the palette and put on the
+   * part that asked for it.
+   *
+   * It starts as a plain mid-grey rather than a copy of what the part wore, so
+   * that adding one shows: the Materials tab is where it becomes what it needs
+   * to be, and it is edited there like any other.
+   */
+  function addMaterial(index) {
+    if (!builtPieces) return;
+    const taken = new Set([...builtPieces.palette, ...extraMaterials].map((m) => m.name));
+    let name = 'New material';
+    for (let n = 2; taken.has(name); n++) name = `New material ${n}`;
+    const colour = [0.55, 0.55, 0.55];
+    const material = {
+      name,
+      uid: null,
+      colour: colour.slice(),
+      specular: [0.04, 0.04, 0.04],
+      roughness: 0.4,
+      opacity: 1,
+      metallic: 0,
+      // Nothing in the file to go back to, so its own values stand as that.
+      fromFile: {
+        colour: colour.slice(),
+        specular: [0.04, 0.04, 0.04],
+        roughness: 0.4,
+        opacity: 1,
+        metallic: 0,
+      },
+      texture: null,
+      layer: -1,
+    };
+    // Kept beyond an undo so that the slots handed out earlier keep pointing
+    // at the same material; how many count is what undo puts back.
+    extraMaterials = extraMaterials.slice(0, extraCount);
+    extraMaterials.push(material);
+    const slot = builtPieces.palette.length + extraMaterials.length - 1;
+
+    const part = partTable[index];
+    const next = part && part.segment
+      ? currentSegments().map((segment) => (segment === part.segment
+        ? { ...segment, material: slot } : segment))
+      : currentSegments();
+    applyEdit({ segments: next, extras: extraMaterials.length },
+      `Added ${name}${part ? ` and put it on ${part.name}` : ''} `
+      + '— the Materials tab is where to colour it.');
+    if (index >= 0) setSelectedPart(index);
+  }
+
   /** What the material in a slot is called, for naming a split. */
   function nameOfSlot(slot) {
-    const entry = currentPalette[slot] || (builtPieces && builtPieces.palette[slot]);
+    const entry = currentPalette[slot]
+      || (builtPieces && builtPieces.palette.concat(extraMaterials)[slot]);
     return (entry && entry.name) || `material ${slot}`;
   }
 
   function undoEdit() {
     if (!history.past.length) return;
-    history.future.push(segments);
-    segments = history.past.pop();
+    history.future.push(snapshot());
+    restore(history.past.pop());
     setSelectedPart(-1);
     refreshEdited(edited() ? 'Undone.' : 'Back to the scene as the file holds it.');
   }
 
   function redoEdit() {
     if (!history.future.length) return;
-    history.past.push(segments);
-    segments = history.future.pop();
+    history.past.push(snapshot());
+    restore(history.future.pop());
     setSelectedPart(-1);
     refreshEdited('Redone.');
   }
@@ -7014,7 +7157,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   function restoreAll() {
     if (!edited()) return;
     setSelectedPart(-1);
-    applyEdit(baseSegments, 'Every part put back.');
+    applyEdit({ segments: baseSegments, extras: 0 },
+      'Every part put back, and the file\'s own materials with it.');
   }
 
   /** Offer the edit controls only where they mean something. */
@@ -7025,8 +7169,52 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     dom.partSplitMaterial.disabled = !splittable
       || (part.materials || []).length < 2;
     dom.partDelete.disabled = !part;
+    dom.partMaterial.disabled = !splittable;
+    fillMaterialChoices(part);
     dom.restoreAll.hidden = !edited() && !history.past.length;
     dom.restoreAll.disabled = !edited();
+  }
+
+  /**
+   * The materials a part could wear: one entry per material rather than one
+   * per slot, since a file gives every part its own copy of the same few.
+   */
+  function fillMaterialChoices(part) {
+    const worn = part && part.segment ? part.segment.material : null;
+    const own = (part && part.materials) || [];
+    // What the list should be sitting on: the material given by hand, or the
+    // one the file gave it where there is only one to name.
+    let chosen = -1;
+    if (worn != null && currentPalette[worn]) chosen = currentPalette[worn].group;
+    else if (own.length === 1) {
+      const group = materialGroups.find((entry) => entry.name === own[0]);
+      chosen = group ? group.index : -1;
+    }
+    const first = worn != null ? 'as the file has it'
+      : (own.length > 1 ? `${own.length} materials` : '—');
+    const options = [{ value: '', label: first }];
+    for (const group of materialGroups) {
+      options.push({ value: String(group.slots[0]), label: group.name, group: group.index });
+    }
+    options.push({ value: 'new', label: '+ new material' });
+
+    const shape = options.map((o) => `${o.value}:${o.label}`).join('|');
+    if (dom.partMaterial.dataset.shape !== shape) {
+      dom.partMaterial.innerHTML = '';
+      for (const option of options) {
+        const element = document.createElement('option');
+        element.value = option.value;
+        element.textContent = option.label;
+        dom.partMaterial.appendChild(element);
+      }
+      dom.partMaterial.dataset.shape = shape;
+    }
+    const wearing = chosen >= 0
+      ? options.find((option) => option.group === chosen) : null;
+    dom.partMaterial.value = wearing ? wearing.value : '';
+    dom.partMaterial.title = part && worn != null
+      ? `Wearing ${nameOfSlot(worn)} — assigned here, not in the file`
+      : 'The material this part wears';
   }
 
   /** The report, with whatever has been done to the scene since it was read. */
@@ -7376,21 +7564,39 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       return Int32Array.from(all.sort((a, b) => a - b));
     };
 
+    /**
+     * Which material each of a part's triangles was given by hand, in the
+     * part's own numbering. -1 where the file's own material still stands.
+     */
+    const assignedOf = (index, count) => {
+      const here = kept.get(index) || [];
+      if (!count || !here.some((segment) => segment.material != null)) return null;
+      const slots = new Int32Array(count).fill(-1);
+      for (const segment of here) {
+        if (segment.material == null) continue;
+        const faces = segment.faces || FbxEdits.every(count);
+        for (const face of faces) slots[face] = segment.material;
+      }
+      return slots;
+    };
+
     const meshFor = (part, index) => {
       const faces = facesOf(index);
       if (faces === undefined) return -1;         // deleted
+      const here = kept.get(index) || [];
       const geometric = FbxTransform.geometricMatrix(part.properties);
       // Keyed by what would actually be written: the geometry, the materials
       // by name — the exporter folds same-named materials into one anyway —
-      // the geometric offset that gets baked in, and what is left of the part
-      // after any edit. Four wheels cut from one mesh share all of that, so
-      // they share a mesh; a wheel that has been cut down no longer does.
+      // the geometric offset that gets baked in, and what any edit left of the
+      // part. Four wheels cut from one mesh share all of that, so they share a
+      // mesh; a wheel cut down, or repainted, no longer does.
+      const touched = here.some((segment) => segment.faces || segment.material != null);
       const key = [
         objectIndex.keyOf(part.geometry),
         part.materials.map((material) => material.displayName).join(','),
         geometric ? geometric.join(',') : '',
         subdivisionLevel,
-        faces ? (kept.get(index) || []).map((segment) => segment.id).join('+') : 'all',
+        touched ? here.map((segment) => segment.id).join('+') : 'all',
       ].join('|');
       if (meshOf.has(key)) return meshOf.get(key);
 
@@ -7420,9 +7626,32 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         // transform differs. If the two ever disagreed on how many there are,
         // the numbering would mean nothing, so the whole part is written.
         const source = builtPieces && builtPieces.pieces[index];
-        if (faces && source && source.triangleCount === written.triangleCount) {
+        const matched = source && source.triangleCount === written.triangleCount;
+        let palette = FbxPalette.apply(part.materials.map(materialEntry), materialOverrides);
+
+        // A material given to a part by hand is not one of that part's own, so
+        // it goes on the end of its palette and the triangles are pointed at
+        // it. This happens before the slice, while the numbering is still the
+        // part's own.
+        const assigned = matched ? assignedOf(index, written.triangleCount) : null;
+        if (assigned) {
+          const local = new Map();
+          for (let face = 0; face < written.triangleCount; face++) {
+            const slot = assigned[face];
+            if (slot < 0 || !currentPalette[slot]) continue;
+            if (!local.has(slot)) {
+              local.set(slot, palette.length);
+              palette = palette.concat([currentPalette[slot]]);
+            }
+            const at3 = face * 3;
+            written.materials[at3] = local.get(slot);
+            written.materials[at3 + 1] = local.get(slot);
+            written.materials[at3 + 2] = local.get(slot);
+          }
+        }
+        if (faces && matched) {
           written = FbxEdits.slice(written, faces);
-        } else if (faces) {
+        } else if (faces || (touched && !matched)) {
           console.warn(`${part.model.displayName}: exported whole — `
             + 'the edited mesh and the one being written do not match');
         }
@@ -7431,7 +7660,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
           meshes.push({
             name: part.geometry.displayName || part.model.displayName,
             mesh: written,
-            palette: FbxPalette.apply(part.materials.map(materialEntry), materialOverrides),
+            palette,
           });
         }
       }
@@ -8194,6 +8423,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const box = dom.canvas.getBoundingClientRect();
       setSelectedPart(viewer.pickPart(event.clientX - box.left, event.clientY - box.top));
     });
+    dom.partMaterial.addEventListener('change', () => {
+      const chosen = dom.partMaterial.value;
+      if (selectedPart < 0) return;
+      if (chosen === 'new') addMaterial(selectedPart);
+      else if (chosen === '') unassignMaterial(selectedPart);
+      else assignMaterial(selectedPart, Number(chosen));
+    });
     dom.partSplit.addEventListener('click', () => splitPart(selectedPart, 'shells'));
     dom.partSplitMaterial.addEventListener('click', () => splitPart(selectedPart, 'material'));
     dom.partDelete.addEventListener('click', () => deletePart(selectedPart));
@@ -8273,6 +8509,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       get segments() { return currentSegments(); },
       deletePart,
       splitPart,
+      assignMaterial,
+      unassignMaterial,
+      addMaterial,
       undo: undoEdit,
       redo: redoEdit,
       restoreAll,
