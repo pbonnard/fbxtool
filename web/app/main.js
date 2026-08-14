@@ -707,8 +707,28 @@
   /** Remember the materials, and who is wearing them, against this file. */
   function persist() {
     if (!currentDoc) return;
+    if (builtPieces) reconcileAddedMaterials();
     partAssignments = partMap();
     FbxPalette.save(currentDoc.fileName, materialOverrides, partAssignments);
+  }
+
+  /**
+   * Keep the record of what was added in step with what is actually built.
+   *
+   * A material undone is no longer part of the scene, so its settings should
+   * not outlive it and come back on the next opening; one that a redo brought
+   * back needs its record again. The file's own materials are never in
+   * question here — they exist whether anything is set on them or not.
+   */
+  function reconcileAddedMaterials() {
+    const inFile = fileMaterialNames();
+    const live = new Set(extraMaterials.slice(0, extraCount).map(originOf));
+    for (const key of Object.keys(materialOverrides)) {
+      if (!inFile.has(key) && !live.has(key)) delete materialOverrides[key];
+    }
+    for (const key of live) {
+      if (!materialOverrides[key]) materialOverrides[key] = { added: true };
+    }
   }
 
   /** What has been done to the scene, for the readout and for the report. */
@@ -947,16 +967,24 @@
 
   function addMaterial(index) {
     if (!builtPieces) return;
-    const taken = new Set([...builtPieces.palette, ...extraMaterials].map((m) => m.name));
+    /* Both names of everything already here, and every name the assignment has
+     * settings under. A material restored from an assignment goes by one name
+     * and is filed under another, and taking the one it is filed under would
+     * make the two of them one material: same origin, same settings, merged
+     * into a single row, and nothing to show for the click. */
+    const taken = new Set(Object.keys(materialOverrides));
+    for (const material of [...builtPieces.palette, ...extraMaterials]) {
+      taken.add(material.name);
+      taken.add(originOf(material));
+    }
     let name = 'New material';
     for (let n = 2; taken.has(name); n++) name = `New material ${n}`;
     // Kept beyond an undo so that the slots handed out earlier keep pointing
     // at the same material; how many count is what undo puts back.
     extraMaterials = extraMaterials.slice(0, extraCount);
+    // That it was made here is written down when the edit is remembered,
+    // along with everything else the scene now holds.
     extraMaterials.push(newMaterial(name));
-    // Written down as one of ours: nothing in the file would rebuild it, so
-    // the assignment has to say that it was made here.
-    materialOverrides[name] = Object.assign({ added: true }, materialOverrides[name]);
     const slot = builtPieces.palette.length + extraMaterials.length - 1;
 
     const part = partTable[index];

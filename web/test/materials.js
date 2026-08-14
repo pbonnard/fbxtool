@@ -446,6 +446,51 @@ ${path.basename(second)}`);
     alone2.twice.length === 0 && alone2.worn, alone2.rows.join(', '));
   await page.evaluate(() => window.fbxtool.clearMaterials());
 
+  /* Adding one more, on a model opened with an assignment that already added
+   * a material. The restored one goes by one name and is filed under another,
+   * so the obvious name for a new one is the very name it is filed under —
+   * take that and the two become one material with nothing to show. */
+  console.log('\nadding one more');
+  const broughtPath = path.join(path.dirname(await addedFile.path()), 'brought.json');
+  fs.writeFileSync(broughtPath, JSON.stringify({
+    fbxtoolMaterials: 1,
+    materials: { 'New material': { added: true, name: 'Grass', colour: [0, 0.7, 0.1] } },
+  }, null, 2));
+
+  await fresh();
+  await page.setInputFiles('#file-input', [target, broughtPath]);
+  await page.waitForFunction(() => window.fbxtool.loadCount > 0, { timeout: 180000 });
+  await page.waitForTimeout(400);
+  const carried = await page.evaluate(() =>
+    [...document.querySelectorAll('.material .material-name')].map((e) => e.textContent));
+  check('the assignment brings its material in', carried.includes('Grass'), carried.join(', '));
+
+  const one = await page.evaluate(() => {
+    window.fbxtool.selectPart(0);
+    window.fbxtool.addMaterial(0);
+    return {
+      rows: [...document.querySelectorAll('.material .material-name')].map((e) => e.textContent),
+      wearing: window.fbxtool.partTable[0].materials,
+      records: Object.keys(window.fbxtool.overrides),
+    };
+  });
+  check('and another can still be added beside it',
+    one.rows.length === carried.length + 1 && one.wearing.length === 1
+    && one.wearing[0] !== 'New material' && one.rows.includes('Grass'),
+    `${one.rows.join(', ')} — the part wears ${one.wearing.join(', ')}`);
+
+  const undone = await page.evaluate(() => {
+    window.fbxtool.undo();
+    return {
+      rows: [...document.querySelectorAll('.material .material-name')].map((e) => e.textContent),
+      records: Object.keys(window.fbxtool.overrides),
+    };
+  });
+  check('undoing it takes its record away as well, so it cannot come back',
+    undone.rows.length === carried.length && undone.records.length === 1,
+    `${undone.rows.join(', ')} · ${undone.records.join(', ')}`);
+  await page.evaluate(() => window.fbxtool.clearMaterials());
+
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 
   await browser.close();
