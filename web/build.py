@@ -37,6 +37,7 @@ SCRIPTS = [
     "analyze.js",
     "palette.js",
     "gltf.js",
+    "edits.js",
     "report.js",
     "viewer.js",
     "main.js",

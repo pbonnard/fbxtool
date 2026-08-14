@@ -481,6 +481,37 @@ def test_parts_explode_and_pick(built):
 
 @needs_clang
 @needs_node
+def test_parts_delete_and_split(built):
+    """Taking a part out of a scene, and cutting one into its pieces.
+
+    Nothing is allowed to go missing on the way: a delete takes exactly its own
+    triangles out of the screen, the report and the export, a split moves none
+    at all, and undo puts the count back where it started.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = _run(
+        ["node", str(WEB / "test" / "edits.js"),
+         str(ROOT / "samples" / "scene_parts.fbx"),
+         str(ROOT / "samples" / "Shelby.fbx")],
+        env=_node_env(), timeout=900)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+    # A wheel saved as one mesh really is many loose pieces, and the split
+    # keeps every triangle of it. Node groups digits in whatever the machine's
+    # locale asks for, which need not be a plain space.
+    grouped = result.stdout.replace(" ", " ").replace(" ", " ")
+    assert "122 112 of 122 112" in grouped
+
+
+@needs_clang
+@needs_node
 def test_ground_and_shadows(built):
     """The model stands on a floor and drops a shadow onto it."""
     try:

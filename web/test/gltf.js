@@ -365,6 +365,43 @@ async function main() {
         report.issues.numErrors === 0 && report.issues.numWarnings === 0,
         messages.slice(0, 4).join('; ') || 'no errors, no warnings');
     }
+    // ---- the same scene with a part taken out of it, and another cut up
+    const left = await page.evaluate(() => {
+      if (window.fbxtool.partTable.length < 2) return null;
+      const table = window.fbxtool.partTable;
+      let biggest = 0;
+      table.forEach((part, index) => {
+        if (part.triangles > table[biggest].triangles) biggest = index;
+      });
+      window.fbxtool.selectPart(biggest);
+      window.fbxtool.splitPart(biggest, 'shells');   // refused if it is all one piece
+      window.fbxtool.selectPart(0);
+      window.fbxtool.deletePart(0);
+      return window.fbxtool.viewer.triangleCount;
+    });
+    if (left) {
+      const [edited] = await Promise.all([
+        page.waitForEvent('download', { timeout: 180000 }),
+        page.click('#export-gltf'),
+      ]);
+      const editedPath = path.join(path.dirname(await edited.path()), 'edited.glb');
+      await edited.saveAs(editedPath);
+      const editedBytes = new Uint8Array(fs.readFileSync(editedPath));
+      const cut = readGlb(editedBytes);
+      const remaining = placements(cut.json).reduce((sum, p) => sum
+        + cut.json.meshes[p.mesh].primitives
+          .reduce((n, prim) => n + cut.json.accessors[prim.indices].count / 3, 0), 0);
+      check('an edited scene exports as what is left of it', remaining === left,
+        `${remaining.toLocaleString()} of ${left.toLocaleString()}`);
+      if (validator) {
+        const report = await validator.validateBytes(editedBytes);
+        check('and what comes out is still a valid glTF',
+          report.issues.numErrors === 0 && report.issues.numWarnings === 0,
+          `${report.issues.numErrors} error(s), ${report.issues.numWarnings} warning(s)`);
+      }
+      await page.evaluate(() => window.fbxtool.restoreAll());
+    }
+
     console.log(`       ${(stats.bytes / 1048576).toFixed(1)} MiB · `
       + `${stats.meshes} mesh(es) in ${stats.nodes} node(s) · `
       + `${stats.primitives} primitives · ${stats.images} image(s)\n`);

@@ -237,13 +237,45 @@ const FbxReport = (function () {
     return section('Objects', body);
   }
 
+  /**
+   * What has been done to the scene since the file was read.
+   *
+   * The sections above describe the file; this one describes what is on
+   * screen, and only appears once the two differ.
+   */
+  function editsSection(info) {
+    const edits = info.edits;
+    if (!edits) return '';
+    const pairs = [
+      ['Parts now', number(edits.parts)],
+      ['Triangles now', number(edits.triangles)],
+      ['Deleted', edits.removed.length ? `${number(edits.removed.length)} part(s), `
+        + `${number(edits.removed.reduce((sum, p) => sum + p.triangles, 0))} triangles` : null],
+      ['Split', edits.split.length
+        ? edits.split.map((s) => `${s.name} into ${s.into}`).join(', ') : null],
+    ];
+    let body = rows(pairs);
+    if (edits.removed.length) {
+      body += `<p class="note">${escapeHtml(edits.removed.map((p) => p.name).join(', '))}</p>`;
+    }
+    body += '<p class="note">The file itself is unchanged; an export writes '
+      + 'what is on screen.</p>';
+    return section('Edits', body);
+  }
+
   function hierarchySection(info) {
     if (!info.roots.length && !info.orphans.length) return '';
     const lines = [];
+    const edits = info.edits;
     const label = (obj) => {
       let text = obj.displayName;
       if (obj.subclass) text += `  [${obj.subclass}]`;
       if (obj.detail) text += `  (${obj.detail})`;
+      // A model whose mesh has been taken out of the scene, or cut up.
+      if (edits) {
+        if (edits.removedModels.has(obj)) text += '  ← removed';
+        else if (edits.editedModels.has(obj)) text += '  ← edited';
+      }
       return text;
     };
     const walk = (node, prefix) => {
@@ -343,6 +375,7 @@ const FbxReport = (function () {
   function render(info) {
     return [
       fileSection(info),
+      editsSection(info),
       warningsSection(info),
       metadataSection(info),
       settingsSection(info),

@@ -16,6 +16,7 @@ const FbxAscii = require(path.join(APP, 'ascii.js'));
 const FbxAnalyze = require(path.join(APP, 'analyze.js'));
 const FbxPalette = require(path.join(APP, 'palette.js'));
 const FbxGltf = require(path.join(APP, 'gltf.js'));
+const FbxEdits = require(path.join(APP, 'edits.js'));
 
 let failures = 0;
 
@@ -450,6 +451,80 @@ check('every accessor sits inside its bufferView', gltf.accessors.every((a) => {
   const size = { SCALAR: 1, VEC2: 2, VEC3: 3 }[a.type] * (a.componentType === 5125 ? 4 : 4);
   return a.count * size <= view.byteLength && ((view.byteOffset || 0) % 4) === 0;
 }));
+console.log('\nedits: taking a part apart');
+/* Six triangles making three loose pieces, laid out so that the two ways of
+ * splitting disagree — the shells cut it 3/2/1, the materials 3/3:
+ *
+ *   A: t0 t1 t2   at the origin      materials 0 0 1
+ *   B: t3 t4      ten units along    materials 1 1
+ *   C: t5         twenty along       material  0
+ */
+const piecePart = (() => {
+  const triangles = [
+    { corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0]], material: 0 },
+    { corners: [[0, 0, 0], [1, 1, 0], [0, 1, 0]], material: 0 },
+    { corners: [[1, 0, 0], [2, 0, 0], [1, 1, 0]], material: 1 },
+    { corners: [[10, 0, 0], [11, 0, 0], [11, 1, 0]], material: 1 },
+    { corners: [[10, 0, 0], [11, 1, 0], [10, 1, 0]], material: 1 },
+    { corners: [[20, 0, 0], [21, 0, 0], [21, 1, 0]], material: 0 },
+  ];
+  const positions = new Float32Array(triangles.length * 9);
+  const normals = new Float32Array(triangles.length * 9);
+  const uvs = new Float32Array(triangles.length * 6);
+  const materials = new Float32Array(triangles.length * 3);
+  triangles.forEach((triangle, t) => {
+    triangle.corners.forEach((corner, c) => {
+      corner.forEach((value, k) => { positions[t * 9 + c * 3 + k] = value; });
+      normals[t * 9 + c * 3 + 2] = 1;
+      uvs[t * 6 + c * 2] = t;              // u names the triangle,
+      uvs[t * 6 + c * 2 + 1] = c;          // v the corner
+      materials[t * 3 + c] = triangle.material;
+    });
+  });
+  return {
+    positions, normals, uvs, materials, hasUv: true, name: 'test',
+    triangleCount: triangles.length, polygonCount: triangles.length,
+    min: [0, 0, 0], max: [21, 1, 0],
+  };
+})();
+
+const shells = FbxEdits.shells(piecePart);
+check('the loose pieces come back biggest first',
+  shells.length === 3 && shells.map((s) => s.length).join(',') === '3,2,1',
+  shells.map((s) => `[${s.join(' ')}]`).join(' '));
+check('and each holds the triangles that touch',
+  shells[0].join(' ') === '0 1 2' && shells[1].join(' ') === '3 4'
+  && shells[2].join(' ') === '5');
+check('triangles are welded by where their corners are, not by being one vertex',
+  // t0 and t1 share two corners, written out twice each in the soup.
+  shells[0].length === 3);
+
+const materialGroups = FbxEdits.byMaterial(piecePart);
+check('by material cuts it a different way, in slot order',
+  materialGroups.length === 2 && materialGroups[0].slot === 0 && materialGroups[1].slot === 1,
+  materialGroups.map((g) => `${g.slot}:[${[...g.faces].join(' ')}]`).join(' '));
+check('with every triangle in exactly one group',
+  materialGroups[0].faces.join(' ') === '0 1 5'
+  && materialGroups[1].faces.join(' ') === '2 3 4');
+
+const middle = FbxEdits.slice(piecePart, shells[1]);
+check('a slice holds only the triangles named', middle.triangleCount === 2);
+check('and is measured where it actually stands',
+  middle.min.join(',') === '10,0,0' && middle.max.join(',') === '11,1,0',
+  `${middle.min.join(',')} .. ${middle.max.join(',')}`);
+check('carrying its materials, normals and UVs across',
+  [...middle.materials].every((m) => m === 1)
+  && middle.uvs[0] === 3 && middle.uvs[6] === 4
+  && [...middle.normals].filter((n) => n === 1).length === 6,
+  `uvs start ${middle.uvs[0]}, ${middle.uvs[6]}`);
+check('slicing nothing keeps the part it was given',
+  FbxEdits.slice(piecePart, null) === piecePart);
+check('a split of a split still points at the original triangles',
+  // The second shell is triangles 3 and 4; its own first triangle is 3.
+  [...FbxEdits.through(shells[1], Int32Array.from([0]))].join(',') === '3');
+check('and every() names them all in order',
+  [...FbxEdits.every(3)].join(',') === '0,1,2');
+
 check('an empty scene is refused', (() => {
   try {
     FbxGltf.build({ meshes: [{ mesh: { triangleCount: 0 } }], nodes: [] });

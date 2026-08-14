@@ -20,6 +20,11 @@
     upSelect: $('up-select'),
     explodeSlider: $('explode-slider'),
     partInfo: $('part-info'),
+    partName: $('part-name'),
+    partSplit: $('part-split'),
+    partSplitMaterial: $('part-split-material'),
+    partDelete: $('part-delete'),
+    restoreAll: $('restore-all'),
     spinToggle: $('spin-toggle'),
     groundToggle: $('ground-toggle'),
     textureToggle: $('texture-toggle'),
@@ -67,6 +72,18 @@
   /** The parts of what is on screen, and which one the mouse picked. */
   let partTable = [];
   let selectedPart = -1;
+  /** The pieces the last build produced, one per part, holes and all: an edit
+   *  regroups what is already built rather than building it again. */
+  let builtPieces = null;
+  /** What the scene is made of after the edits, or null for the file as read,
+   *  and the way back — every edit pushes what it replaced. */
+  let segments = null;
+  let baseSegments = null;
+  const history = { past: [], future: [] };
+  /** Segments are told apart by identity, which the glTF export needs to keep
+   *  instancing: two parts cut from one geometry share a mesh only while
+   *  neither has been edited. */
+  let segmentSerial = 0;
   let lastExport = null;
   /** The empty state of each panel, as the page was served. */
   const placeholders = {
@@ -143,6 +160,8 @@
     currentPalette = [];
     materialGroups = [];
     sceneParts = [];
+    builtPieces = null;
+    resetEdits();
     setSelectedPart(-1);
     partTable = [];
     modeChosen = false;
@@ -215,7 +234,7 @@
       }
       objectIndex = buildObjectIndex(currentAnalysis.objects);
 
-      dom.panel.innerHTML = FbxReport.render(currentAnalysis);
+      renderReport();
       dom.tree.innerHTML = FbxReport.recordTree(doc.root);
       document.body.classList.add('loaded');
       // Taken out of the layout rather than faded: assembling a large scene
@@ -358,8 +377,16 @@
     return matrix.some((value, index) => Math.abs(value - identity[index]) > 1e-9);
   }
 
-  /** Build every part, placed in world space, as one combined mesh. */
-  function buildScene(parts) {
+  /**
+   * Build every part, placed in world space, one piece each.
+   *
+   * The palette is filled for every part whether or not that part draws, so a
+   * material slot means the same thing before and after an edit: the textures
+   * resolved for it stay resolved, and the Materials tab stays where it is.
+   * Parts that build nothing keep their place in the list as a hole, so a
+   * piece can always be found by the part it came from.
+   */
+  function buildPieces(parts) {
     const frames = collectFrames();
     const cache = new Map();
     const pieces = [];
@@ -387,9 +414,8 @@
         });
       } catch (error) {
         console.warn(`skipped ${part.model.displayName}: ${error.message}`);
-        continue;
       }
-      if (!mesh || !mesh.triangleCount) continue;
+      if (!mesh || !mesh.triangleCount) { pieces.push(null); continue; }
       // Copy out now: the next build may grow memory and detach these views.
       pieces.push({
         positions: mesh.positions.slice(),
@@ -406,6 +432,28 @@
       });
       FbxWasm.release(heapMark);
     }
+    return { pieces, palette };
+  }
+
+  /**
+   * One mesh out of the parts the scene still holds.
+   *
+   * What it holds is a list of segments rather than the parts themselves: a
+   * segment names a part and, when it has been split, which of that part's
+   * triangles it kept. A part deleted is a segment gone from the list.
+   */
+  function assemble(built, segments) {
+    const pieces = [];
+    const kept = [];
+    for (const segment of segments) {
+      const source = built.pieces[segment.source];
+      if (!source) continue;
+      const piece = FbxEdits.slice(source, segment.faces);
+      if (!piece.triangleCount) continue;
+      pieces.push(segment.name ? { ...piece, name: segment.name } : piece);
+      kept.push(segment);
+    }
+    const palette = built.palette;
     if (!pieces.length) return null;
 
     const triangleCount = pieces.reduce((sum, p) => sum + p.triangleCount, 0);
@@ -442,6 +490,8 @@
         max: piece.max.slice(),
         triangles: piece.triangleCount,
         materials: piece.materialNames,
+        // What to edit when this is the part under the mouse.
+        segment: kept[index],
       });
     });
 
@@ -457,6 +507,258 @@
       parts: pieces.length,
       table,
     };
+  }
+
+  /* ----------------------------------------------------------------- edits */
+
+  /**
+   * A part removed, or cut into the pieces it is really made of.
+   *
+   * Nothing here touches the file, and nothing rebuilds geometry: the scene is
+   * described as a list of segments over the pieces already built, so an edit
+   * is a new list and undo is the list it replaced. What is on screen, what an
+   * export writes and what the report counts all read the same list.
+   */
+
+  const newSegment = (source, name, faces) => (
+    { id: ++segmentSerial, source, name, faces });
+
+  /**
+   * Number the parts afresh: the scene exactly as the file holds it.
+   *
+   * The list is kept, not rebuilt on demand, because a segment is known by its
+   * identity — the part under the mouse is a segment in this list, and an edit
+   * is this list with one entry gone or several in its place.
+   */
+  function resetSegments() {
+    baseSegments = builtPieces
+      ? builtPieces.pieces
+        .map((piece, source) => (piece ? newSegment(source, null, null) : null))
+        .filter(Boolean)
+      : [];
+    segments = baseSegments;
+    history.past.length = 0;
+    history.future.length = 0;
+  }
+
+  const currentSegments = () => segments || [];
+
+  /** Whether what is on screen still is what the file holds. */
+  const edited = () => segments !== null && segments !== baseSegments;
+
+  function resetEdits() {
+    segments = null;
+    baseSegments = null;
+    history.past.length = 0;
+    history.future.length = 0;
+  }
+
+  /** What has been done to the scene, for the readout and for the report. */
+  function editSummary() {
+    if (!edited() || !builtPieces) return null;
+    const perSource = new Map();
+    for (const segment of segments) {
+      if (!perSource.has(segment.source)) perSource.set(segment.source, []);
+      perSource.get(segment.source).push(segment);
+    }
+    const removed = [];
+    const split = [];
+    // The models themselves, not their names or their keys: the report holds
+    // the same objects, so identity is the one test that cannot drift.
+    const removedModels = new Set();
+    const editedModels = new Set();
+    builtPieces.pieces.forEach((piece, source) => {
+      if (!piece) return;
+      const here = perSource.get(source) || [];
+      const model = sceneParts[source] ? sceneParts[source].model : null;
+      const held = here.reduce(
+        (sum, segment) => sum + (segment.faces ? segment.faces.length : piece.triangleCount), 0);
+      if (!here.length) {
+        removed.push({ name: piece.name, triangles: piece.triangleCount });
+        if (model) removedModels.add(model);
+        return;
+      }
+      if (here.length > 1) split.push({ name: piece.name, into: here.length });
+      if (model && (here.length > 1 || held < piece.triangleCount)) editedModels.add(model);
+    });
+    if (!removed.length && !split.length) return null;
+    return {
+      removed,
+      split,
+      removedModels,
+      editedModels,
+      parts: partTable.length,
+      triangles: partTable.reduce((sum, part) => sum + part.triangles, 0),
+    };
+  }
+
+  /**
+   * Draw the scene the segments now describe.
+   *
+   * The palette is not rebuilt and the textures are not decoded again — an
+   * edit moves triangles about, it does not change what a material is — and
+   * the camera and the up axis are left where they are, so a deleted part does
+   * not send the model spinning off to a new frame.
+   */
+  function refreshEdited(note) {
+    if (!builtPieces) return;
+    const built = assemble(builtPieces, currentSegments());
+    if (!built) {
+      partTable = [];
+      setSelectedPart(-1);
+      viewer.clear();
+      viewer.setParts([]);
+      dom.meshInfo.textContent = 'every part has been deleted — undo with Ctrl+Z';
+      currentMesh = null;
+      dom.exportGltf.disabled = true;
+      updateEditControls();
+      renderReport();
+      if (note) setStatus(note, 'ok');
+      return;
+    }
+    viewer.setMesh(built.mesh, { keepCamera: true });
+    partTable = built.table || [];
+    viewer.setParts(partTable);
+    // The parts are numbered afresh, so a selection that has fallen off the
+    // end of the list is no selection at all.
+    setSelectedPart(selectedPart < partTable.length ? selectedPart : -1);
+    installPalette(built.palette, built.mesh);
+    viewer.setExplode(Number(dom.explodeSlider.value) / 100);
+    dom.explodeSlider.disabled = partTable.length < 2;
+    dom.exportGltf.disabled = false;
+
+    const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
+    dom.meshInfo.textContent = `${built.parts} part${built.parts === 1 ? '' : 's'} · `
+      + `${built.mesh.triangleCount.toLocaleString()} triangles · ${measure(size)} units`
+      + editNote();
+    updateEditControls();
+    renderReport();
+    if (note) setStatus(note, 'ok');
+  }
+
+  /** What the mesh line says about the state of the edits. */
+  function editNote() {
+    const summary = editSummary();
+    if (!summary) return '';
+    const bits = [];
+    if (summary.removed.length) bits.push(`${summary.removed.length} removed`);
+    if (summary.split.length) bits.push(`${summary.split.length} split`);
+    return ` · ${bits.join(', ')} — Ctrl+Z to undo`;
+  }
+
+  /** Put a new scene in place, keeping the way back to the old one. */
+  function applyEdit(next, note) {
+    history.past.push(segments);
+    history.future.length = 0;
+    segments = next;
+    refreshEdited(note);
+  }
+
+  function deletePart(index) {
+    const part = partTable[index];
+    if (!part || !part.segment) return;
+    const name = part.name;
+    const triangles = part.triangles;
+    const gone = part.segment;
+    setSelectedPart(-1);
+    applyEdit(currentSegments().filter((segment) => segment !== gone),
+      `Removed ${name} — ${triangles.toLocaleString()} triangles.`);
+  }
+
+  /**
+   * Cut one part into several.
+   *
+   * `shells` follows the geometry — triangles that share a vertex stay
+   * together, which is how a wheel saved as one mesh comes apart into rim,
+   * tyre and hub — and `material` follows the file's own grouping.
+   */
+  function splitPart(index, by = 'shells') {
+    const part = partTable[index];
+    if (!part || !part.segment || !builtPieces) return;
+    const source = builtPieces.pieces[part.segment.source];
+    if (!source) return;
+    const piece = FbxEdits.slice(source, part.segment.faces);
+
+    let groups = [];
+    if (by === 'material') {
+      groups = FbxEdits.byMaterial(piece).map(({ slot, faces }) => ({
+        name: `${part.name} · ${nameOfSlot(slot)}`,
+        faces,
+      }));
+    } else {
+      groups = FbxEdits.shells(piece).map((faces, at) => ({
+        name: `${part.name} #${at + 1}`,
+        faces,
+      }));
+    }
+    if (groups.length < 2) {
+      setStatus(by === 'material'
+        ? `${part.name} wears one material — nothing to split by.`
+        : `${part.name} is one connected piece — nothing to split.`, 'warn');
+      return;
+    }
+
+    // The lists come back as triangles of the piece on screen; the segment
+    // keeps them as triangles of the part it was cut from, so a split of a
+    // split still points at the one mesh underneath.
+    const made = groups.map((group) => newSegment(
+      part.segment.source, group.name, FbxEdits.through(part.segment.faces, group.faces)));
+    const next = [];
+    for (const segment of currentSegments()) {
+      if (segment === part.segment) next.push(...made);
+      else next.push(segment);
+    }
+    applyEdit(next, `Split ${part.name} into ${made.length} `
+      + `${by === 'material' ? 'materials' : 'pieces'}.`);
+    // Leave the largest of them picked, so it is clear where the part went.
+    setSelectedPart(partTable.findIndex((entry) => entry.segment === made[0]));
+  }
+
+  /** What the material in a slot is called, for naming a split. */
+  function nameOfSlot(slot) {
+    const entry = currentPalette[slot] || (builtPieces && builtPieces.palette[slot]);
+    return (entry && entry.name) || `material ${slot}`;
+  }
+
+  function undoEdit() {
+    if (!history.past.length) return;
+    history.future.push(segments);
+    segments = history.past.pop();
+    setSelectedPart(-1);
+    refreshEdited(edited() ? 'Undone.' : 'Back to the scene as the file holds it.');
+  }
+
+  function redoEdit() {
+    if (!history.future.length) return;
+    history.past.push(segments);
+    segments = history.future.pop();
+    setSelectedPart(-1);
+    refreshEdited('Redone.');
+  }
+
+  function restoreAll() {
+    if (!edited()) return;
+    setSelectedPart(-1);
+    applyEdit(baseSegments, 'Every part put back.');
+  }
+
+  /** Offer the edit controls only where they mean something. */
+  function updateEditControls() {
+    const part = selectedPart >= 0 ? partTable[selectedPart] : null;
+    const splittable = !!(part && part.segment && builtPieces);
+    dom.partSplit.disabled = !splittable;
+    dom.partSplitMaterial.disabled = !splittable
+      || (part.materials || []).length < 2;
+    dom.partDelete.disabled = !part;
+    dom.restoreAll.hidden = !edited() && !history.past.length;
+    dom.restoreAll.disabled = !edited();
+  }
+
+  /** The report, with whatever has been done to the scene since it was read. */
+  function renderReport() {
+    if (!currentAnalysis) return;
+    currentAnalysis.edits = editSummary();
+    dom.panel.innerHTML = FbxReport.render(currentAnalysis);
   }
 
   /* -------------------------------------------------------------- geometry */
@@ -780,17 +1082,40 @@
     const meshOf = new Map();
     const heapMark = FbxWasm.mark();
 
-    const meshFor = (part) => {
+    // What each part still holds after the edits: no entry at all means the
+    // part was deleted, and a list of triangles means it was split and only
+    // some of it is left. A part nobody touched keeps `null` — all of it — so
+    // untouched instances of one geometry go on sharing a mesh.
+    const kept = new Map();
+    for (const segment of currentSegments()) {
+      const here = kept.get(segment.source) || [];
+      here.push(segment);
+      kept.set(segment.source, here);
+    }
+    const facesOf = (index) => {
+      const here = kept.get(index);
+      if (!here) return undefined;
+      if (here.some((segment) => !segment.faces)) return null;
+      const all = [];
+      for (const segment of here) all.push(...segment.faces);
+      return Int32Array.from(all.sort((a, b) => a - b));
+    };
+
+    const meshFor = (part, index) => {
+      const faces = facesOf(index);
+      if (faces === undefined) return -1;         // deleted
       const geometric = FbxTransform.geometricMatrix(part.properties);
       // Keyed by what would actually be written: the geometry, the materials
       // by name — the exporter folds same-named materials into one anyway —
-      // and the geometric offset that gets baked in. Four wheels cut from one
-      // mesh share all of that, so they share a mesh.
+      // the geometric offset that gets baked in, and what is left of the part
+      // after any edit. Four wheels cut from one mesh share all of that, so
+      // they share a mesh; a wheel that has been cut down no longer does.
       const key = [
         objectIndex.keyOf(part.geometry),
         part.materials.map((material) => material.displayName).join(','),
         geometric ? geometric.join(',') : '',
         subdivisionLevel,
+        faces ? (kept.get(index) || []).map((segment) => segment.id).join('+') : 'all',
       ].join('|');
       if (meshOf.has(key)) return meshOf.get(key);
 
@@ -804,26 +1129,40 @@
       } catch (error) {
         console.warn(`skipped ${part.model.displayName}: ${error.message}`);
       }
-      let index = -1;
+      let at = -1;
       if (mesh && mesh.triangleCount) {
-        index = meshes.length;
-        meshes.push({
-          name: part.geometry.displayName || part.model.displayName,
-          // Copied out: the next build may grow memory and detach these views.
-          mesh: {
-            triangleCount: mesh.triangleCount,
-            hasUv: mesh.hasUv,
-            positions: mesh.positions.slice(),
-            normals: mesh.normals.slice(),
-            uvs: mesh.uvs.slice(),
-            materials: mesh.materials.slice(),
-          },
-          palette: FbxPalette.apply(part.materials.map(materialEntry), materialOverrides),
-        });
+        // Copied out: the next build may grow memory and detach these views.
+        let written = {
+          triangleCount: mesh.triangleCount,
+          hasUv: mesh.hasUv,
+          positions: mesh.positions.slice(),
+          normals: mesh.normals.slice(),
+          uvs: mesh.uvs.slice(),
+          materials: mesh.materials.slice(),
+        };
+        // The triangles an edit named are the triangles of this same mesh:
+        // both builds triangulate the same record the same way, and only the
+        // transform differs. If the two ever disagreed on how many there are,
+        // the numbering would mean nothing, so the whole part is written.
+        const source = builtPieces && builtPieces.pieces[index];
+        if (faces && source && source.triangleCount === written.triangleCount) {
+          written = FbxEdits.slice(written, faces);
+        } else if (faces) {
+          console.warn(`${part.model.displayName}: exported whole — `
+            + 'the edited mesh and the one being written do not match');
+        }
+        if (written.triangleCount) {
+          at = meshes.length;
+          meshes.push({
+            name: part.geometry.displayName || part.model.displayName,
+            mesh: written,
+            palette: FbxPalette.apply(part.materials.map(materialEntry), materialOverrides),
+          });
+        }
       }
       FbxWasm.release(heapMark);
-      meshOf.set(key, index);
-      return index;
+      meshOf.set(key, at);
+      return at;
     };
 
     // A node for every model, whether or not it holds a mesh: a rig or a pivot
@@ -837,12 +1176,12 @@
         children: [],
       });
     }
-    for (const part of sceneParts) {
+    sceneParts.forEach((part, index) => {
       const node = nodes.get(part.key);
-      if (!node) continue;
-      const index = meshFor(part);
-      if (index >= 0) node.mesh = index;
-    }
+      if (!node) return;
+      const at = meshFor(part, index);
+      if (at >= 0) node.mesh = at;
+    });
 
     const roots = [];
     for (const [key, frame] of frames) {
@@ -919,7 +1258,8 @@
     if (viewer) viewer.setSelectedPart(selectedPart);
     if (!part) {
       dom.partInfo.hidden = true;
-      dom.partInfo.textContent = '';
+      dom.partName.textContent = '';
+      updateEditControls();
       return;
     }
     const size = [0, 1, 2].map((k) => part.max[k] - part.min[k]);
@@ -927,13 +1267,14 @@
     // Exporters write names like a filing system; show enough to recognise the
     // part and keep the whole of it for the tooltip.
     const shorten = (text) => (text.length > 44 ? `${text.slice(0, 43)}…` : text);
-    dom.partInfo.textContent = `${shorten(part.name)} · `
+    dom.partName.textContent = `${shorten(part.name)} · `
       + `${part.triangles.toLocaleString()} triangles · `
       + `${size.map((v) => (Math.abs(v) >= 1 ? v.toFixed(1) : v.toFixed(3))).join(' × ')} units`
       + (materials.length ? ` · ${shorten(materials.slice(0, 2).join(', '))}` : '');
-    dom.partInfo.title = part.name
+    dom.partName.title = part.name
       + (materials.length ? `\n${materials.join(', ')}` : '');
     dom.partInfo.hidden = false;
+    updateEditControls();
   }
 
   /** Mark on the model whichever material the pointer or the open row names. */
@@ -1266,12 +1607,19 @@
       // fade and the status update land first.
       await nextFrame();
       const started = performance.now();
-      const built = buildScene(sceneParts);
+      // Building the geometry again renumbers its triangles, so the edits made
+      // to the last build no longer describe anything: the scene comes back
+      // whole, which is said out loud rather than left to be noticed.
+      const hadEdits = edited();
+      builtPieces = buildPieces(sceneParts);
+      resetSegments();
+      const built = assemble(builtPieces, currentSegments());
       if (!built) {
         dom.meshInfo.textContent = 'no triangles in this scene';
         viewer.clear();
         return;
       }
+      if (hadEdits) setStatus('The scene was rebuilt, so every part is back.', 'warn');
       const elapsed = performance.now() - started;
       viewer.setMesh(built.mesh, { keepCamera });
       partTable = built.table || [];
@@ -1281,6 +1629,7 @@
       dom.explodeSlider.disabled = partTable.length < 2;
       if (dom.explodeSlider.disabled) dom.explodeSlider.value = '0';
       viewer.setExplode(Number(dom.explodeSlider.value) / 100);
+      updateEditControls();
 
       const textures = await resolveTextures(built.palette);
       missingTextures = textures.missing;
@@ -1419,33 +1768,52 @@
     try {
       const started = performance.now();
       unsmoothedParts = 0;
-      const mesh = buildMesh(entry);
-      if (!mesh || !mesh.triangleCount) {
+      // Building the geometry again renumbers its triangles, so the edits made
+      // to the last build no longer describe anything.
+      const hadEdits = edited();
+      const palette = materialPalette(entry);
+      const raw = buildMesh(entry);
+      if (!raw || !raw.triangleCount) {
         dom.meshInfo.textContent = 'this record has no triangles';
         viewer.clear();
         return;
       }
-      const elapsed = performance.now() - started;
-      viewer.setMesh(mesh, { keepCamera });
       // One geometry on its own is still one part — clicking it should say
-      // what it is — but there is nothing to pull it apart from.
+      // what it is, and splitting it should give the pieces it is made of —
+      // but there is nothing to pull it apart from until it is split.
       const [name] = FbxAnalyze.splitObjectName(
         entry.props.map((prop) => prop.value).find((v) => typeof v === 'string') || '');
-      partTable = [{
-        name: name || entry.name,
-        centre: [0, 1, 2].map((k) => (mesh.min[k] + mesh.max[k]) / 2),
-        min: mesh.min.slice(),
-        max: mesh.max.slice(),
-        triangles: mesh.triangleCount,
-        materials: [],
-      }];
+      builtPieces = {
+        palette,
+        // Copied out of WebAssembly memory, which the next build may move.
+        pieces: [{
+          positions: raw.positions.slice(),
+          normals: raw.normals.slice(),
+          materials: raw.materials.slice(),
+          uvs: raw.uvs.slice(),
+          hasUv: raw.hasUv,
+          triangleCount: raw.triangleCount,
+          polygonCount: raw.polygonCount,
+          min: raw.min.slice(),
+          max: raw.max.slice(),
+          name: name || entry.name,
+          materialNames: palette.map((material) => material.name),
+        }],
+      };
+      resetSegments();
+      const built = assemble(builtPieces, currentSegments());
+      const mesh = built.mesh;
+      const elapsed = performance.now() - started;
+      viewer.setMesh(mesh, { keepCamera });
+      partTable = built.table;
       viewer.setParts(partTable);
       setSelectedPart(-1);
       dom.explodeSlider.disabled = true;
       dom.explodeSlider.value = '0';
       viewer.setExplode(0);
+      updateEditControls();
+      if (hadEdits) setStatus('The mesh was rebuilt, so every part is back.', 'warn');
 
-      const palette = materialPalette(entry);
       const textures = await resolveTextures(palette);
       missingTextures = textures.missing;
       installPalette(palette, mesh);
@@ -1551,8 +1919,32 @@
       const box = dom.canvas.getBoundingClientRect();
       setSelectedPart(viewer.pickPart(event.clientX - box.left, event.clientY - box.top));
     });
+    dom.partSplit.addEventListener('click', () => splitPart(selectedPart, 'shells'));
+    dom.partSplitMaterial.addEventListener('click', () => splitPart(selectedPart, 'material'));
+    dom.partDelete.addEventListener('click', () => deletePart(selectedPart));
+    dom.restoreAll.addEventListener('click', restoreAll);
+
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && selectedPart >= 0) setSelectedPart(-1);
+      // Typing into the panel is not a shortcut: a colour field or a select
+      // has first claim on every key that reaches it.
+      const target = event.target;
+      if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey || event.metaKey) {
+        if (key === 'z' && !event.shiftKey) { event.preventDefault(); undoEdit(); }
+        else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+          event.preventDefault();
+          redoEdit();
+        }
+        return;
+      }
+      if (event.key === 'Escape' && selectedPart >= 0) { setSelectedPart(-1); return; }
+      if (selectedPart < 0) return;
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        deletePart(selectedPart);
+      } else if (key === 's') splitPart(selectedPart, 'shells');
+      else if (key === 'm') splitPart(selectedPart, 'material');
     });
 
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
@@ -1602,6 +1994,13 @@
       get partTable() { return partTable; },
       get selectedPart() { return selectedPart; },
       selectPart: setSelectedPart,
+      get edits() { return editSummary(); },
+      get segments() { return currentSegments(); },
+      deletePart,
+      splitPart,
+      undo: undoEdit,
+      redo: redoEdit,
+      restoreAll,
       get lastExport() { return lastExport; },
       exportMesh: () => currentMesh,
       exportGltf,

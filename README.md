@@ -332,6 +332,58 @@ Body_Shell · 30 140 triangles · 4.4 × 1.1 × 1.9 units · CarPaint, Chrome
 Dragging orbits the camera as before — only a press and release without a drag
 counts as a pick. `Escape`, or a click on empty space, lets go.
 
+### Deleting a part, and splitting one
+
+A selected part can be taken out of the scene (`Delete`) or cut into the pieces
+it is really made of (`split`, or `S`). Neither touches the file: what changes
+is the scene the viewer holds, which is kept as a list of **segments** over the
+meshes already built —
+
+| | a segment says |
+| --- | --- |
+| whole part | the part it came from |
+| split part | the part it came from, and which of its triangles it kept |
+| deleted part | nothing — it is not in the list |
+
+— so an edit is a new list, not new geometry. A delete costs one rebuild of the
+combined mesh and no triangulation at all; splitting a 122,112-triangle wheel
+into its 41 loose pieces takes about 60 ms, and splitting a piece again is no
+dearer than splitting it the first time, because the second list is read back
+through the first.
+
+**Split** comes in two kinds:
+
+- **`split`** follows the geometry. Triangles that share a vertex stay
+  together, so a wheel saved as one mesh comes back as rim, tyre, hub and every
+  wheel nut separately. Corners are welded by being at the same point exactly,
+  which is the right test rather than a tolerance: every corner of a part came
+  out of one triangulation through one matrix, so two corners of one vertex are
+  the same bits, and what differs by a rounding step is a different vertex.
+- **`by material`** follows the file's own grouping — one piece per material —
+  which separates glass from bodywork on the files that ship them merged.
+
+Deleting reaches as far as the scene does. The part stops being drawn, stops
+being counted in the mesh line, and stops being written by **Export glTF** —
+the export walks the same segment list, so a part deleted leaves its node
+empty and the branch is pruned, while parts nobody touched go on sharing their
+mesh and their instancing is kept. A part that has been split and partly
+deleted is written as the triangles that are left. The Report panel grows an
+**Edits** section with the resulting counts, and marks the models in the scene
+hierarchy `← removed` or `← edited`. Nothing writes to the file on disk.
+
+A split is a grouping the viewer holds, not a break in the file's structure, so
+the export writes a split part as the one mesh on the one node it has always
+been — minus whatever pieces were deleted. Reading that export back gives the
+same triangles in the same places, with the surviving pieces of a split part
+gathered back into one: 73 parts and 539,090 triangles on screen come back as
+59 parts and 539,090 triangles, and the Khronos validator reports nothing.
+
+`Ctrl+Z` and `Ctrl+Y` step back and forth through every edit, and **Restore
+all** — which appears in the controls once something has been edited — puts the
+whole scene back at once. Changing the smoothing level rebuilds the geometry
+and so renumbers its triangles; the edits cannot survive that, so the scene
+comes back whole and says so.
+
 ### Smoothing a cage
 
 A model can look faceted not because the viewer is dropping detail but because
@@ -441,7 +493,8 @@ being encoded back to sRGB. Highlights roll off instead of clipping.
 ### Exporting glTF
 
 **Export glTF** writes what is on screen as a `.glb`: the scene as it stands,
-with whatever materials you have assigned, in one self-contained binary file.
+with whatever materials you have assigned and whatever parts you have deleted
+or split, in one self-contained binary file.
 
 The scene keeps its shape. Each mesh is written once in its own local space and
 placed by a node, so a hierarchy stays a hierarchy — a part keeps its name and
@@ -802,6 +855,7 @@ node web/test/smoothing.js samples/cube_binary.fbx samples/scene_parts.fbx
 node web/test/gltfin.js samples/cube_textured.fbx     # export, then read it back
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
+node web/test/edits.js samples/Shelby.fbx            # deleting and splitting
 ```
 
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks

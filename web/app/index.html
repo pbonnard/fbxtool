@@ -52,9 +52,21 @@
       <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
       <button id="reset-view" type="button">Reset view</button>
       <button id="export-gltf" type="button" disabled>Export glTF</button>
+      <button id="restore-all" type="button"
+        title="Put every deleted part back and undo every split" hidden disabled>Restore all</button>
     </div>
     <p id="mesh-info" class="mesh-info">no file loaded</p>
-    <p id="part-info" class="part-info" hidden></p>
+    <div id="part-info" class="part-info" hidden>
+      <span id="part-name" class="part-name"></span>
+      <span class="part-actions">
+        <button id="part-split" type="button"
+          title="Cut this part into the loose pieces it is made of (S)">split</button>
+        <button id="part-split-material" type="button"
+          title="Cut this part into one piece per material (M)">by material</button>
+        <button id="part-delete" type="button"
+          title="Take this part out of the scene (Delete)">delete</button>
+      </span>
+    </div>
     <div id="drop" class="drop">
       <div class="drop-inner">
         <h1>Drop a model file</h1>
