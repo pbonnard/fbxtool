@@ -984,7 +984,12 @@
     dom.geometrySelect.innerHTML = '';
     if (!candidates.length) {
       dom.geometrySelect.disabled = true;
-      dom.meshInfo.textContent = 'no renderable geometry in this file';
+      // A file can hold no mesh for a reason worth reading — compressed with
+      // something we cannot undo, most often — so say which rather than
+      // leaving an empty stage and a report to go looking through.
+      const reason = (doc.warnings || []).find((w) => /compress|decode|no data/i.test(w));
+      dom.meshInfo.textContent = reason
+        ? `nothing to draw — ${reason}` : 'no renderable geometry in this file';
       // Say so in the materials list too, rather than leaving it looking
       // like nothing has been opened at all.
       renderMaterials();

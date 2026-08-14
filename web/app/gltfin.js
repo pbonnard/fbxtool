@@ -126,6 +126,14 @@ const FbxGltfIn = (function () {
       warnings.push(`accessor ${index} has a component type this reader does not know`);
       return null;
     }
+    // An accessor with neither a view nor a sparse override has nothing behind
+    // it — which is how a compressed file describes what it took away. Reading
+    // it as zeros would build a mesh with every vertex at the origin: present,
+    // counted, and invisible.
+    if (accessor.bufferView === undefined && !accessor.sparse) {
+      warnings.push(`accessor ${index} has no data behind it`);
+      return null;
+    }
     const out = new Array(accessor.count * width).fill(0);
     const view = accessor.bufferView !== undefined
       ? json.bufferViews[accessor.bufferView] : null;
@@ -323,12 +331,19 @@ const FbxGltfIn = (function () {
 
     /* ---- meshes: one Geometry and one Model per primitive */
     let triangleless = 0;
+    let compressed = 0;
     const meshParts = (json.meshes || []).map((mesh, meshIndex) =>
       (mesh.primitives || []).map((primitive, primitiveIndex) => {
         const mode = primitive.mode === undefined ? 4 : primitive.mode;
         if (mode !== 4) {
           warnings.push(`mesh ${meshIndex} uses drawing mode ${mode}, which this reader `
             + 'does not turn into polygons');
+          return null;
+        }
+        // Draco replaces the vertex streams with its own compressed block, so
+        // the accessors it leaves behind describe a mesh that is not there.
+        if ((primitive.extensions || {}).KHR_draco_mesh_compression) {
+          compressed++;
           return null;
         }
         const positions = readAccessor(json, buffers, primitive.attributes.POSITION, warnings);
@@ -456,6 +471,17 @@ const FbxGltfIn = (function () {
       }
     }
     if (triangleless) warnings.push(`${triangleless} primitive(s) held no triangles`);
+    if (compressed) {
+      warnings.push(`${compressed} mesh part(s) are compressed with Draco `
+        + '(KHR_draco_mesh_compression), which this reader cannot decompress — '
+        + 'their geometry is not in the file in any other form');
+    }
+    // The same for the textures, so a model that arrives grey says why.
+    const basis = (json.images || []).filter((image) => image.mimeType === 'image/ktx2').length;
+    if (basis) {
+      warnings.push(`${basis} texture(s) are KTX2 / Basis Universal `
+        + '(KHR_texture_basisu), which a browser cannot decode as an image');
+    }
 
     /* ---- the document */
     const generator = (json.asset && json.asset.generator) || 'glTF 2.0';

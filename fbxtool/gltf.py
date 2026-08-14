@@ -179,6 +179,12 @@ class _Accessors:
         if component is None or width is None:
             self.doc.warn(f"accessor {index} has a component type this reader does not know")
             return None
+        # An accessor with neither a view nor a sparse override has nothing
+        # behind it — which is how a compressed file describes what it took
+        # away. Reading it as zeros would describe a mesh that is not there.
+        if accessor.get("bufferView") is None and not accessor.get("sparse"):
+            self.doc.warn(f"accessor {index} has no data behind it")
+            return None
         code, size = component
         count = int(accessor.get("count", 0))
         values: list = [0] * (count * width)
@@ -451,14 +457,26 @@ def _image_bytes(json_doc: dict, image: dict,
     return length, data[start:start + length]
 
 
+#: Returned instead of a UID by a primitive whose geometry is compressed away.
+COMPRESSED = object()
+
+
 def _geometry(primitive: dict, name: str, accessors: _Accessors, build: _Builder,
-              doc: Document, *, load_arrays: bool) -> int | None:
-    """One primitive as a Geometry record; returns its UID."""
+              doc: Document, *, load_arrays: bool):
+    """One primitive as a Geometry record; returns its UID.
+
+    ``COMPRESSED`` comes back when the geometry is Draco's rather than the
+    file's own, and ``None`` when there is nothing to read at all.
+    """
     mode = primitive.get("mode", 4)
     if mode != 4:
         doc.warn(f"{name} uses drawing mode {mode}, which this reader does not "
                  "turn into polygons")
         return None
+    # Draco replaces the vertex streams with its own compressed block, so the
+    # accessors it leaves behind describe a mesh that is not there.
+    if (primitive.get("extensions") or {}).get("KHR_draco_mesh_compression"):
+        return COMPRESSED
     attributes = primitive.get("attributes") or {}
     position = attributes.get("POSITION")
     if position is None:
@@ -569,6 +587,7 @@ def parse_gltf(
 
     # One Geometry per primitive, keyed by the mesh that owns it.
     mesh_parts: list[list[tuple[int, int | None, str]]] = []
+    compressed = 0
     for mesh_index, mesh in enumerate(json_doc.get("meshes") or []):
         primitives = mesh.get("primitives") or []
         label = mesh.get("name") or f"mesh{mesh_index}"
@@ -576,9 +595,23 @@ def parse_gltf(
         for at, primitive in enumerate(primitives):
             name = f"{label}/{at}" if len(primitives) > 1 else label
             uid = _geometry(primitive, name, accessors, build, doc, load_arrays=load_arrays)
-            if uid is not None:
+            if uid is COMPRESSED:
+                compressed += 1
+            elif uid is not None:
                 parts.append((uid, primitive.get("material"), name))
         mesh_parts.append(parts)
+
+    if compressed:
+        doc.warn(f"{compressed} mesh part(s) are compressed with Draco "
+                 "(KHR_draco_mesh_compression), which this reader cannot "
+                 "decompress — their geometry is not in the file in any other "
+                 "form")
+    basis = sum(1 for image in json_doc.get("images") or []
+                if image.get("mimeType") == "image/ktx2")
+    if basis:
+        doc.warn(f"{basis} texture(s) are KTX2 / Basis Universal "
+                 "(KHR_texture_basisu), which is not an image format a viewer "
+                 "can hand to a browser")
 
     # Nodes: the hierarchy, and where each mesh sits in it.
     nodes = json_doc.get("nodes") or []
