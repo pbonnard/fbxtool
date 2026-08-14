@@ -57,6 +57,9 @@
   /** The same, for the up axis — remembered per file, so reopening a model
    *  that the viewer reads wrongly does not need correcting twice. */
   let upAxisChosen = false;
+  /** An assignment dropped before there was a model to put it on, or with the
+   *  model it belongs to: either way it is applied once the model is loaded. */
+  let pendingAssignment = null;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
@@ -125,34 +128,62 @@
       suppliedBuffers.set(payload.name.toLowerCase(),
         new Uint8Array(await payload.arrayBuffer()));
     }
-    // A saved material assignment applies to whatever is on screen.
+    // A saved material assignment is read now and put on once there is a model
+    // to put it on, which may be the one arriving in this same drop.
+    const dropped = [];
     for (const file of assignments) {
       try {
-        useAssignment(FbxPalette.parse(await file.text()));
-        setStatus(`Applied ${file.name}.`, 'ok');
+        dropped.push({ name: file.name, overrides: FbxPalette.parse(await file.text()) });
       } catch (error) {
         setStatus(`${file.name}: ${error.message}`, 'error');
       }
     }
+    if (dropped.length) {
+      pendingAssignment = {
+        names: dropped.map((entry) => entry.name),
+        // Several at once fold together, the last word winning; what they say
+        // stands on its own rather than on top of what was remembered.
+        overrides: Object.assign({}, ...dropped.map((entry) => entry.overrides)),
+      };
+    }
 
     const companions = new Set([...images, ...libraries, ...payloads, ...assignments]);
     const scene = list.find((f) => !companions.has(f));
-    if (!scene) {
-      const added = companions.size;
-      if (assignments.length && added === assignments.length) return;
-      if (!currentDoc) {
-        setStatus(`Added ${added} companion file(s) — now open a model.`);
-        return;
-      }
-      // Companions arriving after the scene: reload so they take effect.
+    if (scene) {
+      await loadFile(scene);
+      // Opening a model starts from whatever was remembered for it, so an
+      // assignment dropped alongside goes on after that and not before: it is
+      // the one thing loading the file would otherwise throw away.
+      applyPending();
+      return;
+    }
+
+    const added = companions.size;
+    if (!currentDoc) {
+      setStatus(added === assignments.length
+        ? `Read ${added} assignment(s) — now open a model.`
+        : `Added ${added} companion file(s) — now open a model.`);
+      return;
+    }
+    // Companions arriving after the scene: reload so they take effect. An .mtl
+    // or a .bin changes what the file itself reads as, so re-read it.
+    if (images.length || libraries.length || payloads.length) {
       setStatus(`Added ${added} companion file(s), applying…`);
-      // An .mtl or a .bin changes what the file itself reads as, so re-read it.
       if (lastSceneFile && (libraries.length || payloads.length)) await loadFile(lastSceneFile);
       else if (currentGeometry) await showGeometry(currentGeometry);
       else if (sceneParts.length) await showScene();
-      return;
     }
-    await loadFile(scene);
+    applyPending();
+  }
+
+  /** Put a dropped assignment on the model, once there is one to put it on. */
+  function applyPending() {
+    if (!pendingAssignment || !currentDoc) return false;
+    const { names, overrides } = pendingAssignment;
+    pendingAssignment = null;
+    useAssignment(overrides);
+    setStatus(`Applied ${names.join(', ')}.`, 'ok');
+    return true;
   }
 
   /**

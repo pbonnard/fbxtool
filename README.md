@@ -692,8 +692,12 @@ JSON:
 The key is always the file's own name — that is what makes a rename portable —
 and `name` is what to call it instead.
 
-Drop that file back in — on its own or alongside the model — to apply it again,
-so an assignment can travel with a model that does not carry its own.
+Drop that file back in to apply it again, so an assignment can travel with a
+model that does not carry its own. Any order will do: with the model, before it
+— it waits for one to be opened — or after it. Opening a model starts from
+whatever was remembered for that file, so an assignment arriving with it is put
+on afterwards rather than before, which is the only order that survives the
+load.
 
 What that file records is how a material *looks*. Which part *wears* it, and
 any material added by hand, are edits to the scene rather than to the palette:

@@ -63,7 +63,7 @@ async function load(page, file) {
 async function main() {
   const target = process.argv[2];
   if (!target) {
-    console.error('usage: node web/test/materials.js <scene_parts.fbx>');
+    console.error('usage: node web/test/materials.js <scene_parts.fbx> [other.glb]');
     process.exit(2);
   }
   if (!fs.existsSync(PAGE)) {
@@ -182,6 +182,94 @@ async function main() {
   await page.waitForTimeout(300);
   const cleared = await samples(page);
   check('"Clear all" returns the whole file', allRedder(cleared), show(cleared));
+
+  /* An assignment need not arrive after the model. Both of these orders used
+   * to lose it: opening a file starts from whatever storage remembers, which
+   * is nothing here, and that ran after the assignment rather than before. */
+  console.log('\ndropped with the model, and before it');
+  /* On a page that has nothing open and nothing remembered — which is where
+   * this is really done, and where it used to be lost. With the same file
+   * already open the bug hides, because applying the assignment writes it to
+   * storage under that name and the load reads it straight back. */
+  const fresh = async () => {
+    await page.evaluate(() => window.fbxtool.clearMaterials());
+    await page.waitForTimeout(200);
+    await page.reload();
+    await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
+  };
+
+  await fresh();
+  await page.setInputFiles('#file-input', [target, savedPath]);
+  await page.waitForFunction(() => window.fbxtool.loadCount > 0, { timeout: 180000 });
+  await page.waitForTimeout(400);
+  const together = await samples(page);
+  check('a model and an assignment dropped together arrive together',
+    allBluer(together), show(together));
+
+  await fresh();
+  await page.setInputFiles('#file-input', [savedPath]);
+  await page.waitForTimeout(300);
+  const waiting = await page.evaluate(() => document.getElementById('status').textContent);
+  check('an assignment on its own waits for a model', /open a model/.test(waiting), waiting);
+  await load(page, target);
+  const later = await samples(page);
+  check('and is put on the next one opened', allBluer(later), show(later));
+  await page.evaluate(() => window.fbxtool.clearMaterials());
+
+  /* The same three orders on another format, since a .glb is exactly the file
+   * you drag in with its assignment rather than after it. Read off the palette
+   * rather than off the screen: what a colour looks like is this file's
+   * business, but whether the assignment arrived is not. */
+  const second = process.argv[3];
+  if (second) {
+    console.log(`
+${path.basename(second)}`);
+    await fresh();
+    await load(page, second);
+    // Reloading the page put the Report tab back in front, and the save
+    // button lives on the Materials one.
+    await page.click('.tab[data-target="tab-materials"]');
+    const chosen = await page.evaluate(() => {
+      const group = window.fbxtool.materials[0];
+      window.fbxtool.editMaterial(group.origin, { colour: [0, 0.75, 0], roughness: 0.9 });
+      window.fbxtool.renameMaterial(group.origin, 'Dropped in');
+      return group.origin;
+    });
+    const [saved2] = await Promise.all([
+      page.waitForEvent('download'),
+      page.click('#materials-save'),
+    ]);
+    const secondPath = path.join(path.dirname(await saved2.path()), 'second.json');
+    await saved2.saveAs(secondPath);
+
+    const worn = () => page.evaluate((key) => {
+      const entry = window.fbxtool.palette.find((m) => m.fromFile.name === key);
+      return {
+        green: entry ? Number(entry.colour[1].toFixed(2)) : -1,
+        name: entry ? entry.name : '',
+        overrides: Object.keys(window.fbxtool.overrides).length,
+      };
+    }, chosen);
+
+    await fresh();
+    await page.setInputFiles('#file-input', [second, secondPath]);
+    await page.waitForFunction(() => window.fbxtool.loadCount > 0, { timeout: 180000 });
+    await page.waitForTimeout(400);
+    const bothAtOnce = await worn();
+    check('dropped together, the assignment is on the model',
+      bothAtOnce.green === 0.75 && bothAtOnce.name === 'Dropped in',
+      JSON.stringify(bothAtOnce));
+
+    await fresh();
+    await page.setInputFiles('#file-input', [secondPath]);
+    await page.waitForTimeout(300);
+    await load(page, second);
+    const afterwards = await worn();
+    check('and the same when it goes in first',
+      afterwards.green === 0.75 && afterwards.name === 'Dropped in',
+      JSON.stringify(afterwards));
+    await page.evaluate(() => window.fbxtool.clearMaterials());
+  }
 
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 

@@ -530,8 +530,14 @@ def test_ground_and_shadows(built):
 
 @needs_clang
 @needs_node
-def test_materials_can_be_assigned(built):
-    """Group the palette, edit a material, save it and get it back."""
+def test_materials_can_be_assigned(built, tmp_path):
+    """Group the palette, edit a material, save it and get it back.
+
+    A saved assignment has to survive arriving with the model, or before it,
+    and not only after it: opening a file starts from whatever was remembered
+    for it, which is the one thing that can throw a dropped assignment away.
+    The .glb is there because that is the file people drag in as a pair.
+    """
     try:
         probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
         if probe.returncode != 0:
@@ -539,8 +545,13 @@ def test_materials_can_be_assigned(built):
     except OSError:  # pragma: no cover
         pytest.skip("node is unavailable")
 
+    import fbxbuild as fb
+
     scene = ROOT / "samples" / "scene_parts.fbx"
-    result = _run(["node", str(WEB / "test" / "materials.js"), str(scene)], env=_node_env(), timeout=300)
+    glb = tmp_path / "fixture.glb"
+    glb.write_bytes(fb.build_glb())
+    result = _run(["node", str(WEB / "test" / "materials.js"), str(scene), str(glb)],
+                  env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
