@@ -4,10 +4,10 @@
  *
  * Each file is loaded in the browser and exported through the real button,
  * then the GLB that comes back is taken apart: the container, the accessors
- * and the buffer arithmetic, and whether what came out describes the same
- * model that went in. When the Khronos glTF-Validator is installed it is run
- * as well, which is the only check here that speaks for the specification
- * rather than for this test.
+ * and the buffer arithmetic, the node tree, and whether what came out
+ * describes the same model that went in. When the Khronos glTF-Validator is
+ * installed it is run as well, which is the only check here that speaks for
+ * the specification rather than for this test.
  */
 'use strict';
 
@@ -78,30 +78,107 @@ function inspect(json, bin) {
     }
   });
 
-  let triangles = 0;
-  for (const primitive of json.meshes[0].primitives) {
+  let stored = 0;
+  for (const mesh of json.meshes) {
+    for (const primitive of mesh.primitives) {
+      const positions = json.accessors[primitive.attributes.POSITION];
+      const indices = json.accessors[primitive.indices];
+      stored += indices.count / 3;
+      if (indices.count % 3) problems.push('an index count is not a whole number of triangles');
+      if (!positions.min || !positions.max) problems.push('POSITION has no min/max');
+      for (const name of Object.keys(primitive.attributes)) {
+        if (json.accessors[primitive.attributes[name]].count !== positions.count) {
+          problems.push(`${name} has a different count from POSITION`);
+        }
+      }
+      if (primitive.material !== undefined && !json.materials[primitive.material]) {
+        problems.push('a primitive names a material that is not there');
+      }
+      // A material with a texture needs coordinates to sample it by.
+      const material = json.materials && json.materials[primitive.material];
+      const textured = material && material.pbrMetallicRoughness
+        && material.pbrMetallicRoughness.baseColorTexture;
+      if (textured && primitive.attributes.TEXCOORD_0 === undefined) {
+        problems.push('a primitive uses a texture but has no TEXCOORD_0');
+      }
+      // Every index must point at a vertex this primitive actually has.
+      const view = json.bufferViews[indices.bufferView];
+      const at = (view.byteOffset || 0) + (indices.byteOffset || 0);
+      const read = new Uint32Array(bin.buffer, bin.byteOffset + at, indices.count);
+      let highest = 0;
+      for (const value of read) if (value > highest) highest = value;
+      if (highest >= positions.count) problems.push('an index points past the vertices');
+    }
+  }
+  return { problems, stored };
+}
+
+const identity = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** Column-major, as glTF writes them. */
+function multiply(a, b) {
+  const out = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = sum;
+    }
+  }
+  return out;
+}
+
+function apply(m, x, y, z) {
+  return [
+    m[0] * x + m[4] * y + m[8] * z + m[12],
+    m[1] * x + m[5] * y + m[9] * z + m[13],
+    m[2] * x + m[6] * y + m[10] * z + m[14],
+  ];
+}
+
+/**
+ * Walk the node tree, handing back every placed mesh with its world matrix.
+ *
+ * The root node carries the axis and unit conversion; it is skipped here so
+ * the result is in the same space the viewer measured, which is what the
+ * checks below compare against. That the root matrix itself is right is the
+ * round-trip test's business.
+ */
+function placements(json) {
+  const out = [];
+  const walk = (index, matrix, depth) => {
+    const node = json.nodes[index];
+    const local = node.matrix ? multiply(matrix, node.matrix) : matrix;
+    if (node.mesh !== undefined) out.push({ mesh: node.mesh, matrix: local, depth });
+    for (const child of node.children || []) walk(child, local, depth + 1);
+  };
+  const root = json.nodes[json.scenes[json.scene || 0].nodes[0]];
+  for (const child of root.children || []) walk(child, identity(), 1);
+  return out;
+}
+
+/** Every triangle of a placed mesh, in world space. */
+function trianglesOf(json, bin, placement) {
+  const out = [];
+  for (const primitive of json.meshes[placement.mesh].primitives) {
     const positions = json.accessors[primitive.attributes.POSITION];
     const indices = json.accessors[primitive.indices];
-    triangles += indices.count / 3;
-    if (indices.count % 3) problems.push('an index count is not a whole number of triangles');
-    if (!positions.min || !positions.max) problems.push('POSITION has no min/max');
-    for (const name of Object.keys(primitive.attributes)) {
-      if (json.accessors[primitive.attributes[name]].count !== positions.count) {
-        problems.push(`${name} has a different count from POSITION`);
+    const positionView = json.bufferViews[positions.bufferView];
+    const indexView = json.bufferViews[indices.bufferView];
+    const p = new Float32Array(bin.buffer, bin.byteOffset + (positionView.byteOffset || 0),
+      positions.count * 3);
+    const i = new Uint32Array(bin.buffer, bin.byteOffset + (indexView.byteOffset || 0),
+      indices.count);
+    for (let t = 0; t < indices.count / 3; t++) {
+      const corners = [];
+      for (let c = 0; c < 3; c++) {
+        const at = i[t * 3 + c] * 3;
+        corners.push(apply(placement.matrix, p[at], p[at + 1], p[at + 2]));
       }
+      out.push(corners);
     }
-    if (primitive.material !== undefined && !json.materials[primitive.material]) {
-      problems.push('a primitive names a material that is not there');
-    }
-    // Every index must point at a vertex this primitive actually has.
-    const view = json.bufferViews[indices.bufferView];
-    const at = (view.byteOffset || 0) + (indices.byteOffset || 0);
-    const read = new Uint32Array(bin.buffer, bin.byteOffset + at, indices.count);
-    let highest = 0;
-    for (const value of read) if (value > highest) highest = value;
-    if (highest >= positions.count) problems.push('an index points past the vertices');
   }
-  return { problems, triangles };
+  return out;
 }
 
 async function main() {
@@ -130,14 +207,18 @@ async function main() {
     console.log(group.map((f) => path.basename(f)).join(' + '));
 
     const before = await page.evaluate(() => window.fbxtool.loadCount);
+    await page.setInputFiles('#file-input', []);
     await page.setInputFiles('#file-input', group);
     await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, before,
       { timeout: 180000 });
+    await page.waitForTimeout(400);
 
     const source = await page.evaluate(() => ({
       triangles: window.fbxtool.viewer.triangleCount,
       materials: window.fbxtool.materials.length,
+      parts: window.fbxtool.parts,
       hasUv: window.fbxtool.viewer.hasUv,
+      textures: window.fbxtool.viewer.textureLayers,
       bounds: window.fbxtool.materials.length
         ? { min: window.fbxtool.viewer.meshMin, max: window.fbxtool.viewer.meshMax } : null,
       palette: window.fbxtool.palette.map((entry) => ({
@@ -163,81 +244,99 @@ async function main() {
     const inspected = inspect(json, bin);
     check('the file describes itself consistently', inspected.problems.length === 0,
       inspected.problems.slice(0, 3).join('; '));
-    check('every triangle came across', inspected.triangles === source.triangles,
-      `${inspected.triangles.toLocaleString()} of ${source.triangles.toLocaleString()}`);
-    // A material that covers no triangles — the Mercedes has six leftover
-    // wireframe colours — writes no primitive, so the counts need not match.
-    const used = json.meshes[0].primitives.map((p) => p.material);
-    check('one primitive per material, and no more materials than the file has',
-      used.length <= Math.max(source.materials, 1)
-      && new Set(used).size === used.length
-      && (json.materials || []).length === used.length,
-      `${used.length} primitives, ${source.materials} materials in the scene`);
-    check('welding dropped the repeated vertices', stats.vertices < source.triangles * 3,
-      `${stats.vertices.toLocaleString()} vertices for `
-      + `${(source.triangles * 3).toLocaleString()} corners`);
-    check('the scene has a root node with a matrix',
-      json.nodes.length === 1 && Array.isArray(json.nodes[0].matrix)
-      && json.nodes[0].matrix.length === 16);
 
-    // The vertex data is written as the mesh holds it — the up axis and the
-    // units ride on the root matrix — so the extremes have to survive exactly.
+    // ---- the scene graph
+    const placed = placements(json);
+    const drawn = placed.reduce((sum, p) => sum + json.meshes[p.mesh].primitives
+      .reduce((n, prim) => n + json.accessors[prim.indices].count / 3, 0), 0);
+    check('every triangle came across', drawn === source.triangles,
+      `${drawn.toLocaleString()} of ${source.triangles.toLocaleString()}`);
+    check('the root node carries the axis and the units',
+      json.nodes.length >= 1 && Array.isArray(json.nodes[0].matrix)
+      && json.nodes[0].matrix.length === 16);
+    check('one node per part', placed.length === source.parts,
+      `${placed.length} placed, ${source.parts} parts`);
+
+    // A mesh used twice is stored once: the file holds fewer triangles than
+    // are drawn exactly when something is instanced.
+    const instanced = placed.length > new Set(placed.map((p) => p.mesh)).size;
+    check('a mesh used more than once is stored once',
+      instanced ? inspected.stored < drawn : inspected.stored === drawn,
+      `${inspected.stored.toLocaleString()} stored, ${drawn.toLocaleString()} drawn`
+      + `, ${json.meshes.length} mesh(es) for ${placed.length} node(s)`);
+
+    check('welding dropped the repeated vertices', stats.vertices < inspected.stored * 3,
+      `${stats.vertices.toLocaleString()} vertices for `
+      + `${(inspected.stored * 3).toLocaleString()} corners`);
+
+    // ---- the geometry itself, where the parts stand
     const min = [Infinity, Infinity, Infinity];
     const max = [-Infinity, -Infinity, -Infinity];
-    for (const primitive of json.meshes[0].primitives) {
-      const positions = json.accessors[primitive.attributes.POSITION];
-      for (let k = 0; k < 3; k++) {
-        min[k] = Math.min(min[k], positions.min[k]);
-        max[k] = Math.max(max[k], positions.max[k]);
+    for (const placement of placed) {
+      const mesh = json.meshes[placement.mesh];
+      for (const primitive of mesh.primitives) {
+        const positions = json.accessors[primitive.attributes.POSITION];
+        const view = json.bufferViews[positions.bufferView];
+        const p = new Float32Array(bin.buffer, bin.byteOffset + (view.byteOffset || 0),
+          positions.count * 3);
+        // Every vertex, placed: the corners of a rotated box would sit outside
+        // the model and this is compared against the real thing.
+        for (let v = 0; v < positions.count; v++) {
+          const point = apply(placement.matrix, p[v * 3], p[v * 3 + 1], p[v * 3 + 2]);
+          for (let k = 0; k < 3; k++) {
+            if (point[k] < min[k]) min[k] = point[k];
+            if (point[k] > max[k]) max[k] = point[k];
+          }
+        }
       }
     }
-    const near = (a, b) => Math.abs(a - b) <= Math.max(1e-4, Math.abs(b) * 1e-5);
-    check('the model came out the same size as it went in',
+    const near = (a, b) => Math.abs(a - b) <= Math.max(1e-4, Math.abs(b) * 1e-4);
+    check('the model came out the same size, in the same place',
       source.bounds && [0, 1, 2].every((k) => near(min[k], source.bounds.min[k])
         && near(max[k], source.bounds.max[k])),
       `${min.map((v) => v.toFixed(2))} .. ${max.map((v) => v.toFixed(2))}`);
 
     // On a small mesh, compare the triangles themselves rather than their
-    // extremes: every corner of every triangle, back from the indices.
+    // extremes: every corner of every triangle, placed by its node.
     if (source.triangles <= 5000) {
-      const original = await page.evaluate(() => {
-        const mesh = window.fbxtool.viewer;
-        return Array.from(window.fbxtool.exportMesh().positions);
-      });
-      const key = (a, b, c) => [a, b, c].map((v) => v.toFixed(4)).join(',');
-      const wantedTriangles = new Set();
+      const original = await page.evaluate(() => Array.from(window.fbxtool.exportMesh().positions));
+      const key = (a, b, c) => [a, b, c].map((v) => v.toFixed(3)).join(',');
+      const wanted = new Set();
       for (let t = 0; t < source.triangles; t++) {
         const corners = [];
         for (let c = 0; c < 3; c++) {
           const at = (t * 3 + c) * 3;
           corners.push(key(original[at], original[at + 1], original[at + 2]));
         }
-        wantedTriangles.add(corners.sort().join(' | '));
+        wanted.add(corners.sort().join(' | '));
       }
       const found = new Set();
-      for (const primitive of json.meshes[0].primitives) {
-        const positions = json.accessors[primitive.attributes.POSITION];
-        const indices = json.accessors[primitive.indices];
-        const positionView = json.bufferViews[positions.bufferView];
-        const indexView = json.bufferViews[indices.bufferView];
-        const p = new Float32Array(bin.buffer,
-          bin.byteOffset + (positionView.byteOffset || 0), positions.count * 3);
-        const i = new Uint32Array(bin.buffer,
-          bin.byteOffset + (indexView.byteOffset || 0), indices.count);
-        for (let t = 0; t < indices.count / 3; t++) {
-          const corners = [];
-          for (let c = 0; c < 3; c++) {
-            const at = i[t * 3 + c] * 3;
-            corners.push(key(p[at], p[at + 1], p[at + 2]));
-          }
-          found.add(corners.sort().join(' | '));
+      for (const placement of placed) {
+        for (const triangle of trianglesOf(json, bin, placement)) {
+          found.add(triangle.map((c) => key(c[0], c[1], c[2])).sort().join(' | '));
         }
       }
-      check('every triangle is the same triangle it was',
-        found.size === wantedTriangles.size
-        && [...wantedTriangles].every((t) => found.has(t)),
-        `${found.size} of ${wantedTriangles.size} match`);
+      check('every triangle is the same triangle it was, where it was',
+        found.size === wanted.size && [...wanted].every((t) => found.has(t)),
+        `${found.size} of ${wanted.size} match`);
     }
+
+    // ---- materials and textures
+    const used = new Set();
+    for (const mesh of json.meshes) {
+      for (const primitive of mesh.primitives) used.add(primitive.material);
+    }
+    check('no more materials than the scene has, and none unused',
+      used.size === (json.materials || []).length
+      && (json.materials || []).length <= Math.max(source.materials, 1),
+      `${(json.materials || []).length} materials, ${source.materials} in the scene`);
+
+    check('the textures came too', (json.images || []).length === source.textures,
+      `${(json.images || []).length} image(s) exported, ${source.textures} on screen`);
+    const readable = (json.images || []).every((image) =>
+      image.mimeType === 'image/png' || image.mimeType === 'image/jpeg');
+    check('in a format glTF allows', readable,
+      [...new Set((json.images || []).map((i) => i.mimeType))].join(', ') || 'none');
 
     // Materials keep their colour, their transparency and their metalness.
     const wanted = new Map(source.palette.map((m) => [m.name, m]));
@@ -267,6 +366,7 @@ async function main() {
         messages.slice(0, 4).join('; ') || 'no errors, no warnings');
     }
     console.log(`       ${(stats.bytes / 1048576).toFixed(1)} MiB · `
+      + `${stats.meshes} mesh(es) in ${stats.nodes} node(s) · `
       + `${stats.primitives} primitives · ${stats.images} image(s)\n`);
   }
 

@@ -266,11 +266,17 @@ def test_gltf_export(built, tmp_path):
 
     glass = tmp_path / "glass.fbx"
     glass.write_bytes(fb.build_glass())
+    # A compressed glTF goes round the whole loop: decompressed to be drawn,
+    # then written back out as plain geometry with its texture as a PNG.
+    basis = tmp_path / "basis.glb"
+    basis.write_bytes(fb.build_basis_glb())
+    draco = tmp_path / "draco.glb"
+    draco.write_bytes(fb.build_draco_glb())
     files = [str(ROOT / "samples" / "cube_textured.fbx"),
              str(ROOT / "samples" / "scene_parts.fbx"),
              f"{ROOT / 'samples' / 'pyramid.obj'}+{ROOT / 'samples' / 'pyramid.mtl'}"
              f"+{ROOT / 'samples' / 'checker.png'}",
-             str(glass)]
+             str(glass), str(basis), str(draco)]
     for real in (real_sample(), real_scene()):
         if real:
             files.append(real)

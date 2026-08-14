@@ -1,15 +1,16 @@
-/* Write the assembled scene out as a glTF 2.0 binary file.
+/* Write the scene out as a glTF 2.0 binary file.
  *
- * What the viewer holds is already most of a glTF: one combined mesh with a
- * material index per vertex, and a palette of resolved materials. The work is
- * in the three places the formats disagree.
+ * The scene arrives as it is held for drawing: a set of meshes in their own
+ * local space, and a tree of nodes that place them. Both survive the trip —
+ * a mesh used by twenty-four wheels is written once and pointed at
+ * twenty-four times, and a part keeps its name and its place in the tree.
  *
- * A glTF primitive has exactly one material, so the mesh is split into one
- * primitive per material. Triangles arrive unindexed — three vertices each,
- * however many they share — so each primitive is welded, which halves the
- * file. And glTF is Y-up in metres, while these files are often Z-up in
- * centimetres, so the difference goes on the root node's matrix rather than
- * into the vertex data.
+ * The rest is where the formats disagree. A glTF primitive has exactly one
+ * material, so each mesh is split into one primitive per material. Triangles
+ * arrive unindexed — three vertices each, however many they share — so every
+ * primitive is welded, which halves the file. And glTF is Y-up in metres,
+ * while these files are often Z-up in centimetres, so that difference goes on
+ * the root node's matrix rather than into the vertex data.
  */
 'use strict';
 
@@ -147,38 +148,35 @@ const FbxGltf = (function () {
     return out;
   }
 
+  /** Whether a matrix is the identity, and so not worth writing. */
+  function isIdentity(m) {
+    for (let i = 0; i < 16; i++) {
+      if (m[i] !== (i % 5 === 0 ? 1 : 0)) return false;
+    }
+    return true;
+  }
+
   /**
    * Build a GLB.
    *
-   * `images` maps a material name to {bytes, mimeType} for its base colour
-   * texture; anything missing simply exports without one.
+   * `meshes` are in their own local space; `nodes` is a tree that places them,
+   * each naming a mesh by index or none. `images` maps a material name to
+   * {bytes, mimeType} for its base colour texture.
    */
   function build(scene) {
-    const { mesh, palette = [], upAxis = 'y', unitScale = 1, name = 'scene' } = scene;
+    const { name = 'scene', upAxis = 'y', unitScale = 1 } = scene;
+    const meshes = scene.meshes || [];
+    const roots = scene.nodes || [];
     const images = scene.images instanceof Map ? scene.images : new Map();
-    if (!mesh || !mesh.triangleCount) throw new Error('there is no geometry to export');
-
-    // Which material each triangle belongs to, folded back to one entry per
-    // material rather than one per slot.
-    const groupOf = (slot) => {
-      const entry = palette[slot];
-      return entry && Number.isInteger(entry.group) ? entry.group : slot;
-    };
-    const byGroup = new Map();
-    for (let t = 0; t < mesh.triangleCount; t++) {
-      const slot = Math.round(mesh.materials[t * 3]) || 0;
-      const group = palette.length ? groupOf(slot) : 0;
-      let list = byGroup.get(group);
-      if (!list) byGroup.set(group, (list = { slot, triangles: [] }));
-      list.triangles.push(t);
-    }
+    const drawn = meshes.reduce((sum, m) => sum + (m.mesh ? m.mesh.triangleCount : 0), 0);
+    if (!drawn) throw new Error('there is no geometry to export');
 
     const json = {
       asset: { version: '2.0', generator: 'fbxtool' },
       scene: 0,
       scenes: [{ nodes: [0] }],
-      nodes: [{ name, matrix: rootMatrix(upAxis, unitScale), mesh: 0 }],
-      meshes: [{ name, primitives: [] }],
+      nodes: [],
+      meshes: [],
       accessors: [],
       bufferViews: [],
       buffers: [],
@@ -207,52 +205,137 @@ const FbxGltf = (function () {
       return json.accessors.length - 1;
     };
 
+    /* ---- materials, written once however many meshes use them.
+     *
+     * A material is keyed by its name and by whether it is being used with
+     * texture coordinates: glTF will not have a primitive name a texture it
+     * has no coordinates for, and the same material can be used both ways. */
+    const materialIndex = new Map();
+    const textureIndex = new Map();
+
+    const textureFor = (entry) => {
+      if (textureIndex.has(entry.name)) return textureIndex.get(entry.name);
+      const image = images.get(entry.name);
+      if (!image) {
+        textureIndex.set(entry.name, -1);
+        return -1;
+      }
+      const imageView = store(image.bytes);
+      json.images = json.images || [];
+      json.images.push({ name: entry.name, bufferView: imageView, mimeType: image.mimeType });
+      json.samplers = json.samplers || [{ wrapS: 10497, wrapT: 10497 }];
+      json.textures = json.textures || [];
+      json.textures.push({ sampler: 0, source: json.images.length - 1 });
+      const index = json.textures.length - 1;
+      textureIndex.set(entry.name, index);
+      return index;
+    };
+
+    const materialFor = (entry, withUv) => {
+      // The same material twice only when it is used both with and without
+      // coordinates to sample its texture by — glTF will not have a primitive
+      // name a texture it cannot sample. With no texture there is nothing to
+      // tell the two apart, so there is only ever one.
+      const textured = withUv && images.has(entry.name);
+      const key = `${entry.name}|${textured ? 'uv' : 'flat'}`;
+      if (materialIndex.has(key)) return materialIndex.get(key);
+      const index = json.materials.length;
+      json.materials.push(material(entry, textured ? textureFor(entry) : -1));
+      materialIndex.set(key, index);
+      return index;
+    };
+
+    /* ---- meshes, each split into one primitive per material */
     let vertices = 0;
-    for (const part of byGroup.values()) {
-      const entry = palette[part.slot];
-      const wantUv = !!(mesh.hasUv && entry && entry.texture);
-      const welded = weld(part.triangles, mesh, wantUv);
-      vertices += welded.positions.length / 3;
+    let primitives = 0;
+    const meshIndex = new Map();
 
-      const positionView = store(welded.positions);
-      json.bufferViews[positionView].target = ARRAY_BUFFER;
-      const normalView = store(welded.normals);
-      json.bufferViews[normalView].target = ARRAY_BUFFER;
-      const indexView = store(welded.index);
-      json.bufferViews[indexView].target = ELEMENT_ARRAY_BUFFER;
+    const meshFor = (which) => {
+      if (meshIndex.has(which)) return meshIndex.get(which);
+      const entry = meshes[which];
+      const mesh = entry && entry.mesh;
+      if (!mesh || !mesh.triangleCount) {
+        meshIndex.set(which, -1);
+        return -1;
+      }
+      const palette = entry.palette || [];
 
-      const attributes = {
-        POSITION: accessor(positionView, FLOAT, welded.positions.length / 3, 'VEC3',
-          { min: welded.min, max: welded.max }),
-        NORMAL: accessor(normalView, FLOAT, welded.normals.length / 3, 'VEC3'),
+      // Which material each triangle belongs to, folded back to one entry per
+      // material rather than one per slot.
+      const groupOf = (slot) => {
+        const material_ = palette[slot];
+        return material_ && Number.isInteger(material_.group) ? material_.group : slot;
       };
-      if (welded.uvs) {
-        const uvView = store(welded.uvs);
-        json.bufferViews[uvView].target = ARRAY_BUFFER;
-        attributes.TEXCOORD_0 = accessor(uvView, FLOAT, welded.uvs.length / 2, 'VEC2');
+      const byGroup = new Map();
+      for (let t = 0; t < mesh.triangleCount; t++) {
+        const slot = Math.round(mesh.materials[t * 3]) || 0;
+        const group = palette.length ? groupOf(slot) : 0;
+        let list = byGroup.get(group);
+        if (!list) byGroup.set(group, (list = { slot, triangles: [] }));
+        list.triangles.push(t);
       }
 
-      const primitive = {
-        attributes,
-        indices: accessor(indexView, UNSIGNED_INT, welded.index.length, 'SCALAR'),
-      };
-      if (entry) {
-        let textureIndex = -1;
-        const image = images.get(entry.name);
-        if (image && welded.uvs) {
-          const imageView = store(image.bytes);
-          json.images = json.images || [];
-          json.images.push({ bufferView: imageView, mimeType: image.mimeType });
-          json.samplers = json.samplers || [{ wrapS: 10497, wrapT: 10497 }];
-          json.textures = json.textures || [];
-          json.textures.push({ sampler: 0, source: json.images.length - 1 });
-          textureIndex = json.textures.length - 1;
+      const out = { primitives: [] };
+      if (entry.name) out.name = entry.name;
+      for (const part of byGroup.values()) {
+        const paletteEntry = palette[part.slot];
+        const wantUv = !!mesh.hasUv;
+        const welded = weld(part.triangles, mesh, wantUv);
+        vertices += welded.positions.length / 3;
+
+        const positionView = store(welded.positions);
+        json.bufferViews[positionView].target = ARRAY_BUFFER;
+        const normalView = store(welded.normals);
+        json.bufferViews[normalView].target = ARRAY_BUFFER;
+        const indexView = store(welded.index);
+        json.bufferViews[indexView].target = ELEMENT_ARRAY_BUFFER;
+
+        const attributes = {
+          POSITION: accessor(positionView, FLOAT, welded.positions.length / 3, 'VEC3',
+            { min: welded.min, max: welded.max }),
+          NORMAL: accessor(normalView, FLOAT, welded.normals.length / 3, 'VEC3'),
+        };
+        if (welded.uvs) {
+          const uvView = store(welded.uvs);
+          json.bufferViews[uvView].target = ARRAY_BUFFER;
+          attributes.TEXCOORD_0 = accessor(uvView, FLOAT, welded.uvs.length / 2, 'VEC2');
         }
-        json.materials.push(material(entry, textureIndex));
-        primitive.material = json.materials.length - 1;
+
+        const primitive = {
+          attributes,
+          indices: accessor(indexView, UNSIGNED_INT, welded.index.length, 'SCALAR'),
+        };
+        if (paletteEntry) primitive.material = materialFor(paletteEntry, wantUv);
+        out.primitives.push(primitive);
+        primitives++;
       }
-      json.meshes[0].primitives.push(primitive);
-    }
+      json.meshes.push(out);
+      const index = json.meshes.length - 1;
+      meshIndex.set(which, index);
+      return index;
+    };
+
+    /* ---- nodes: the tree, as it was */
+    const root = { name, matrix: rootMatrix(upAxis, unitScale) };
+    json.nodes.push(root);
+
+    const emit = (node) => {
+      const out = {};
+      if (node.name) out.name = node.name;
+      if (node.matrix && !isIdentity(node.matrix)) out.matrix = Array.from(node.matrix);
+      json.nodes.push(out);
+      const index = json.nodes.length - 1;
+      if (node.mesh !== null && node.mesh !== undefined) {
+        const at = meshFor(node.mesh);
+        if (at >= 0) out.mesh = at;
+      }
+      const children = (node.children || []).map(emit).filter((child) => child >= 0);
+      if (children.length) out.children = children;
+      return index;
+    };
+
+    const children = roots.map(emit);
+    if (children.length) root.children = children;
 
     if (!json.materials.length) delete json.materials;
     const usesSpecular = (json.materials || []).some((m) => m.extensions);
@@ -289,13 +372,28 @@ const FbxGltf = (function () {
       at += chunk.length;
     }
 
+    // How many triangles a viewer will draw: a mesh instanced twice is drawn
+    // twice, though it is stored once.
+    let placed = 0;
+    const count = (node) => {
+      if (node.mesh !== null && node.mesh !== undefined) {
+        const mesh = meshes[node.mesh] && meshes[node.mesh].mesh;
+        if (mesh) placed += mesh.triangleCount;
+      }
+      (node.children || []).forEach(count);
+    };
+    roots.forEach(count);
+
     return {
       glb,
       stats: {
-        primitives: json.meshes[0].primitives.length,
+        primitives,
+        meshes: json.meshes.length,
+        nodes: json.nodes.length,
         materials: (json.materials || []).length,
         images: (json.images || []).length,
-        triangles: mesh.triangleCount,
+        triangles: placed,
+        stored: drawn,
         vertices,
         bytes: total,
       },

@@ -390,19 +390,30 @@ check('an ordinary dielectric does not need it', asGltf({}).extensions === undef
 console.log('\ngltf: the container');
 const built = FbxGltf.build({
   name: 'square',
-  mesh: {
-    triangleCount: 2,
-    hasUv: false,
-    positions: square.positions,
-    normals: square.normals,
-    uvs: square.uvs,
-    materials: new Float32Array([0, 0, 0, 1, 1, 1]),
-    min: [0, 0, 0],
-    max: [1, 1, 0],
-  },
-  palette: [
-    { name: 'a', group: 0, colour: [1, 0, 0], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
-    { name: 'b', group: 1, colour: [0, 0, 1], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+  meshes: [{
+    name: 'square',
+    mesh: {
+      triangleCount: 2,
+      hasUv: false,
+      positions: square.positions,
+      normals: square.normals,
+      uvs: square.uvs,
+      materials: new Float32Array([0, 0, 0, 1, 1, 1]),
+    },
+    palette: [
+      { name: 'a', group: 0, colour: [1, 0, 0], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+      { name: 'b', group: 1, colour: [0, 0, 1], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+    ],
+  }],
+  // The same mesh under two nodes: written once, drawn twice.
+  nodes: [
+    { name: 'left', matrix: null, mesh: 0, children: [] },
+    {
+      name: 'right',
+      matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1],
+      mesh: 0,
+      children: [],
+    },
   ],
 });
 const glb = new Uint8Array(built.glb);
@@ -419,6 +430,19 @@ check('the binary chunk is aligned and tagged',
 const gltf = JSON.parse(new TextDecoder().decode(glb.subarray(20, 20 + jsonLength)));
 check('one primitive per material', gltf.meshes[0].primitives.length === 2
   && gltf.materials.length === 2, `${gltf.meshes[0].primitives.length} primitives`);
+check('a mesh used twice is written once', gltf.meshes.length === 1
+  && gltf.nodes.filter((n) => n.mesh !== undefined).length === 2,
+  `${gltf.meshes.length} mesh(es), ${gltf.nodes.length} nodes`);
+check('the tree hangs off a root that carries the axis',
+  Array.isArray(gltf.nodes[0].matrix) && (gltf.nodes[0].children || []).length === 2);
+check('a node keeps its own place', (() => {
+  const right = gltf.nodes.find((n) => n.name === 'right');
+  return right && right.matrix && right.matrix[12] === 3;
+})());
+check('and its name', gltf.nodes.some((n) => n.name === 'left'));
+check('both placements are counted, one is stored',
+  built.stats.triangles === 4 && built.stats.stored === 2,
+  `${built.stats.triangles} drawn, ${built.stats.stored} stored`);
 check('the buffer is as long as the chunk says',
   gltf.buffers[0].byteLength === dv.getUint32(20 + jsonLength, true));
 check('every accessor sits inside its bufferView', gltf.accessors.every((a) => {
@@ -428,7 +452,7 @@ check('every accessor sits inside its bufferView', gltf.accessors.every((a) => {
 }));
 check('an empty scene is refused', (() => {
   try {
-    FbxGltf.build({ mesh: { triangleCount: 0 } });
+    FbxGltf.build({ meshes: [{ mesh: { triangleCount: 0 } }], nodes: [] });
     return false;
   } catch (error) {
     return /no geometry/.test(error.message);

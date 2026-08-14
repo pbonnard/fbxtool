@@ -405,19 +405,24 @@ being encoded back to sRGB. Highlights roll off instead of clipping.
 
 ### Exporting glTF
 
-**Export glTF** writes what is on screen as a `.glb`: the assembled scene, with
-whatever materials you have assigned, in one self-contained binary file.
+**Export glTF** writes what is on screen as a `.glb`: the scene as it stands,
+with whatever materials you have assigned, in one self-contained binary file.
 
-What the viewer holds is already most of a glTF — one combined mesh with a
-material index per vertex, and a palette of resolved materials — so the work is
-in the three places the formats disagree:
+The scene keeps its shape. Each mesh is written once in its own local space and
+placed by a node, so a hierarchy stays a hierarchy — a part keeps its name and
+its parent — and a mesh used by several models is stored once and pointed at
+from each. The three-part sample scene, which is one cube under three
+transforms, exports as one mesh of twelve triangles drawn thirty-six times; the
+De Tomaso Pantera exports as 33 meshes in 84 nodes, eleven deep.
 
-- a glTF primitive has exactly one material, so the mesh is split into one
+What is left is where the formats disagree:
+
+- a glTF primitive has exactly one material, so each mesh is split into one
   primitive per material, and materials covering no triangles are dropped (the
   Mercedes' 23 become 17);
 - triangles arrive unindexed, three vertices each however many they share, so
-  each primitive is welded: the Mercedes' 1,083,708 corners come out as 245,514
-  vertices, which is what makes it 9.8 MiB instead of 35;
+  every primitive is welded: the Mercedes' 1,083,708 corners come out as
+  245,514 vertices, which is what makes it 11.6 MiB instead of 35;
 - glTF is Y-up in metres while these files are often Z-up in centimetres, so
   that difference goes on the root node's matrix rather than into the vertex
   data — the geometry is written exactly as the file holds it.
@@ -425,12 +430,22 @@ in the three places the formats disagree:
 Materials map onto metallic-roughness directly: base colour and opacity,
 roughness, metalness, `BLEND` when the material is see-through, and
 `KHR_materials_specular` when a dielectric's reflectance is not the 4% glTF
-assumes. Textures are embedded as the original PNG or JPEG bytes, not
-re-encoded.
+assumes. A material is written once however many meshes use it.
+
+Textures come too. Bytes that are already PNG or JPEG are embedded untouched;
+anything else is drawn once and encoded as a PNG, which is how a texture that
+arrived as KTX2 leaves as a picture — the Pantera's nineteen Basis textures
+export as nineteen PNGs.
+
+What still does not survive: animation, skins and morph targets; cameras and
+lights; tangents, vertex colours and second UV sets; and every material map but
+the base colour. The geometric offset a mesh carries is baked into its
+vertices, since glTF has no such thing.
 
 The export is checked against the **Khronos glTF-Validator**
 (`npm i -g gltf-validator`) on every sample, alongside checks that the model
-that comes out is the one that went in — same triangle count, same bounds, and
+that comes out is the one that went in: every triangle placed by its node
+against the same bounds, one node per part, a mesh used twice stored once, and
 on small meshes every triangle compared corner by corner.
 
 ### Draco compression
@@ -773,7 +788,7 @@ exporter wrote use them:
 | | |
 | --- | --- |
 | `samples/Mercedes+Benz+GLS+580.fbx` | one mesh of 361,236 triangles, 23 materials, transparent glass |
-| `samples/Shelby.fbx` | 44 parts in their own spaces, one mesh instanced by 24 models, 20 materials carrying nothing at all |
+| `samples/Shelby.fbx` | 44 parts in their own spaces, one material on 24 of them, 20 materials carrying nothing at all |
 
 `FBXTOOL_SAMPLE` and `FBXTOOL_SCENE` point those tests at your own files;
 `FBXTOOL_BLEND` does the same for a `.blend`, of which none is checked in.

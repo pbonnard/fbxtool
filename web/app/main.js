@@ -306,6 +306,7 @@
       if (key === null || frames.has(key)) continue;
       frames.set(key, {
         key,
+        model: obj,
         parent: null,
         properties: FbxAnalyze.resolvedProperties(obj, info.templates),
       });
@@ -698,7 +699,26 @@
     return null;
   }
 
-  /** Each material's base colour image, as the bytes the file carried. */
+  /** An image as PNG bytes, through a canvas. */
+  async function encodePng(image) {
+    if (!image) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    canvas.getContext('2d').drawImage(image, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+  }
+
+  /**
+   * Each material's base colour image, ready for a glTF.
+   *
+   * glTF takes PNG and JPEG and nothing else, so bytes already in one of those
+   * are passed through untouched. Anything else — a KTX2 this tool decoded
+   * itself, most often — is drawn once and encoded as a PNG, which is the
+   * difference between exporting the model and exporting it with its
+   * textures.
+   */
   async function textureBytes(palette) {
     const out = new Map();
     for (const entry of palette) {
@@ -709,9 +729,110 @@
         if (file) bytes = new Uint8Array(await file.arrayBuffer());
       }
       const mimeType = bytes && imageType(bytes);
-      if (mimeType) out.set(entry.name, { bytes, mimeType });
+      if (mimeType) {
+        out.set(entry.name, { bytes, mimeType });
+        continue;
+      }
+      const encoded = await encodePng(await decodeTexture(entry.texture, suppliedImages));
+      if (encoded) out.set(entry.name, { bytes: encoded, mimeType: 'image/png' });
     }
     return out;
+  }
+
+  /**
+   * The scene as glTF wants it: every mesh once, and a tree of nodes placing
+   * them.
+   *
+   * A mesh is built in its own local space — only the geometric offset, which
+   * a child does not inherit, is baked in — so a geometry used by several
+   * models is written once and pointed at from each. What a node carries is
+   * its own local transform, exactly as the file wrote it.
+   */
+  function exportScene() {
+    const frames = collectFrames();
+    const meshes = [];
+    const meshOf = new Map();
+    const heapMark = FbxWasm.mark();
+
+    const meshFor = (part) => {
+      const geometric = FbxTransform.geometricMatrix(part.properties);
+      // Keyed by what would actually be written: the geometry, the materials
+      // by name — the exporter folds same-named materials into one anyway —
+      // and the geometric offset that gets baked in. Four wheels cut from one
+      // mesh share all of that, so they share a mesh.
+      const key = [
+        objectIndex.keyOf(part.geometry),
+        part.materials.map((material) => material.displayName).join(','),
+        geometric ? geometric.join(',') : '',
+        subdivisionLevel,
+      ].join('|');
+      if (meshOf.has(key)) return meshOf.get(key);
+
+      let mesh = null;
+      try {
+        mesh = buildMesh(part.geometry.node, geometric ? {
+          transform: geometric,
+          normalTransform: FbxTransform.normalMatrix(geometric),
+          flipWinding: FbxTransform.determinant3(geometric) < 0,
+        } : {});
+      } catch (error) {
+        console.warn(`skipped ${part.model.displayName}: ${error.message}`);
+      }
+      let index = -1;
+      if (mesh && mesh.triangleCount) {
+        index = meshes.length;
+        meshes.push({
+          name: part.geometry.displayName || part.model.displayName,
+          // Copied out: the next build may grow memory and detach these views.
+          mesh: {
+            triangleCount: mesh.triangleCount,
+            hasUv: mesh.hasUv,
+            positions: mesh.positions.slice(),
+            normals: mesh.normals.slice(),
+            uvs: mesh.uvs.slice(),
+            materials: mesh.materials.slice(),
+          },
+          palette: FbxPalette.apply(part.materials.map(materialEntry), materialOverrides),
+        });
+      }
+      FbxWasm.release(heapMark);
+      meshOf.set(key, index);
+      return index;
+    };
+
+    // A node for every model, whether or not it holds a mesh: a rig or a pivot
+    // is where its children hang from.
+    const nodes = new Map();
+    for (const [key, frame] of frames) {
+      nodes.set(key, {
+        name: frame.model ? frame.model.displayName : '',
+        matrix: FbxTransform.localMatrix(frame.properties),
+        mesh: null,
+        children: [],
+      });
+    }
+    for (const part of sceneParts) {
+      const node = nodes.get(part.key);
+      if (!node) continue;
+      const index = meshFor(part);
+      if (index >= 0) node.mesh = index;
+    }
+
+    const roots = [];
+    for (const [key, frame] of frames) {
+      const node = nodes.get(key);
+      const parent = frame.parent !== null ? nodes.get(frame.parent) : null;
+      if (parent && parent !== node) parent.children.push(node);
+      else roots.push(node);
+    }
+
+    // Drop the branches that hold nothing: an empty node is only worth keeping
+    // for what hangs off it.
+    const keep = (node) => {
+      node.children = node.children.filter(keep);
+      return node.mesh !== null || node.children.length > 0;
+    };
+    return { meshes, nodes: roots.filter(keep) };
   }
 
   async function exportGltf() {
@@ -726,18 +847,29 @@
       const centimetres = typeof settings.unitScale === 'number' ? settings.unitScale : 1;
       const stem = ((currentDoc && currentDoc.fileName) || 'scene').replace(/\.[^.]+$/, '');
       const started = performance.now();
+      // Whatever is on screen: the whole scene as a tree, or the one geometry
+      // picked from the list, which has no tree to keep.
+      const scene = currentGeometry
+        ? {
+          meshes: [{ name: stem, mesh: currentMesh, palette: currentPalette }],
+          nodes: [{ name: stem, matrix: FbxTransform.identity(), mesh: 0, children: [] }],
+        }
+        : exportScene();
       const { glb, stats } = FbxGltf.build({
         name: stem,
-        mesh: currentMesh,
-        palette: currentPalette,
+        meshes: scene.meshes,
+        nodes: scene.nodes,
         images,
         upAxis: dom.upSelect.value,
         unitScale: centimetres / 100,
       });
       download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
       lastExport = stats;
-      setStatus(`Exported ${stats.triangles.toLocaleString()} triangles as `
-        + `${stats.primitives} primitive(s), ${stats.vertices.toLocaleString()} vertices, `
+      const instanced = stats.triangles > stats.stored
+        ? `, ${stats.stored.toLocaleString()} stored` : '';
+      setStatus(`Exported ${stats.triangles.toLocaleString()} triangles${instanced} as `
+        + `${stats.meshes} mesh(es) in ${stats.nodes} node(s), `
+        + `${stats.vertices.toLocaleString()} vertices, `
         + `${(stats.bytes / 1048576).toFixed(1)} MiB`
         + `${stats.images ? ` with ${stats.images} image(s)` : ''} · `
         + `${(performance.now() - started).toFixed(0)} ms`, 'ok');
@@ -1366,6 +1498,7 @@
       get missingTextures() { return missingTextures; },
       get loadCount() { return loadCount; },
       get palette() { return currentPalette; },
+      get parts() { return sceneParts.length; },
       get lastExport() { return lastExport; },
       exportMesh: () => currentMesh,
       exportGltf,
