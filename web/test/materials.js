@@ -390,6 +390,62 @@ ${path.basename(second)}`);
   await page.waitForTimeout(700);
   await page.evaluate(() => window.fbxtool.clearMaterials());
 
+  /* Export a model wearing a material made here, then open that export with
+   * the assignment beside it. The material is in the file now — under the name
+   * it goes by, not the one it is filed under — so rebuilding it from the
+   * assignment as well would make two of it. */
+  console.log('\nout through an export and back');
+  await fresh();
+  await load(page, target);
+  await page.evaluate(() => {
+    window.fbxtool.selectPart(0);
+    window.fbxtool.addMaterial(0);
+    window.fbxtool.editMaterial('New material', { colour: [0, 0.7, 0.1] });
+    window.fbxtool.renameMaterial('New material', 'Grass');
+  });
+  const [exported] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('#export-gltf'),
+  ]);
+  const exportedPath = path.join(path.dirname(await exported.path()), 'exported.glb');
+  await exported.saveAs(exportedPath);
+  await page.click('.tab[data-target="tab-materials"]');
+  const [alongside] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('#materials-save'),
+  ]);
+  const alongsidePath = path.join(path.dirname(await alongside.path()), 'exported.json');
+  await alongside.saveAs(alongsidePath);
+
+  const named = () => page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.material .material-name')]
+      .map((e) => e.textContent);
+    const twice = rows.filter((name, at) => rows.indexOf(name) !== at);
+    return {
+      rows,
+      twice,
+      worn: window.fbxtool.partTable.some((part) => part.materials.length === 1
+        && part.materials[0] === 'Grass'),
+    };
+  });
+
+  await fresh();
+  await page.setInputFiles('#file-input', [exportedPath, alongsidePath]);
+  await page.waitForFunction(() => window.fbxtool.loadCount > 0, { timeout: 180000 });
+  await page.waitForTimeout(500);
+  const back = await named();
+  check('the export and its assignment together list each material once',
+    back.twice.length === 0, back.rows.join(', '));
+  check('and the part is still wearing it', back.worn);
+
+  // And on its own, since the assignment was written to storage under the
+  // exported file's name when it was dropped.
+  await load(page, exportedPath);
+  const alone2 = await named();
+  check('opening the export again does not make a second one',
+    alone2.twice.length === 0 && alone2.worn, alone2.rows.join(', '));
+  await page.evaluate(() => window.fbxtool.clearMaterials());
+
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 
   await browser.close();

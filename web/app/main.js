@@ -652,9 +652,16 @@
    */
   function restoreAddedMaterials() {
     const inFile = fileMaterialNames();
+    const made = new Set();
     extraMaterials = [];
     for (const [name, set] of Object.entries(materialOverrides)) {
       if (!set || inFile.has(name)) continue;
+      // A material added here and then exported comes back inside the file
+      // under the name it goes by rather than the one it is filed under, so
+      // building it again from the assignment would make two of it.
+      const goesBy = set && typeof set.name === 'string' && set.name ? set.name : name;
+      if (inFile.has(goesBy) || made.has(goesBy)) continue;
+      made.add(goesBy);
       extraMaterials.push(newMaterial(name));
     }
     extraCount = extraMaterials.length;

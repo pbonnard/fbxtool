@@ -706,6 +706,12 @@ not anything is wearing it, and whether or not it was made here — which is wha
 makes one written by hand, or by an older version, work as well as one saved
 yesterday.
 
+"Has not got" is asked under both names. Export a model wearing a material made
+here and it comes back inside the `.glb` under the name it *goes by* — `Grass`
+— while the assignment still files it under the one it was born with, `New
+material`. Opening that export with the assignment beside it would otherwise
+build a second Grass; the file already provides it, so nothing is built.
+
 Drop that file back in to apply it again, so an assignment can travel with a
 model that does not carry its own. Any order will do: with the model, before it
 — it waits for one to be opened — or after it. Opening a model starts from
