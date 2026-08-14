@@ -37,10 +37,14 @@ const FbxMax = (function () {
   const TRI_MAP_VERTS = 0x2394;
   const TRI_MAP_FACES = 0x2396;
   const NAME = 0x0962;
+  const OFFSET_POS = 0x096a;
+  const OFFSET_ROT = 0x096b;
+  const OFFSET_SCALE = 0x096c;
   const REFS = 0x2034;
   const TYPED_REFS = 0x2035;
   const POINT3 = 0x2503;
   const SCALE = 0x2505;
+  const FLOAT = 0x2501;
   const CLASS_NAME = 0x2042;
   const CLASS_IDS = 0x2060;
   // A material and its parameter blocks.
@@ -612,6 +616,30 @@ const FbxMax = (function () {
 
   /* ---------------------------------------------------------------- scene */
 
+  /**
+   * How many rounds a subdividing modifier asks for. Its first parameter is
+   * the iteration count, which is the one thing about it worth knowing here:
+   * the mesh under it is the cage, and this is how many times the cage was
+   * meant to be divided.
+   */
+  function smoothingOf(view, entities, index) {
+    let out = 0;
+    for (const ref of entities[index].refs.slice(0, 2)) {
+      if (ref >= entities.length) continue;
+      chunks(view, entities[ref].start, entities[ref].end, (id, body, tail) => {
+        if (id !== PARAM || tail - body > 27) return true;
+        const param = view.getUint16(body, true);
+        const kind = view.getUint16(body + 2, true);
+        if (param === 0 && kind === 1) {
+          out = Math.max(0, Math.min(8, view.getInt32(tail - 4, true)));
+          return false;
+        }
+        return true;
+      });
+    }
+    return out;
+  }
+
   function readEntities(view, length, classes) {
     const out = [];
     let outer = null;
@@ -640,13 +668,86 @@ const FbxMax = (function () {
     return out;
   }
 
-  function controllerValue(view, entity, wanted, fallback) {
-    const found = findChunk(view, entity.start, entity.end, wanted);
+  /**
+   * Find a chunk anywhere below a range, not only among its own children:
+   * a controller wraps its value in a block of its own.
+   */
+  function deepFind(view, start, end, wanted, depth = 0) {
+    let out = null;
+    chunks(view, start, end, (id, body, tail, container) => {
+      if (id === wanted) { out = [body, tail]; return false; }
+      if (container && depth < 4) {
+        const found = deepFind(view, body, tail, wanted, depth + 1);
+        if (found) { out = found; return false; }
+      }
+      return true;
+    });
+    return out;
+  }
+
+  function floatOf(view, entity) {
+    const found = deepFind(view, entity.start, entity.end, FLOAT);
+    return found && found[1] - found[0] >= 4 ? view.getFloat32(found[0], true) : null;
+  }
+
+  /**
+   * What a controller says, however it chooses to say it. A Position XYZ or
+   * an Euler XYZ keeps nothing itself: it refers to three float controllers,
+   * one per axis, and each of those wraps a single value.
+   */
+  function controllerValue(view, entities, entity, wanted, fallback) {
+    const found = deepFind(view, entity.start, entity.end, wanted);
     if (found && found[1] - found[0] >= 12) {
       return [view.getFloat32(found[0], true), view.getFloat32(found[0] + 4, true),
         view.getFloat32(found[0] + 8, true)];
     }
+    const axes = entity.refs.slice(0, 3)
+      .filter((r) => r < entities.length).map((r) => entities[r]);
+    if (axes.length === 3) {
+      const values = axes.map((axis) => floatOf(view, axis));
+      if (values.every((v) => v !== null)) return values;
+    }
     return fallback;
+  }
+
+  /** A quaternion as the XYZ Euler angles an FBX record wants, in radians. */
+  function eulerFromQuaternion(x, y, z, w) {
+    const sinr = 2 * (w * x + y * z);
+    const cosr = 1 - 2 * (x * x + y * y);
+    const sinp = 2 * (w * y - z * x);
+    const siny = 2 * (w * z + x * y);
+    const cosy = 1 - 2 * (y * y + z * z);
+    return [
+      Math.atan2(sinr, cosr),
+      Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp),
+      Math.atan2(siny, cosy),
+    ];
+  }
+
+  /**
+   * Where a node holds its mesh, which need not be where the node is.
+   *
+   * 3ds Max keeps this apart from the node's own transform — it is the offset
+   * an FBX writes as the geometric transform, the one a child does not
+   * inherit — and a part that carries one is somewhere else entirely without
+   * it.
+   */
+  function objectOffset(view, nodeEntity) {
+    const out = { translation: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
+    const position = findChunk(view, nodeEntity.start, nodeEntity.end, OFFSET_POS);
+    if (position && position[1] - position[0] >= 12) {
+      out.translation = [0, 4, 8].map((at) => view.getFloat32(position[0] + at, true));
+    }
+    const rotation = findChunk(view, nodeEntity.start, nodeEntity.end, OFFSET_ROT);
+    if (rotation && rotation[1] - rotation[0] >= 16) {
+      const q = [0, 4, 8, 12].map((at) => view.getFloat32(rotation[0] + at, true));
+      out.rotation = eulerFromQuaternion(q[0], q[1], q[2], q[3]);
+    }
+    const scale = findChunk(view, nodeEntity.start, nodeEntity.end, OFFSET_SCALE);
+    if (scale && scale[1] - scale[0] >= 12) {
+      out.scale = [0, 4, 8].map((at) => view.getFloat32(scale[0] + at, true));
+    }
+    return out;
   }
 
   function nodeTransform(view, entities, nodeEntity) {
@@ -658,11 +759,11 @@ const FbxMax = (function () {
       const part = entities[index];
       const name = (part.cls.name || '').toLowerCase();
       if (name.includes('position')) {
-        out.translation = controllerValue(view, part, POINT3, out.translation);
+        out.translation = controllerValue(view, entities, part, POINT3, out.translation);
       } else if (name.includes('euler') || name.includes('rotation')) {
-        out.rotation = controllerValue(view, part, POINT3, out.rotation);
+        out.rotation = controllerValue(view, entities, part, POINT3, out.rotation);
       } else if (name.includes('scale')) {
-        out.scale = controllerValue(view, part, SCALE, out.scale);
+        out.scale = controllerValue(view, entities, part, SCALE, out.scale);
       }
     }
     return out;
@@ -710,11 +811,16 @@ const FbxMax = (function () {
     const nodes = entities.filter((e) => (e.cls.name || '') === 'Node');
     const placed = [];
     const materials = new Map();
+    // How many parts were modelled with a subdividing modifier, and the most
+    // rounds any of them asks for.
+    let smoothedParts = 0;
+    let smoothedRounds = 0;
     for (const nodeEntity of nodes) {
       const found = findChunk(view, nodeEntity.start, nodeEntity.end, NAME);
       const name = found ? text(view, scene, found[0], found[1]) : '';
       const target = nodeEntity.typed[1];
       let mesh = target === undefined ? null : meshes.get(target);
+      let smoothing = 0;
       if (!mesh && target !== undefined) {
         // A modifier sits between the node and its mesh; the base object is
         // what it was built from, so follow the references down to it.
@@ -724,11 +830,18 @@ const FbxMax = (function () {
           const at = queue.shift();
           if (seen.has(at) || at >= entities.length) continue;
           seen.add(at);
+          if ((entities[at].cls.name || '').toLowerCase().includes('smooth')) {
+            smoothing = Math.max(smoothing, smoothingOf(view, entities, at));
+          }
           mesh = meshes.get(at);
           if (!mesh) queue.push(...entities[at].refs);
         }
       }
       if (!mesh) continue;
+      if (smoothing) {
+        smoothedParts += 1;
+        smoothedRounds = Math.max(smoothedRounds, smoothing);
+      }
       const wearing = nodeEntity.typed[3];
       if (wearing !== undefined && !materials.has(wearing)) {
         const found = readMaterial(view, scene, entities, wearing, byId);
@@ -743,7 +856,11 @@ const FbxMax = (function () {
         }
       }
       placed.push({
-        name, mesh, wearing, placement: nodeTransform(view, entities, nodeEntity),
+        name,
+        mesh,
+        wearing,
+        placement: nodeTransform(view, entities, nodeEntity),
+        offset: objectOffset(view, nodeEntity),
       });
     }
 
@@ -861,6 +978,18 @@ const FbxMax = (function () {
       if (scale.some((v) => v !== 1)) {
         placementProps.push(p70('Lcl Scaling', 'Lcl Scaling', ...scale.map(D)));
       }
+      const offset = entry.offset;
+      if (offset.translation.some((v) => v)) {
+        placementProps.push(p70('GeometricTranslation', 'Vector3D',
+          ...offset.translation.map(D)));
+      }
+      if (offset.rotation.some((v) => v)) {
+        placementProps.push(p70('GeometricRotation', 'Vector3D',
+          ...offset.rotation.map((v) => D(v * 57.29577951308232))));
+      }
+      if (offset.scale.some((v) => v !== 1)) {
+        placementProps.push(p70('GeometricScaling', 'Vector3D', ...offset.scale.map(D)));
+      }
       objects.push(node('Model', [L(modelUid), S(`${label}${CLASS_SEP}Model`), S('Mesh')], [
         node('Version', [I(232)]),
         node('Properties70', [], placementProps),
@@ -933,6 +1062,8 @@ const FbxMax = (function () {
         undecoded: [...undecoded].map(([name, count]) => ({ name, count })),
         materials: materialUids.size,
         textures: [...textureUids.keys()].sort(),
+        smoothed: smoothedParts,
+        smoothing: smoothedRounds,
       },
     };
   }

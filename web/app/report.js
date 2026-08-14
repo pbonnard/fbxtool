@@ -81,6 +81,10 @@ const FbxReport = (function () {
     pairs.push(['Geometry', `${number(e.meshes || 0)} mesh object`
       + `${e.meshes === 1 ? '' : 's'}, `
       + `${number(e.vertices || 0)} vertices, ${number(e.faces || 0)} faces`]);
+    if (e.smoothed) {
+      pairs.push(['Modelled smooth', `${number(e.smoothed)} part(s) carry a subdividing `
+        + `modifier (×${e.smoothing || 1}) — what is stored is the cage`]);
+    }
     if ((e.undecoded || []).length) {
       pairs.push(['Not read', e.undecoded.map((u) => `${u.count} ${u.name}`).join(', ')]);
     }

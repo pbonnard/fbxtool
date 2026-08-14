@@ -1503,6 +1503,19 @@ def _max_param_colour(param: int, rgb: "tuple[float, float, float]") -> bytes:
     return _max_chunk(0x100E, struct.pack("<HHIIIB3f", param, 2, 0, 0, 0, 0, *rgb))
 
 
+def _max_float_controller(value: float) -> bytes:
+    """A Bezier Float, which keeps its one value wrapped in a block of its own.
+
+    This is where a node's position really lives: a Position XYZ holds nothing
+    itself, it refers to three of these, one per axis.
+    """
+    return _max_chunk(0x0004,
+                      _max_chunk(0x7127,
+                                 _max_chunk(0x2501, struct.pack("<f", value)),
+                                 container=True),
+                      container=True)
+
+
 def _max_asset_id(seed: int = 1) -> bytes:
     """The sixteen bytes an asset and the parameter block naming it share."""
     return bytes((seed + i) & 0xFF for i in range(16))
@@ -1527,7 +1540,10 @@ def _max_face(corners: "list[int]", material: int = 0) -> bytes:
 
 def build_max(*, name: str = "cube001", with_uvs: bool = True,
               build: int = (20 * 1000) << 16 | 966,
-              kind: str = "poly", compressed: bool = False) -> bytes:
+              kind: str = "poly", compressed: bool = False,
+              place: "tuple[float, float, float] | None" = None,
+              offset: "tuple[float, float, float] | None" = None,
+              smooth: int = 0) -> bytes:
     """A .max holding one cube under one node.
 
     The cube is a unit cube, which is enough to exercise every rule the reader
@@ -1538,6 +1554,12 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     six quads, ``"mesh"`` for an Editable Mesh of twelve triangles, which is a
     different layout in the same block. ``compressed`` gzips every stream, as
     a newer 3ds Max does.
+
+    ``place`` puts the node somewhere, through the three per-axis controllers a
+    Position XYZ really keeps its value in; ``offset`` sets the offset between
+    the node and its mesh, which is a separate thing again; and ``smooth`` puts
+    a subdividing modifier over the mesh, which is how a scene comes to store a
+    cage rather than what was modelled.
     """
     points = [
         (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
@@ -1599,16 +1621,61 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                                        _max_chunk(0x4001, _max_utf16("Body paint")),
                                        container=True),
                           container=True)
+    # The mesh is entity 0, the node 1, its material's parameters 2 and the
+    # material itself 3; anything else is numbered from there.
+    extra = b""
+    nxt = 4
+    node_refs = [(3, 3)]
+    holds = 0                      # what the node points at for its object
+
+    if smooth:
+        extra += _max_chunk(0x0002,
+                            _max_chunk(0x100E,
+                                       struct.pack("<HHIIIBi", 0, 1, 0, 0, 0, 0, smooth)),
+                            container=True)
+        extra += _max_chunk(0x0007,
+                            _max_chunk(0x2034, struct.pack("<2I", nxt, 0)),
+                            container=True)
+        holds = nxt + 1
+        nxt += 2
+    node_refs.append((1, holds))
+
+    if place is not None:
+        axes = nxt
+        extra += b"".join(_max_float_controller(v) for v in place)
+        nxt += 3
+        extra += _max_chunk(0x0005,
+                            _max_chunk(0x2034, struct.pack("<3I", axes, axes + 1, axes + 2)),
+                            container=True)
+        extra += _max_chunk(0x0006,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        node_refs.append((0, nxt + 1))
+        nxt += 2
+
+    node_offset = b""
+    if offset is not None:
+        node_offset = (_max_chunk(0x096A, struct.pack("<3f", *offset))
+                       + _max_chunk(0x096B, struct.pack("<4f", 0.0, 0.0, 0.0, 1.0))
+                       + _max_chunk(0x096C, struct.pack("<3f", 1.0, 1.0, 1.0)))
+
+    words = [0x10]
+    for key, target in sorted(node_refs):
+        words += [key, target]
     node = _max_chunk(0x0001,
-                      _max_chunk(0x2035, struct.pack("<5I", 0x10, 1, 0, 3, 3))
-                      + _max_chunk(0x0962, _max_utf16(name)),
+                      _max_chunk(0x2035, struct.pack("<%dI" % len(words), *words))
+                      + _max_chunk(0x0962, _max_utf16(name)) + node_offset,
                       container=True)
-    scene = _max_wide_chunk(0x2023, poly + node + params + material)
+    scene = _max_wide_chunk(0x2023, poly + node + params + material + extra)
 
     classes = (_max_class(class_name, 0x10, 0x1BF8338D, dll=0)
                + _max_class("Node", 0x01, 0x01)
                + _max_class("ParamBlock2", 0x82, 0x82)
-               + _max_class("Standard", 0xC00, 0x02))
+               + _max_class("Standard", 0xC00, 0x02)
+               + _max_class("Bezier Float", 0x9003, 0x2007)
+               + _max_class("Position XYZ", 0x900B, 0x118F7E02)
+               + _max_class("Position/Rotation/Scale", 0x9008, 0x2005)
+               + _max_class("TurboSmooth", 0x810, 0x0D727B3E))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),

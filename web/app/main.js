@@ -288,6 +288,7 @@
         upAxisChosen = true;
       }
       objectIndex = buildObjectIndex(currentAnalysis.objects);
+      applySceneSmoothing(doc);
 
       renderReport();
       dom.tree.innerHTML = FbxReport.recordTree(doc.root);
@@ -2082,6 +2083,24 @@
     return sceneParts.length > 1 || placed ? showScene() : showGeometry(candidates[0]);
   }
 
+  /**
+   * Start where the file says it was modelled.
+   *
+   * A 3ds Max scene built with TurboSmooth stores the cage, and drawing the
+   * cage is drawing something nobody modelled — so the smoothing control opens
+   * on the rounds the modifier asks for. It is a control like any other and
+   * can be turned down; what it must not do is override a choice already made.
+   */
+  function applySceneSmoothing(doc) {
+    if (modeChosen || subdivisionLevel) return;
+    const rounds = (doc.extra && doc.extra.smoothing) || 0;
+    const parts = (doc.extra && doc.extra.smoothed) || 0;
+    if (!rounds || !parts) return;
+    const wanted = Math.min(rounds, 2);
+    dom.subdivSelect.value = String(wanted);
+    subdivisionLevel = wanted;
+  }
+
   /** Yield long enough for the browser to paint pending UI changes. */
   const nextFrame = () => new Promise((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -2138,6 +2157,9 @@
         + `triangles · ${measure(size)} units · `
         + `${elapsed.toFixed(0)} ms · ${built.palette.length} material colours`;
       text += smoothingNote(built.mesh);
+      if (currentDoc.format === 'max' && currentDoc.extra.smoothed && subdivisionLevel) {
+        text += ` — ${currentDoc.extra.smoothed} part(s) were modelled with it`;
+      }
       text += seeThrough(built.palette);
       if (textures.requested) {
         text += ` · ${textures.images.length}/${textures.requested} textures`;

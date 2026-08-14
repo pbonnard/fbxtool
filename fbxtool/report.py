@@ -244,6 +244,10 @@ def _render_max_rows(rows: list[tuple[str, Any]], doc) -> None:
     rows.append(("Geometry", f"{meshes:,} mesh object{'' if meshes == 1 else 's'}, "
                              f"{extra.get('vertices', 0):,} vertices, "
                              f"{extra.get('faces', 0):,} faces"))
+    if extra.get("smoothed"):
+        rows.append(("Modelled smooth",
+                     f"{extra['smoothed']:,} part(s) carry a subdividing modifier "
+                     f"(×{extra.get('smoothing', 1)}) — what is stored is the cage"))
     undecoded = extra.get("undecoded") or {}
     if undecoded:
         rows.append(("Not read", ", ".join(f"{count} {name}"

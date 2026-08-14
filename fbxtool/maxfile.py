@@ -136,6 +136,7 @@ _OFFSET_SCALE = 0x096C
 #: Chunks inside a controller.
 _POINT3 = 0x2503
 _SCALE = 0x2505
+_FLOAT = 0x2501
 
 _CLASS_NAME = 0x2042
 _CLASS_IDS = 0x2060
@@ -742,6 +743,26 @@ class _Entity:
         self.typed: dict[int, int] = {}
 
 
+def _smoothing_of(scene: bytes, entities: list, index: int) -> int:
+    """How many rounds a subdividing modifier asks for.
+
+    Its first parameter is the iteration count, which is the one thing about
+    it worth knowing here: the mesh under it is the cage, and this is how many
+    times the cage was meant to be divided.
+    """
+    entity = entities[index]
+    for ref in entity.refs[:2]:
+        if ref >= len(entities):
+            continue
+        for idn, body, tail, _ in _chunks(scene, entities[ref].start, entities[ref].end):
+            if idn != _PARAM or tail - body > 27:
+                continue
+            param, kind = struct.unpack_from("<HH", scene, body)
+            if param == 0 and kind == 1:
+                return max(0, min(8, struct.unpack_from("<i", scene, tail - 4)[0]))
+    return 0
+
+
 def _read_entities(scene: bytes, classes: list[dict]) -> list[_Entity]:
     """The scene list: one entity per top-level chunk, in file order."""
     outer = next(_chunks(scene, 0, len(scene)), None)
@@ -765,12 +786,86 @@ def _read_entities(scene: bytes, classes: list[dict]) -> list[_Entity]:
     return out
 
 
-def _controller_value(scene: bytes, entity: _Entity, wanted: int,
+def _deep_find(scene: bytes, start: int, end: int, wanted: int, depth: int = 0):
+    """Find a chunk anywhere below a range, not only among its own children.
+
+    Controllers wrap their value in a block of their own, so the value is a
+    level or two down from the controller itself.
+    """
+    for idn, body, tail, container in _chunks(scene, start, end):
+        if idn == wanted:
+            return body, tail
+        if container and depth < 4:
+            found = _deep_find(scene, body, tail, wanted, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _float_of(scene: bytes, entity: _Entity):
+    """One float controller's value."""
+    found = _deep_find(scene, entity.start, entity.end, _FLOAT)
+    if found and found[1] - found[0] >= 4:
+        return struct.unpack_from("<f", scene, found[0])[0]
+    return None
+
+
+def _controller_value(scene: bytes, entities: list, entity: _Entity, wanted: int,
                       default: tuple[float, float, float]) -> tuple[float, float, float]:
-    found = _find(scene, entity.start, entity.end, wanted)
+    """What a controller says, however it chooses to say it.
+
+    A Position XYZ or Euler XYZ keeps nothing itself: it refers to three float
+    controllers, one per axis, and each of those wraps a single value.  Some
+    controllers do carry the three together, so both are read.
+    """
+    found = _deep_find(scene, entity.start, entity.end, wanted)
     if found and found[1] - found[0] >= 12:
         return struct.unpack_from("<3f", scene, found[0])
+
+    axes = [entities[r] for r in entity.refs[:3] if r < len(entities)]
+    if len(axes) == 3:
+        values = [_float_of(scene, axis) for axis in axes]
+        if all(v is not None for v in values):
+            return tuple(values)
     return default
+
+
+def _euler_from_quaternion(x: float, y: float, z: float, w: float):
+    """A quaternion as the XYZ Euler angles an FBX record wants, in radians."""
+    import math
+
+    sinr = 2.0 * (w * x + y * z)
+    cosr = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr, cosr)
+    sinp = 2.0 * (w * y - z * x)
+    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
+    siny = 2.0 * (w * z + x * y)
+    cosy = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny, cosy)
+    return (roll, pitch, yaw)
+
+
+def _object_offset(scene: bytes, node: _Entity) -> dict:
+    """Where a node holds its mesh, which need not be where the node is.
+
+    3ds Max keeps this apart from the node's own transform — it is the offset
+    an FBX writes as the geometric transform, the one a child does not
+    inherit — and a part that carries one is somewhere else entirely without
+    it.
+    """
+    out = {"translation": (0.0, 0.0, 0.0), "rotation": (0.0, 0.0, 0.0),
+           "scale": (1.0, 1.0, 1.0)}
+    found = _find(scene, node.start, node.end, _OFFSET_POS)
+    if found and found[1] - found[0] >= 12:
+        out["translation"] = struct.unpack_from("<3f", scene, found[0])
+    found = _find(scene, node.start, node.end, _OFFSET_ROT)
+    if found and found[1] - found[0] >= 16:
+        x, y, z, w = struct.unpack_from("<4f", scene, found[0])
+        out["rotation"] = _euler_from_quaternion(x, y, z, w)
+    found = _find(scene, node.start, node.end, _OFFSET_SCALE)
+    if found and found[1] - found[0] >= 12:
+        out["scale"] = struct.unpack_from("<3f", scene, found[0])
+    return out
 
 
 def _node_transform(scene: bytes, entities: list[_Entity], node: _Entity) -> dict:
@@ -790,11 +885,13 @@ def _node_transform(scene: bytes, entities: list[_Entity], node: _Entity) -> dic
     for part in parts:
         name = (part.cls.get("name") or "").lower()
         if "position" in name:
-            out["translation"] = _controller_value(scene, part, _POINT3, out["translation"])
+            out["translation"] = _controller_value(scene, entities, part, _POINT3,
+                                                   out["translation"])
         elif "euler" in name or "rotation" in name:
-            out["rotation"] = _controller_value(scene, part, _POINT3, out["rotation"])
+            out["rotation"] = _controller_value(scene, entities, part, _POINT3,
+                                                out["rotation"])
         elif "scale" in name:
-            out["scale"] = _controller_value(scene, part, _SCALE, out["scale"])
+            out["scale"] = _controller_value(scene, entities, part, _SCALE, out["scale"])
     return out
 
 
@@ -903,11 +1000,15 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
     nodes = [e for e in entities if (e.cls.get("name") or "") == "Node"]
     placed = []
     materials: dict[int, _Material] = {}
+    #: How many parts were modelled with a subdividing modifier, and the most
+    #: rounds any of them asks for.
+    smoothed = [0, 0]
     for node in nodes:
         found = _find(scene, node.start, node.end, _NAME)
         name = _text(scene[found[0]:found[1]]) if found else ""
         target = node.typed.get(1)
         mesh = meshes.get(target) if target is not None else None
+        smoothing = 0
         if mesh is None and target is not None and target < len(entities):
             # A modifier sits between the node and its mesh; the base object is
             # what it was built from, so follow the references down to it.
@@ -918,6 +1019,8 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                 if at in seen or at >= len(entities):
                     continue
                 seen.add(at)
+                if "smooth" in (entities[at].cls.get("name") or "").lower():
+                    smoothing = max(smoothing, _smoothing_of(scene, entities, at))
                 mesh = meshes.get(at)
                 if mesh is None:
                     queue.extend(entities[at].refs)
@@ -933,8 +1036,11 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                         under = _read_material(scene, entities, sub, by_id)
                         if under is not None:
                             materials[sub] = under
+        if smoothing:
+            smoothed[0] += 1
+            smoothed[1] = max(smoothed[1], smoothing)
         placed.append((node, name, mesh, _node_transform(scene, entities, node),
-                       wearing))
+                       wearing, _object_offset(scene, node)))
 
     # ---- the record tree
     creator = summary.get("application") or "Autodesk 3ds Max"
@@ -986,7 +1092,7 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
             connections.append(_node("C", [_s("OP"), _l(texture_uids[material.texture]),
                                            _l(material_uids[index]), _s("DiffuseColor")]))
 
-    for at, (entity, name, mesh, placement, wearing) in enumerate(placed):
+    for at, (entity, name, mesh, placement, wearing, offset) in enumerate(placed):
         geometry_uid, model_uid = uid + 1, uid + 2
         uid += 2
         label = name or f"object{at + 1}"
@@ -1049,6 +1155,15 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         if scale != (1.0, 1.0, 1.0):
             model_props.append(_p70("Lcl Scaling", "Lcl Scaling",
                                     *(_d(v) for v in scale)))
+        if any(offset["translation"]):
+            model_props.append(_p70("GeometricTranslation", "Vector3D",
+                                    *(_d(v) for v in offset["translation"])))
+        if any(offset["rotation"]):
+            model_props.append(_p70("GeometricRotation", "Vector3D",
+                                    *(_d(_degrees(v)) for v in offset["rotation"])))
+        if offset["scale"] != (1.0, 1.0, 1.0):
+            model_props.append(_p70("GeometricScaling", "Vector3D",
+                                    *(_d(v) for v in offset["scale"])))
         objects_node.children.append(
             _node("Model", [_l(model_uid), _s(f"{label}\x00\x01Model"), _s("Mesh")],
                   [_node("Version", [_i(232)]),
@@ -1081,7 +1196,7 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
     root.children.append(objects_node)
     root.children.append(_node("Connections", [], connections))
 
-    vertices = sum(len(mesh.positions) // 3 for _, _, mesh, _, _ in placed)
+    vertices = sum(len(mesh.positions) // 3 for _, _, mesh, _, _, _ in placed)
     doc.extra = {
         "streams": compound.names,
         "sector": compound.sector,
@@ -1099,6 +1214,8 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         "build": build,
         "materials": len(material_uids),
         "textures": sorted(texture_uids),
+        "smoothed": smoothed[0],
+        "smoothing": smoothed[1],
     }
     if undecoded:
         doc.warn("no geometry read from "

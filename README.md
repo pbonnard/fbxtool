@@ -226,6 +226,21 @@ before it reads a vertex index as a degree. The `0x20` payload is what makes
 the record variable: a mesh of nothing but quads parses under a fixed 14-byte
 trailer and hides the rule until the first pentagon.
 
+Where a part stands takes a walk of its own. A node's transform is a
+Position/Rotation/Scale controller, and a Position XYZ holds nothing itself —
+it refers to three float controllers, one per axis, each wrapping its single
+value a level further down. A reader that looks only at the controller's own
+chunks finds nothing and leaves the part at the origin. Separate from that is
+the offset between a node and its mesh, which is what an FBX writes as the
+geometric transform. Read both, and all 164 parts of the Smart land exactly
+where its FBX export puts them — translation, rotation, scale and offset alike.
+
+A scene is usually modelled smooth and stored as its cage: 157 of the Smart's
+164 parts carry a TurboSmooth, ×2, so what the file holds is a fraction of what
+was drawn. The report says so, and the viewer opens on the rounds the modifier
+asks for — 217,930 vertices become 6.4 million triangles in about half a
+second, which is the car rather than the cage.
+
 3ds Max 2022 and later can gzip each stream, which is undone on the way in —
 in the browser by the same WebAssembly inflater that unpacks an FBX array.
 Files that stop mid-sector are read to the end rather than refused; writers do

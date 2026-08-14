@@ -99,7 +99,8 @@ def test_the_version_stamp_says_which_max_wrote_it():
 def test_the_class_table_and_the_plugins_are_read():
     doc = parse_max(fb.build_max())
     names = [c["name"] for c in doc.extra["classes"]]
-    assert names == ["Editable Poly", "Node", "ParamBlock2", "Standard"]
+    assert names[:4] == ["Editable Poly", "Node", "ParamBlock2", "Standard"]
+    assert "TurboSmooth" in names
     assert doc.extra["dlls"][0]["file"] == "epoly.dlo"
 
 
@@ -281,3 +282,52 @@ def test_a_material_nothing_points_at_is_left_out():
     is worth a record."""
     doc = parse_max(fb.build_max(), load_arrays=True)
     assert doc.extra["materials"] == 1          # not the class table's worth
+
+
+def test_a_node_is_placed_by_its_three_axis_controllers():
+    """A Position XYZ holds nothing itself.
+
+    It refers to three float controllers, one per axis, and each of those
+    wraps its single value a level further down — a reader that looks only at
+    the controller's own chunks finds nothing and leaves the part at the
+    origin, which is where this went wrong.
+    """
+    doc = parse_max(fb.build_max(place=(10.5, -2.0, 3.25)), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    model = next(n for n in objects.children if n.name == "Model")
+    placement = {q.props[0].value: [round(x.value, 3) for x in q.props[4:7]]
+                 for q in model.get("Properties70").children}
+    assert placement["Lcl Translation"] == [10.5, -2.0, 3.25]
+
+    # And a scene that says nothing leaves the node where it stands.
+    plain = parse_max(fb.build_max(), load_arrays=True)
+    model = next(n for n in next(o for o in plain.root.children if o.name == "Objects")
+                 .children if n.name == "Model")
+    assert model.get("Properties70").children == []
+
+
+def test_the_offset_between_a_node_and_its_mesh_is_kept():
+    """3ds Max holds this apart from the node's own transform, and so does an
+    FBX — it is the geometric transform, the one a child does not inherit."""
+    doc = parse_max(fb.build_max(offset=(1.0, 2.0, 3.0)), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    model = next(n for n in objects.children if n.name == "Model")
+    placement = {q.props[0].value: [round(x.value, 3) for x in q.props[4:7]]
+                 for q in model.get("Properties70").children}
+    assert placement["GeometricTranslation"] == [1.0, 2.0, 3.0]
+    assert "Lcl Translation" not in placement
+
+
+def test_a_scene_modelled_smooth_says_how_smooth():
+    """The mesh under a subdividing modifier is the cage, and drawing the cage
+    is drawing something nobody modelled — so the file is asked how many
+    rounds it wanted."""
+    doc = parse_max(fb.build_max(smooth=2), load_arrays=True)
+    assert doc.extra["smoothed"] == 1
+    assert doc.extra["smoothing"] == 2
+    # The geometry itself is still the cage; nothing is subdivided here.
+    assert doc.extra["vertices"] == 8
+
+    once = parse_max(fb.build_max(smooth=1))
+    assert once.extra["smoothing"] == 1
+    assert parse_max(fb.build_max()).extra["smoothed"] == 0
