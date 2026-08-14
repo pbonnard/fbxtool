@@ -401,6 +401,9 @@ own. `as the file has it` puts a part back in what it came in.
 This is the same kind of edit as a delete: it lives in the segment list, so
 `Ctrl+Z` undoes it, **Restore all** clears it, and the Report's **Edits**
 section counts the parts wearing something new and names the materials added.
+Unlike a delete, it also outlives the session — dressing a part is a fact about
+its material, so it is written into the assignment for the model along with the
+colours, and comes back with them ([Assigning materials](#assigning-materials)).
 The export follows too — a material given by hand is written onto the end of
 that part's own palette and its triangles pointed at it, so a part reassigned
 no longer shares a mesh with the untouched instances of the same geometry,
@@ -686,11 +689,17 @@ JSON:
 { "fbxtoolMaterials": 1,
   "materials": {
     "Carroserie": { "colour": [0.02, 0.05, 0.26], "roughness": 0.25 },
-    "Material.002": { "name": "Wheel black", "roughness": 0.8 } } }
+    "Material.002": { "name": "Wheel black", "roughness": 0.8 },
+    "New material": { "added": true, "name": "Grass", "colour": [0, 0.7, 0.1] } },
+  "parts": { "2001": "New material" } }
 ```
 
 The key is always the file's own name — that is what makes a rename portable —
-and `name` is what to call it instead.
+and `name` is what to call it instead. `added` marks a material that is in no
+file: nothing else would ever build it again, so the assignment says to. And
+`parts` says who wears what, keyed by the model's own address — the UID a 7.x
+file gives it, the name a 6.x one does — so the map still finds the part when
+the file is read again.
 
 Drop that file back in to apply it again, so an assignment can travel with a
 model that does not carry its own. Any order will do: with the model, before it
@@ -699,10 +708,17 @@ whatever was remembered for that file, so an assignment arriving with it is put
 on afterwards rather than before, which is the only order that survives the
 load.
 
-What that file records is how a material *looks*. Which part *wears* it, and
-any material added by hand, are edits to the scene rather than to the palette:
-they live with the deletes and splits above, undo with them, and are gone when
-the model is opened afresh.
+So everything about the materials comes back: what they look like, what they
+are called, the ones added by hand, and which parts were dressed in them —
+from the file, or from what the viewer remembers per model, whichever arrives.
+A restored assignment reads as the scene rather than as an unsaved edit: the
+Report shows no **Edits** section for it, and **Restore all** goes back to it
+rather than past it. **Clear all** drops the lot and returns the file's own.
+
+What does *not* come back is the cutting up: deletes and splits live only as
+long as the session, and a material put on one piece of a split part goes with
+it — a piece has no name to file it under. Whole parts are what an assignment
+can speak about.
 
 ### Transparency
 

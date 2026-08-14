@@ -164,30 +164,39 @@ const FbxPalette = (function () {
   const storageKey = (fileName) => `fbxtool:materials:${fileName || 'unnamed'}`;
 
   /** Storage is unavailable in some browsers on file:// URLs; degrade quietly. */
+  const nothing = () => ({ materials: {}, parts: {} });
+
   function load(fileName) {
     try {
       const raw = window.localStorage.getItem(storageKey(fileName));
-      return raw ? parse(raw) : {};
+      return raw ? parse(raw) : nothing();
     } catch (error) {
-      return {};
+      return nothing();
     }
   }
 
-  function save(fileName, overrides) {
+  function save(fileName, overrides, parts) {
     try {
-      if (!overrides || !Object.keys(overrides).length) {
-        window.localStorage.removeItem(storageKey(fileName));
-      } else {
-        window.localStorage.setItem(storageKey(fileName), serialise(overrides));
-      }
+      const settings = overrides && Object.keys(overrides).length;
+      const worn = parts && Object.keys(parts).length;
+      if (!settings && !worn) window.localStorage.removeItem(storageKey(fileName));
+      else window.localStorage.setItem(storageKey(fileName), serialise(overrides, parts));
       return true;
     } catch (error) {
       return false;
     }
   }
 
-  function serialise(overrides) {
-    return `${JSON.stringify({ fbxtoolMaterials: 1, materials: overrides }, null, 2)}\n`;
+  /**
+   * An assignment as a file: what each material looks like, and — where a part
+   * has been dressed in something the file did not give it — which part wears
+   * which. A part is named by the key its model is addressed by, so the map
+   * still finds it when the file is read again.
+   */
+  function serialise(overrides, parts) {
+    const data = { fbxtoolMaterials: 1, materials: overrides || {} };
+    if (parts && Object.keys(parts).length) data.parts = parts;
+    return `${JSON.stringify(data, null, 2)}\n`;
   }
 
   /** Read a saved assignment, tolerating anything that is not one. */
@@ -219,9 +228,19 @@ const FbxPalette = (function () {
       if (typeof value.name === 'string' && value.name.trim()) {
         set.name = value.name.trim().slice(0, 120);
       }
+      // Nothing in the file to fall back on: this one was made here, and has
+      // to be built again before anything can wear it.
+      if (value.added === true) set.added = true;
       if (Object.keys(set).length) out[name] = set;
     }
-    return out;
+
+    const parts = {};
+    if (data.parts && typeof data.parts === 'object') {
+      for (const [part, material] of Object.entries(data.parts)) {
+        if (typeof material === 'string' && material) parts[String(part)] = material;
+      }
+    }
+    return { materials: out, parts };
   }
 
   /* ------------------------------------------------------------- markup */

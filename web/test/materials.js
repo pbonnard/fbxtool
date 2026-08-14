@@ -54,6 +54,9 @@ const show = (list) => list.map((c) => `rgb(${c.join(',')})`).join(' ');
 
 async function load(page, file) {
   const before = await page.evaluate(() => window.fbxtool.loadCount);
+  // Emptied first: choosing the file already in the input is no change at all,
+  // and nothing would happen.
+  await page.setInputFiles('#file-input', []);
   await page.setInputFiles('#file-input', [file]);
   await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, before,
     { timeout: 120000 });
@@ -270,6 +273,77 @@ ${path.basename(second)}`);
       JSON.stringify(afterwards));
     await page.evaluate(() => window.fbxtool.clearMaterials());
   }
+
+  /* A material added here is in no file, so nothing but the assignment can
+   * ever bring it back — and a material nobody wears is not much of a
+   * restoration, so the part has to be dressed in it again too. */
+  console.log('\nmaterials made here');
+  await fresh();
+  await load(page, target);
+  await page.click('.tab[data-target="tab-materials"]');
+  const made = await page.evaluate(() => {
+    window.fbxtool.selectPart(0);
+    window.fbxtool.addMaterial(0);
+    window.fbxtool.editMaterial('New material', { colour: [0, 0.7, 0.1], roughness: 0.8 });
+    window.fbxtool.renameMaterial('New material', 'Grass');
+    return {
+      palette: window.fbxtool.palette.length,
+      wearing: window.fbxtool.partTable[0].materials.join(''),
+      written: JSON.stringify(window.fbxtool.overrides['New material']),
+    };
+  });
+  check('a material added here is written down as one',
+    /"added":true/.test(made.written), made.written);
+
+  const [addedFile] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('#materials-save'),
+  ]);
+  const addedPath = path.join(path.dirname(await addedFile.path()), 'added.json');
+  await addedFile.saveAs(addedPath);
+  const addedJson = JSON.parse(fs.readFileSync(addedPath, 'utf8'));
+  check('and so is the part wearing it',
+    Object.values(addedJson.parts || {}).includes('New material'),
+    JSON.stringify(addedJson.parts || {}));
+
+  const dressed = () => page.evaluate(() => {
+    const material = window.fbxtool.palette.find((m) => m.fromFile.name === 'New material');
+    const at = window.fbxtool.partTable.findIndex((part) => part.materials.length === 1
+      && part.materials[0] === 'New material');
+    return {
+      there: !!material,
+      name: material ? material.name : '',
+      green: material ? Number(material.colour[1].toFixed(2)) : -1,
+      worn: at,
+      edits: !!window.fbxtool.edits,
+    };
+  });
+
+  // Re-opening the model: the assignment comes out of storage.
+  await load(page, target);
+  const remade = await dressed();
+  check('re-opening the model builds it again, worn by the same part',
+    remade.there && remade.name === 'Grass' && remade.green === 0.7 && remade.worn === 0,
+    JSON.stringify(remade));
+  check('and what was restored reads as the scene, not as an unsaved edit',
+    !remade.edits);
+
+  // And from the file itself, on a page that remembers nothing.
+  await fresh();
+  await page.setInputFiles('#file-input', [target, addedPath]);
+  await page.waitForFunction(() => window.fbxtool.loadCount > 0, { timeout: 180000 });
+  await page.waitForTimeout(400);
+  const fromFile = await dressed();
+  check('a saved assignment brings it back on its own',
+    fromFile.there && fromFile.name === 'Grass' && fromFile.green === 0.7 && fromFile.worn === 0,
+    JSON.stringify(fromFile));
+
+  await page.click('.tab[data-target="tab-materials"]');
+  await page.click('#materials-clear');
+  await page.waitForTimeout(300);
+  const swept = await dressed();
+  check('"Clear all" takes it away again', !swept.there && swept.worn < 0,
+    JSON.stringify(swept));
 
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 

@@ -92,6 +92,12 @@
    *  palette underneath the parts that were assigned earlier slots. */
   let extraMaterials = [];
   let extraCount = 0;
+  /** How many of them the file arrived with, so that a material restored from
+   *  a saved assignment reads as part of the scene and not as an edit to it. */
+  let baseExtras = 0;
+  /** Which part wears which material, as a saved assignment records it:
+   *  the model's key against the name the material is filed under. */
+  let partAssignments = {};
   /** Segments are told apart by identity, which the glTF export needs to keep
    *  instancing: two parts cut from one geometry share a mesh only while
    *  neither has been edited. */
@@ -133,7 +139,7 @@
     const dropped = [];
     for (const file of assignments) {
       try {
-        dropped.push({ name: file.name, overrides: FbxPalette.parse(await file.text()) });
+        dropped.push({ name: file.name, saved: FbxPalette.parse(await file.text()) });
       } catch (error) {
         setStatus(`${file.name}: ${error.message}`, 'error');
       }
@@ -143,7 +149,10 @@
         names: dropped.map((entry) => entry.name),
         // Several at once fold together, the last word winning; what they say
         // stands on its own rather than on top of what was remembered.
-        overrides: Object.assign({}, ...dropped.map((entry) => entry.overrides)),
+        saved: {
+          materials: Object.assign({}, ...dropped.map((entry) => entry.saved.materials)),
+          parts: Object.assign({}, ...dropped.map((entry) => entry.saved.parts)),
+        },
       };
     }
 
@@ -179,9 +188,9 @@
   /** Put a dropped assignment on the model, once there is one to put it on. */
   function applyPending() {
     if (!pendingAssignment || !currentDoc) return false;
-    const { names, overrides } = pendingAssignment;
+    const { names, saved } = pendingAssignment;
     pendingAssignment = null;
-    useAssignment(overrides);
+    useAssignment(saved);
     setStatus(`Applied ${names.join(', ')}.`, 'ok');
     return true;
   }
@@ -266,7 +275,9 @@
       currentDoc = doc;
       currentAnalysis = FbxAnalyze.analyze(doc);
       // Whatever was assigned to this file last time it was open.
-      materialOverrides = FbxPalette.load(doc.fileName);
+      const remembered = FbxPalette.load(doc.fileName);
+      materialOverrides = remembered.materials;
+      partAssignments = remembered.parts;
       const savedAxis = recallUpAxis(doc.fileName);
       if (savedAxis) {
         dom.upSelect.value = savedAxis;
@@ -590,28 +601,93 @@
   function resetSegments() {
     baseSegments = builtPieces
       ? builtPieces.pieces
-        .map((piece, source) => (piece ? newSegment(source, null, null) : null))
+        .map((piece, source) => (piece
+          ? newSegment(source, null, null, restoredSlot(source)) : null))
         .filter(Boolean)
       : [];
     segments = baseSegments;
-    extraMaterials = [];
-    extraCount = 0;
+    baseExtras = extraCount;
     history.past.length = 0;
     history.future.length = 0;
   }
 
   const currentSegments = () => segments || [];
 
-  /** Whether what is on screen still is what the file holds. */
-  const edited = () => (segments !== null && segments !== baseSegments) || extraCount > 0;
+  /**
+   * Whether what is on screen still is what the file — and the assignment
+   * saved for it — says it should be.
+   */
+  const edited = () => (segments !== null && segments !== baseSegments)
+    || extraCount !== baseExtras;
 
   function resetEdits() {
     segments = null;
     baseSegments = null;
     extraMaterials = [];
     extraCount = 0;
+    baseExtras = 0;
     history.past.length = 0;
     history.future.length = 0;
+  }
+
+  /**
+   * Build the materials a saved assignment says were added here.
+   *
+   * They are not in the file, so nothing else would ever make them: without
+   * this the assignment would hold a colour for a material that no longer
+   * exists, and the parts wearing it would come back undressed.
+   */
+  function restoreAddedMaterials() {
+    extraMaterials = [];
+    for (const [name, set] of Object.entries(materialOverrides)) {
+      if (!set || set.added !== true) continue;
+      extraMaterials.push(newMaterial(name));
+    }
+    extraCount = extraMaterials.length;
+  }
+
+  /** The slot a saved assignment puts on a part, or null. */
+  function restoredSlot(source) {
+    // Only a whole scene has parts a saved assignment can name.
+    if (currentGeometry || !builtPieces) return null;
+    const part = sceneParts[source];
+    const wanted = part ? partAssignments[String(part.key)] : null;
+    if (!wanted) return null;
+    const palette = builtPieces.palette.concat(extraMaterials.slice(0, extraCount));
+    const at = palette.findIndex((material) => originOf(material) === wanted);
+    return at >= 0 ? at : null;
+  }
+
+  /** The name a material is filed under: what the file called it. */
+  const originOf = (material) => (material.fromFile && material.fromFile.name) || material.name;
+
+  /**
+   * Which part wears what, for the assignment file.
+   *
+   * Only whole parts: a piece of a split has no name to file it under, and the
+   * split itself does not outlive the session. Parts that are not in the scene
+   * as it stands — deleted, or split — keep whatever was saved for them, so
+   * taking a part out for a moment does not forget how it was dressed.
+   */
+  function partMap() {
+    if (currentGeometry || !builtPieces) return partAssignments;
+    const palette = builtPieces.palette.concat(extraMaterials.slice(0, extraCount));
+    const out = Object.assign({}, partAssignments);
+    for (const segment of currentSegments()) {
+      const part = sceneParts[segment.source];
+      if (!part || segment.faces) continue;
+      const material = segment.material != null ? palette[segment.material] : null;
+      if (material) out[String(part.key)] = originOf(material);
+      else delete out[String(part.key)];
+    }
+    return out;
+  }
+
+  /** Remember the materials, and who is wearing them, against this file. */
+  function persist() {
+    if (!currentDoc) return;
+    partAssignments = partMap();
+    FbxPalette.save(currentDoc.fileName, materialOverrides, partAssignments);
   }
 
   /** What has been done to the scene, for the readout and for the report. */
@@ -649,7 +725,7 @@
       removed,
       split,
       assigned,
-      added: extraMaterials.slice(0, extraCount).map((material) => material.name),
+      added: extraMaterials.slice(baseExtras, extraCount).map((material) => material.name),
       removedModels,
       editedModels,
       parts: partTable.length,
@@ -698,6 +774,8 @@
       + editNote();
     updateEditControls();
     renderReport();
+    // How a part is dressed belongs to the file, the way its colours do.
+    persist();
     if (note) setStatus(note, 'ok');
   }
 
@@ -821,13 +899,10 @@
    * that adding one shows: the Materials tab is where it becomes what it needs
    * to be, and it is edited there like any other.
    */
-  function addMaterial(index) {
-    if (!builtPieces) return;
-    const taken = new Set([...builtPieces.palette, ...extraMaterials].map((m) => m.name));
-    let name = 'New material';
-    for (let n = 2; taken.has(name); n++) name = `New material ${n}`;
+  /** A plain material of our own, under a name the file has not used. */
+  function newMaterial(name) {
     const colour = [0.55, 0.55, 0.55];
-    const material = {
+    return {
       name,
       uid: null,
       colour: colour.slice(),
@@ -847,10 +922,20 @@
       texture: null,
       layer: -1,
     };
+  }
+
+  function addMaterial(index) {
+    if (!builtPieces) return;
+    const taken = new Set([...builtPieces.palette, ...extraMaterials].map((m) => m.name));
+    let name = 'New material';
+    for (let n = 2; taken.has(name); n++) name = `New material ${n}`;
     // Kept beyond an undo so that the slots handed out earlier keep pointing
     // at the same material; how many count is what undo puts back.
     extraMaterials = extraMaterials.slice(0, extraCount);
-    extraMaterials.push(material);
+    extraMaterials.push(newMaterial(name));
+    // Written down as one of ours: nothing in the file would rebuild it, so
+    // the assignment has to say that it was made here.
+    materialOverrides[name] = Object.assign({ added: true }, materialOverrides[name]);
     const slot = builtPieces.palette.length + extraMaterials.length - 1;
 
     const part = partTable[index];
@@ -900,8 +985,8 @@
   function restoreAll() {
     if (!edited()) return;
     setSelectedPart(-1);
-    applyEdit({ segments: baseSegments, extras: 0 },
-      'Every part put back, and the file\'s own materials with it.');
+    applyEdit({ segments: baseSegments, extras: baseExtras },
+      'Every part put back, as the file and its assignment have it.');
   }
 
   /** Offer the edit controls only where they mean something. */
@@ -1193,7 +1278,7 @@
         if (output) output.textContent = value.toFixed(2);
       });
     }
-    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    persist();
     dom.materialsSave.disabled = false;
     dom.materialsClear.disabled = false;
   }
@@ -1233,7 +1318,7 @@
     renderMaterials();
     // The readout names the part's materials, so it has to hear about it.
     if (selectedPart >= 0) setSelectedPart(selectedPart);
-    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    persist();
     setStatus(wanted && wanted !== key
       ? `${key} is now called ${wanted}.`
       : `${group.name} goes back to ${key}.`, 'ok');
@@ -1242,7 +1327,18 @@
   /** Put every material back to what the file said. */
   function clearMaterials() {
     materialOverrides = {};
-    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+    partAssignments = {};
+    // Everything the file did not say goes: the settings, the names, the
+    // materials added here and the parts wearing them.
+    if (builtPieces && currentSegments().some((segment) => segment.material != null)) {
+      setSelectedPart(-1);
+      applyEdit({
+        segments: currentSegments().map((segment) => (segment.material == null
+          ? segment : Object.assign({}, segment, { material: null }))),
+        extras: 0,
+      });
+    }
+    persist();
     refreshPalette();
     // Names go back to the file's along with everything else.
     regroup();
@@ -1251,9 +1347,25 @@
   }
 
   /** Apply a saved assignment, from storage or a dropped file. */
-  function useAssignment(overrides) {
-    materialOverrides = overrides;
-    if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+  function useAssignment(saved) {
+    // A saved assignment used to be nothing but material settings, so one that
+    // still is — an older file, or a caller passing the map on its own — is
+    // read as having nobody wearing anything.
+    const incoming = saved && saved.materials
+      ? saved : { materials: saved || {}, parts: {} };
+    materialOverrides = incoming.materials;
+    partAssignments = incoming.parts || {};
+
+    // Materials it added have to be built and the parts dressed in them again,
+    // and both of those are read while the scene is put together.
+    if (builtPieces && !currentGeometry) {
+      restoreAddedMaterials();
+      resetSegments();
+      setSelectedPart(-1);
+      refreshEdited();
+      return;
+    }
+    persist();
     if (currentPalette.length) refreshPalette();
     regroup();
     renderMaterials();
@@ -1273,7 +1385,8 @@
   }
 
   function saveAssignment() {
-    download(new Blob([FbxPalette.serialise(materialOverrides)], { type: 'application/json' }),
+    download(new Blob([FbxPalette.serialise(materialOverrides, partMap())],
+      { type: 'application/json' }),
       `${(currentDoc && currentDoc.fileName) || 'model'}.materials.json`);
   }
 
@@ -1633,7 +1746,7 @@
       const name = keyOf(event);
       if (!name) return;
       delete materialOverrides[name];
-      if (currentDoc) FbxPalette.save(currentDoc.fileName, materialOverrides);
+      persist();
       refreshPalette();
       renderMaterials();
     });
@@ -1933,6 +2046,9 @@
       // whole, which is said out loud rather than left to be noticed.
       const hadEdits = edited();
       builtPieces = buildPieces(sceneParts);
+      // The materials a saved assignment added come back before the scene is
+      // put together, since the parts are dressed out of the same palette.
+      restoreAddedMaterials();
       resetSegments();
       const built = assemble(builtPieces, currentSegments());
       if (!built) {

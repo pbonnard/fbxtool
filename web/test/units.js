@@ -318,11 +318,11 @@ check('the editor reads the new name back',
 FbxPalette.apply(two, {});
 check('and clearing the assignment gives the file\'s name back', two[0].name === 'paint');
 const savedName = FbxPalette.parse(
-  FbxPalette.serialise({ paint: { name: 'Body red', opacity: 0.5 } }));
+  FbxPalette.serialise({ paint: { name: 'Body red', opacity: 0.5 } })).materials;
 check('a saved assignment carries the name with the rest',
   savedName.paint.name === 'Body red' && savedName.paint.opacity === 0.5);
 check('a blank name is not a rename',
-  !FbxPalette.parse(FbxPalette.serialise({ paint: { name: '   ' } })).paint);
+  !FbxPalette.parse(FbxPalette.serialise({ paint: { name: '   ' } })).materials.paint);
 
 const glassPreset = FbxPalette.preset('glass');
 check('presets carry an opacity', glassPreset && glassPreset.opacity < 1,
@@ -332,14 +332,34 @@ check('every preset is complete', FbxPalette.PRESETS.every((p) => p.id && p.labe
 
 console.log('\npalette: saved assignments');
 const written = FbxPalette.serialise({ paint: { colour: [0.2, 0.4, 0.6], opacity: 0.5 } });
-const read = FbxPalette.parse(written);
+const read = FbxPalette.parse(written).materials;
 check('an assignment round-trips',
   nearAll(read.paint.colour, [0.2, 0.4, 0.6]) && read.paint.opacity === 0.5);
 check('values outside the range are pulled back',
-  FbxPalette.parse(FbxPalette.serialise({ a: { roughness: 5, opacity: -2 } })).a.roughness === 1);
+  FbxPalette.parse(FbxPalette.serialise({ a: { roughness: 5, opacity: -2 } }))
+    .materials.a.roughness === 1);
 check('unknown fields are dropped',
-  Object.keys(FbxPalette.parse('{"fbxtoolMaterials":1,"materials":{"a":{"nonsense":1}}}'))
-    .length === 0);
+  Object.keys(FbxPalette.parse('{"fbxtoolMaterials":1,"materials":{"a":{"nonsense":1}}}')
+    .materials).length === 0);
+
+// A material the viewer invented, and the part wearing it: neither is in the
+// file, so an assignment that does not carry them cannot bring them back.
+const invented = FbxPalette.serialise(
+  { 'New material': { added: true, name: 'Grass', colour: [0, 0.7, 0.1] } },
+  { 2002: 'New material' },
+);
+const restored = FbxPalette.parse(invented);
+check('an added material is written down as one', restored.materials['New material'].added === true,
+  JSON.stringify(restored.materials['New material']));
+check('with the name and colour given to it',
+  restored.materials['New material'].name === 'Grass'
+  && nearAll(restored.materials['New material'].colour, [0, 0.7, 0.1]));
+check('and the part wearing it, by the key its model is addressed by',
+  restored.parts['2002'] === 'New material', JSON.stringify(restored.parts));
+check('an assignment with nobody dressed says so',
+  Object.keys(FbxPalette.parse(FbxPalette.serialise({ a: { opacity: 1 } })).parts).length === 0);
+check('and one written without parts does not mention them',
+  !/parts/.test(FbxPalette.serialise({ a: { opacity: 1 } })));
 for (const junk of ['not json at all', '{}', '{"materials":{}}', '[]', 'null']) {
   let refused = false;
   try { FbxPalette.parse(junk); } catch (error) { refused = true; }
