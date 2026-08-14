@@ -9,7 +9,7 @@ with **no dependencies** and without the Autodesk FBX SDK.
 | **Wavefront OBJ** (+ `.mtl`) | full — inspect and render |
 | **glTF 2.0** (`.gltf` and `.glb`) | full — inspect, render and export; Draco-compressed geometry is decompressed |
 | **Blender `.blend`** | inspect and render, for the `MVert`/`MPoly`/`MLoop` layout |
-| **3ds Max `.max`** | inspect and render, for Editable Poly and Editable Mesh geometry |
+| **3ds Max `.max`** | inspect and render — Editable Poly and Editable Mesh, with materials and the textures they name |
 
 OBJ, glTF, `.blend` and `.max` are normalised into the same record tree as FBX,
 so every option and the viewer apply to them unchanged.
@@ -231,15 +231,43 @@ in the browser by the same WebAssembly inflater that unpacks an FBX array.
 Files that stop mid-sector are read to the end rather than refused; writers do
 it, and the tail of one sector is no reason to lose 98 MB.
 
+Materials come across too. A node names the material it wears through the same
+typed reference list, and the material keeps its colours in parameter blocks:
+
+```
+uint16 id
+uint16 type            2 for a colour
+...flags
+float  r, g, b         on the end
+```
+
+Which id means *diffuse* is the plugin's own business — the names live in the
+DLL and not in the file — so the reader takes **the first colour-valued
+parameter**, which is a rule that can be read off the files rather than assumed
+about a plugin, and holds for every class met so far (VRayMtl, VRayLightMtl,
+CoronaMtl, Standard). A **Multi/Sub-Object** becomes one material per slot, and
+a face's material id picks between them. What a VRay material *reflects* — the
+parameter that makes its chrome chrome — sits two parameters further on with
+another between them, so it is left alone rather than guessed at; the Materials
+tab is where a surface gets its finish, and an assignment saved there is
+remembered for the file.
+
+Textures are stranger: the file name is not in the scene at all. A parameter
+block carries a sixteen-byte identifier, and `FileAssetMetaData3` maps that to
+a name and the path it had on the machine that made it — `F:\rcartton\Smart 1
+Brabus\specular.jpg`. The reader ties the two together and names the file, so
+the image loads the way an `.obj`'s does: drop it in beside the model.
+
 **What is not decoded**: the modifier stack is not run, so a scene modelled
 with TurboSmooth gives its cage — which is what the viewer's own smoothing is
-for — and materials come out unassigned, so a `.max` draws in clay. Primitives
-nobody collapsed (a Box, a Line) and classes from plugins are counted and named
-in the report but have no vertices here.
+for. Primitives nobody collapsed (a Box, a Line) and classes from plugins are
+counted and named in the report but have no vertices here.
 
 Read on twelve car scenes from as many sources — 2016 to 2018 releases, 30 MB
 to 449 MB, compressed and not — all twelve give geometry: 17 to 209 objects
-each, and up to 2,025,975 vertices in 6.9 s. On the one that ships an FBX
+each, and up to 2,025,975 vertices in 6.9 s. Eleven give materials, 9 to 67
+apiece; the twelfth assigns none to any node, which is what its nodes say and
+not something to work around. On the one that ships an FBX
 export of the same scene beside it, the two agree exactly: 217,930 vertices and
 the same bounds to the decimal.
 

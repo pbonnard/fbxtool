@@ -99,15 +99,20 @@ def test_the_version_stamp_says_which_max_wrote_it():
 def test_the_class_table_and_the_plugins_are_read():
     doc = parse_max(fb.build_max())
     names = [c["name"] for c in doc.extra["classes"]]
-    assert names == ["Editable Poly", "Node"]
+    assert names == ["Editable Poly", "Node", "ParamBlock2", "Standard"]
     assert doc.extra["dlls"][0]["file"] == "epoly.dlo"
 
 
 def test_every_texture_the_scene_names_is_listed_with_where_it_lived():
     """The paths are a modeller's own directories, and worth reporting."""
     assets = parse_max(fb.build_max()).extra["assets"]
-    assert assets == [{"kind": "Bitmap", "name": "paint.jpg",
-                       "path": "C:\\models\\paint.jpg"}]
+    assert len(assets) == 1
+    assert assets[0]["kind"] == "Bitmap"
+    assert assets[0]["name"] == "paint.jpg"
+    assert assets[0]["path"] == "C:\\models\\paint.jpg"
+    # The sixteen bytes in front of the record are what a material's parameter
+    # block names the file by.
+    assert len(assets[0]["id"]) == 16
 
 
 def test_an_ngon_keeps_every_corner():
@@ -234,3 +239,45 @@ def test_a_file_that_stops_mid_sector_is_still_read():
     doc = parse_max(data[:-200], load_arrays=True)
     assert doc.extra["meshes"] == 1
     assert len(_geometry(doc)[0].get("Vertices").props[0].value) == 24
+
+
+def test_the_material_a_part_wears_comes_with_it():
+    """A node names its material, the material names its colour and its map.
+
+    Which parameter id means *diffuse* is the plugin's own business and the
+    file does not say, so the reader takes the first colour-valued parameter —
+    a rule read off the files rather than assumed about a plugin.
+    """
+    doc = parse_max(fb.build_max(), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    materials = [n for n in objects.children if n.name == "Material"]
+    assert len(materials) == 1
+    assert materials[0].props[1].value.startswith("Body paint")
+    colour = [p.value for p in materials[0].get("Properties70").children[0].props[4:7]]
+    assert [round(v, 3) for v in colour] == [0.8, 0.1, 0.05]
+    assert doc.extra["materials"] == 1
+
+    # And the part is connected to it, or nothing would wear it.
+    connections = next(n for n in doc.root.children if n.name == "Connections")
+    material_uid = materials[0].props[0].value
+    assert any(c.props[1].value == material_uid for c in connections.children)
+
+
+def test_the_picture_a_material_wears_is_named():
+    """The map is not in the scene: a parameter block carries the identifier of
+    an asset, and the asset table turns that into a file name."""
+    doc = parse_max(fb.build_max(), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    textures = [n for n in objects.children if n.name == "Texture"]
+    assert len(textures) == 1
+    assert textures[0].get("FileName").props[0].value == "paint.jpg"
+    assert doc.extra["textures"] == ["paint.jpg"]
+    # A Video record too, which is what carries the image for the viewer.
+    assert any(n.name == "Video" for n in objects.children)
+
+
+def test_a_material_nothing_points_at_is_left_out():
+    """A scene keeps the material editor's own slots; only what a node wears
+    is worth a record."""
+    doc = parse_max(fb.build_max(), load_arrays=True)
+    assert doc.extra["materials"] == 1          # not the class table's worth

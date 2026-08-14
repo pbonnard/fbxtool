@@ -2892,6 +2892,12 @@ const FbxMax = (function () {
   const SCALE = 0x2505;
   const CLASS_NAME = 0x2042;
   const CLASS_IDS = 0x2060;
+  // A material and its parameter blocks.
+  const MTL_BASE = 0x5431;
+  const MTL_NAME = 0x4001;
+  const PARAM = 0x100e;
+  const ASSET_REF = 0x0003;
+  const MTL_CLASS = 0xc00;
 
   const node = (name, props = [], children = []) => ({ name, props, children });
   const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
@@ -3178,6 +3184,7 @@ const FbxMax = (function () {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const out = [];
     let at = 16;
+    let start = 0;
     while (at + 4 <= bytes.length) {
       const strings = [];
       while (strings.length < 3 && at + 4 <= bytes.length) {
@@ -3187,7 +3194,15 @@ const FbxMax = (function () {
         at += 4 + count * 2 + 2;
       }
       if (strings.length >= 3) {
-        out.push({ kind: strings[0], name: strings[1], path: strings[2] });
+        // The identifier is the sixteen bytes in front of the record, and it
+        // is how a material's parameter block names this file.
+        out.push({
+          kind: strings[0],
+          name: strings[1],
+          path: strings[2],
+          id: Array.from(bytes.subarray(start, start + 16)).join(','),
+        });
+        start = at;
         at += 16;
       } else if (!strings.length) break;
     }
@@ -3373,6 +3388,77 @@ const FbxMax = (function () {
     return { positions, polygons, materials, faces, edges, uvs, faceUvs };
   }
 
+  /* ------------------------------------------------------------ materials */
+
+  function materialName(view, bytes, entity) {
+    const block = findChunk(view, entity.start, entity.end, MTL_BASE);
+    if (!block) return '';
+    const found = findChunk(view, block[0], block[1], MTL_NAME);
+    return found ? text(view, bytes, found[0], found[1]) : '';
+  }
+
+  /**
+   * The first colour-valued parameter of a parameter block.
+   *
+   * Which parameter id means *diffuse* is the plugin's own business and
+   * nothing in the file says — but every material class met so far writes its
+   * diffuse first, which is a rule that can be read off a file rather than
+   * assumed about a plugin. What a VRay material reflects is two parameters
+   * further on with another between them, so it is left alone rather than
+   * guessed at; the Materials tab is where a surface gets its finish.
+   */
+  function coloursOf(view, entity) {
+    const out = [];
+    chunks(view, entity.start, entity.end, (id, body, tail) => {
+      if (id !== PARAM || tail - body < 27) return true;
+      const rgb = [view.getFloat32(tail - 12, true), view.getFloat32(tail - 8, true),
+        view.getFloat32(tail - 4, true)];
+      if (rgb.every((v) => v >= 0 && v <= 1)) out.push(rgb);
+      return false;
+    });
+    return out;
+  }
+
+  /** The file a parameter block points at, by the identifier they share. */
+  function assetOf(view, bytes, entity, assets) {
+    let found = null;
+    chunks(view, entity.start, entity.end, (id, body, tail) => {
+      if (id !== ASSET_REF || tail - body < 16) return true;
+      for (let at = body; at + 16 <= tail; at++) {
+        const key = Array.from(bytes.subarray(at, at + 16)).join(',');
+        if (assets.has(key)) { found = assets.get(key); return false; }
+      }
+      return true;
+    });
+    return found;
+  }
+
+  /**
+   * A material, and whatever its references say it is made of. The walk stops
+   * at another material, which is where a Multi/Sub-Object's own sub-materials
+   * begin.
+   */
+  function readMaterial(view, bytes, entities, index, assets) {
+    if (index >= entities.length) return null;
+    const entity = entities[index];
+    let colours = [];
+    let texture = null;
+    const subs = [];
+    const queue = entity.refs.slice();
+    const walked = new Set();
+    while (queue.length && walked.size < 64) {
+      const at = queue.shift();
+      if (walked.has(at) || at >= entities.length) continue;
+      walked.add(at);
+      const part = entities[at];
+      if ((part.cls.superId || 0) === MTL_CLASS) { subs.push(at); continue; }
+      if (!colours.length) colours = coloursOf(view, part);
+      if (!texture) texture = assetOf(view, bytes, part, assets);
+      queue.push(...part.refs);
+    }
+    return { name: materialName(view, bytes, entity), colours, texture, subs };
+  }
+
   /* ---------------------------------------------------------------- scene */
 
   function readEntities(view, length, classes) {
@@ -3466,8 +3552,13 @@ const FbxMax = (function () {
       }
     }
 
+    // A parameter block names a file by the identifier the asset table gives
+    // it, which is what ties a material to the picture it wears.
+    const byId = new Map(assets.filter((a) => a.id).map((a) => [a.id, a.name]));
+
     const nodes = entities.filter((e) => (e.cls.name || '') === 'Node');
     const placed = [];
+    const materials = new Map();
     for (const nodeEntity of nodes) {
       const found = findChunk(view, nodeEntity.start, nodeEntity.end, NAME);
       const name = found ? text(view, scene, found[0], found[1]) : '';
@@ -3487,7 +3578,22 @@ const FbxMax = (function () {
         }
       }
       if (!mesh) continue;
-      placed.push({ name, mesh, placement: nodeTransform(view, entities, nodeEntity) });
+      const wearing = nodeEntity.typed[3];
+      if (wearing !== undefined && !materials.has(wearing)) {
+        const found = readMaterial(view, scene, entities, wearing, byId);
+        if (found) {
+          materials.set(wearing, found);
+          for (const sub of found.subs) {
+            if (!materials.has(sub)) {
+              const under = readMaterial(view, scene, entities, sub, byId);
+              if (under) materials.set(sub, under);
+            }
+          }
+        }
+      }
+      placed.push({
+        name, mesh, wearing, placement: nodeTransform(view, entities, nodeEntity),
+      });
     }
 
     const root = node('', [], []);
@@ -3499,6 +3605,47 @@ const FbxMax = (function () {
     const connections = [];
     let uid = 1000;
     let vertices = 0;
+
+    // One record per material, written before the parts that wear them.
+    const materialUids = new Map();
+    const textureUids = new Map();
+    for (const index of [...materials.keys()].sort((a, b) => a - b)) {
+      const material = materials.get(index);
+      if (material.subs.length) continue;      // a Multi/Sub-Object is a list
+      uid += 1;
+      materialUids.set(index, uid);
+      const colour = material.colours[0] || [0.6, 0.6, 0.6];
+      const props = [p70('DiffuseColor', 'Color', ...colour.map(D))];
+      objects.push(node('Material',
+        [L(uid), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
+          node('Version', [I(102)]),
+          node('ShadingModel', [S('phong')]),
+          node('Properties70', [], props),
+        ]));
+
+      if (material.texture) {
+        if (!textureUids.has(material.texture)) {
+          uid += 2;
+          textureUids.set(material.texture, uid - 1);
+          objects.push(node('Texture',
+            [L(uid - 1), S(`${material.texture}${CLASS_SEP}Texture`), S('')], [
+              node('Type', [S('TextureVideoClip')]),
+              node('Version', [I(202)]),
+              node('FileName', [S(material.texture)]),
+              node('RelativeFilename', [S(material.texture)]),
+            ]));
+          objects.push(node('Video',
+            [L(uid), S(`${material.texture}${CLASS_SEP}Video`), S('Clip')], [
+              node('Type', [S('Clip')]),
+              node('FileName', [S(material.texture)]),
+              node('RelativeFilename', [S(material.texture)]),
+            ]));
+          connections.push(node('C', [S('OO'), L(uid), L(uid - 1)]));
+        }
+        connections.push(node('C', [S('OP'), L(textureUids.get(material.texture)),
+          L(materialUids.get(index)), S('DiffuseColor')]));
+      }
+    }
     placed.forEach((entry, index) => {
       const geometryUid = ++uid;
       const modelUid = ++uid;
@@ -3517,6 +3664,31 @@ const FbxMax = (function () {
           node('ReferenceInformationType', [S('IndexToDirect')]),
           node('UV', [array('d', entry.mesh.uvs)]),
           node('UVIndex', [array('i', entry.mesh.faceUvs)]),
+        ]));
+      }
+      // Which materials this part wears: the one its node names, or the list a
+      // Multi/Sub-Object holds, which is what a face's material id picks from.
+      const worn = entry.wearing === undefined ? null : materials.get(entry.wearing);
+      let slots = [];
+      if (worn && worn.subs.length) {
+        slots = worn.subs.filter((sub) => materialUids.has(sub))
+          .map((sub) => materialUids.get(sub));
+      } else if (materialUids.has(entry.wearing)) {
+        slots = [materialUids.get(entry.wearing)];
+      }
+      if (slots.length > 1 && entry.mesh.materials) {
+        children.push(node('LayerElementMaterial', [I(0)], [
+          node('Version', [I(101)]),
+          node('MappingInformationType', [S('ByPolygon')]),
+          node('ReferenceInformationType', [S('IndexToDirect')]),
+          node('Materials', [array('i', entry.mesh.materials.map((m) => m % slots.length))]),
+        ]));
+      } else if (slots.length) {
+        children.push(node('LayerElementMaterial', [I(0)], [
+          node('Version', [I(101)]),
+          node('MappingInformationType', [S('AllSame')]),
+          node('ReferenceInformationType', [S('IndexToDirect')]),
+          node('Materials', [array('i', [0])]),
         ]));
       }
       children.push(node('Layer', [I(0)], [node('Version', [I(100)])]));
@@ -3544,6 +3716,9 @@ const FbxMax = (function () {
       ]));
       connections.push(node('C', [S('OO'), L(modelUid), L(0)]));
       connections.push(node('C', [S('OO'), L(geometryUid), L(modelUid)]));
+      for (const slot of slots) {
+        connections.push(node('C', [S('OO'), L(slot), L(modelUid)]));
+      }
     });
 
     root.children.push(node('GlobalSettings', [], [
@@ -3567,6 +3742,7 @@ const FbxMax = (function () {
       node('Count', [I(objects.length)]),
       node('ObjectType', [S('Geometry')], [node('Count', [I(placed.length)])]),
       node('ObjectType', [S('Model')], [node('Count', [I(placed.length)])]),
+      node('ObjectType', [S('Material')], [node('Count', [I(materialUids.size)])]),
     ]));
     root.children.push(node('Objects', [], objects));
     root.children.push(node('Connections', [], connections));
@@ -3604,6 +3780,8 @@ const FbxMax = (function () {
         vertices,
         faces,
         undecoded: [...undecoded].map(([name, count]) => ({ name, count })),
+        materials: materialUids.size,
+        textures: [...textureUids.keys()].sort(),
       },
     };
   }

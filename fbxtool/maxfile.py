@@ -140,6 +140,16 @@ _SCALE = 0x2505
 _CLASS_NAME = 0x2042
 _CLASS_IDS = 0x2060
 
+#: Chunks inside a material and its parameter blocks.
+_MTL_BASE = 0x5431          # the block every material carries
+_MTL_NAME = 0x4001          # its name, inside that block
+_PARAM = 0x100E             # one parameter of a ParamBlock2
+_ASSET_REF = 0x0003         # a parameter block's reference to a file asset
+
+#: Superclasses, as 3ds Max numbers them.
+_GEOM_CLASS = 0x10
+_MTL_CLASS = 0xC00
+
 
 # ---------------------------------------------------------------- container
 
@@ -357,6 +367,7 @@ def _read_assets(data: bytes) -> list[dict]:
     """
     out: list[dict] = []
     at = 16
+    start = 0
     while at + 4 <= len(data):
         strings = []
         while len(strings) < 3 and at + 4 <= len(data):
@@ -367,7 +378,11 @@ def _read_assets(data: bytes) -> list[dict]:
             at += 4 + count * 2 + 2       # the string, then its terminator
             strings.append(text)
         if len(strings) >= 3:
-            out.append({"kind": strings[0], "name": strings[1], "path": strings[2]})
+            # The identifier is the sixteen bytes in front of the record, and
+            # it is how a material's parameter block names this file.
+            out.append({"kind": strings[0], "name": strings[1], "path": strings[2],
+                        "id": bytes(data[start:start + 16])})
+            start = at
             at += 16          # the identifier of the record that follows
         elif strings:
             continue
@@ -628,6 +643,93 @@ def _read_mesh(data: bytes, start: int, end: int) -> _Mesh | None:
 # -------------------------------------------------------------------- scene
 
 
+class _Material:
+    """One material as the viewer needs it: a name, a colour and a picture."""
+
+    __slots__ = ("name", "colours", "texture", "subs")
+
+    def __init__(self, name: str, colours, texture, subs):
+        self.name = name
+        self.colours = colours
+        self.texture = texture
+        self.subs = subs
+
+
+def _material_name(scene: bytes, entity) -> str:
+    block = _find(scene, entity.start, entity.end, _MTL_BASE)
+    if block is None:
+        return ""
+    found = _find(scene, block[0], block[1], _MTL_NAME)
+    return _text(scene[found[0]:found[1]]) if found else ""
+
+
+def _first_colour(scene: bytes, entity):
+    """The first colour-valued parameter of a parameter block.
+
+    A parameter is ``uint16 id; uint16 type;`` then flags and its value, and a
+    colour is the three floats on the end.  Which id means *diffuse* is the
+    plugin's own business and nothing in the file says — but every material
+    class met so far writes its diffuse first, which is a rule that can be
+    read off a file rather than assumed about a plugin.
+    """
+    out = []
+    for idn, body, tail, _ in _chunks(scene, entity.start, entity.end):
+        if idn != _PARAM or tail - body < 27:
+            continue
+        red, green, blue = struct.unpack_from("<3f", scene, tail - 12)
+        if all(0.0 <= v <= 1.0 for v in (red, green, blue)):
+            out.append((red, green, blue))
+            break
+    return out
+
+
+def _asset_of(scene: bytes, entity, assets: dict):
+    """The file a parameter block points at, by the identifier they share."""
+    for idn, body, tail, _ in _chunks(scene, entity.start, entity.end):
+        if idn != _ASSET_REF or tail - body < 16:
+            continue
+        block = scene[body:tail]
+        for at in range(0, len(block) - 15):
+            found = assets.get(block[at:at + 16])
+            if found:
+                return found
+    return None
+
+
+def _read_material(scene: bytes, entities: list, index: int, assets: dict):
+    """A material, and whatever its references say it is made of.
+
+    A material keeps its colours in parameter blocks and its maps behind more
+    of them, so the walk goes down its references until it finds a picture —
+    but not past another material, which is where a Multi/Sub-Object's own
+    sub-materials begin.
+    """
+    if index >= len(entities):
+        return None
+    entity = entities[index]
+    colours: list = []
+    texture = None
+    subs: list[int] = []
+
+    queue = list(entity.refs)
+    walked = set()
+    while queue and len(walked) < 64:
+        at = queue.pop(0)
+        if at in walked or at >= len(entities):
+            continue
+        walked.add(at)
+        part = entities[at]
+        if (part.cls.get("super_id") or 0) == _MTL_CLASS:
+            subs.append(at)                     # a sub-material, not our own
+            continue
+        if not colours:
+            colours = _first_colour(scene, part)
+        if texture is None:
+            texture = _asset_of(scene, part, assets)
+        queue.extend(part.refs)
+    return _Material(_material_name(scene, entity), colours, texture, subs)
+
+
 class _Entity:
     __slots__ = ("index", "cls", "start", "end", "refs", "typed")
 
@@ -794,8 +896,13 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         if mesh is not None:
             meshes[entity.index] = mesh
 
+    # A parameter block names a file by the identifier the asset table gives
+    # it, which is what ties a material to the picture it wears.
+    by_id = {a["id"]: a["name"] for a in assets if a.get("id")}
+
     nodes = [e for e in entities if (e.cls.get("name") or "") == "Node"]
     placed = []
+    materials: dict[int, _Material] = {}
     for node in nodes:
         found = _find(scene, node.start, node.end, _NAME)
         name = _text(scene[found[0]:found[1]]) if found else ""
@@ -816,7 +923,18 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                     queue.extend(entities[at].refs)
         if mesh is None:
             continue
-        placed.append((node, name, mesh, _node_transform(scene, entities, node)))
+        wearing = node.typed.get(3)
+        if wearing is not None and wearing not in materials:
+            found = _read_material(scene, entities, wearing, by_id)
+            if found is not None:
+                materials[wearing] = found
+                for sub in found.subs:
+                    if sub not in materials:
+                        under = _read_material(scene, entities, sub, by_id)
+                        if under is not None:
+                            materials[sub] = under
+        placed.append((node, name, mesh, _node_transform(scene, entities, node),
+                       wearing))
 
     # ---- the record tree
     creator = summary.get("application") or "Autodesk 3ds Max"
@@ -826,7 +944,49 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
     objects_node = _node("Objects", [], [])
     connections: list[Node] = []
     uid = 1000
-    for at, (entity, name, mesh, placement) in enumerate(placed):
+
+    # One record per material, written before the parts that wear them so a
+    # part can be connected as it is written.
+    material_uids: dict[int, int] = {}
+    texture_uids: dict[str, int] = {}
+    for index in sorted(materials):
+        material = materials[index]
+        if material.subs:
+            continue                    # a Multi/Sub-Object is its parts' list
+        uid += 1
+        material_uids[index] = uid
+        colour = material.colours[0] if material.colours else (0.6, 0.6, 0.6)
+        props = [_p70("DiffuseColor", "Color", *(_d(c) for c in colour))]
+        objects_node.children.append(
+            _node("Material",
+                  [_l(uid), _s(f"{material.name or f'material{index}'}\x00\x01Material"),
+                   _s("")],
+                  [_node("Version", [_i(102)]),
+                   _node("ShadingModel", [_s("phong")]),
+                   _node("Properties70", [], props)]))
+
+        if material.texture:
+            if material.texture not in texture_uids:
+                uid += 2
+                texture_uids[material.texture] = uid - 1
+                objects_node.children.append(
+                    _node("Texture",
+                          [_l(uid - 1), _s(f"{material.texture}\x00\x01Texture"), _s("")],
+                          [_node("Type", [_s("TextureVideoClip")]),
+                           _node("Version", [_i(202)]),
+                           _node("FileName", [_s(material.texture)]),
+                           _node("RelativeFilename", [_s(material.texture)])]))
+                objects_node.children.append(
+                    _node("Video",
+                          [_l(uid), _s(f"{material.texture}\x00\x01Video"), _s("Clip")],
+                          [_node("Type", [_s("Clip")]),
+                           _node("FileName", [_s(material.texture)]),
+                           _node("RelativeFilename", [_s(material.texture)])]))
+                connections.append(_node("C", [_s("OO"), _l(uid), _l(uid - 1)]))
+            connections.append(_node("C", [_s("OP"), _l(texture_uids[material.texture]),
+                                           _l(material_uids[index]), _s("DiffuseColor")]))
+
+    for at, (entity, name, mesh, placement, wearing) in enumerate(placed):
         geometry_uid, model_uid = uid + 1, uid + 2
         uid += 2
         label = name or f"object{at + 1}"
@@ -844,12 +1004,31 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                 _node("UV", [_array("d", mesh.uvs, load_arrays)]),
                 _node("UVIndex", [_array("i", mesh.face_uvs, load_arrays)]),
             ]))
-        if mesh.materials and max(mesh.materials) > 0:
+        # Which materials this part wears: the one its node names, or the list
+        # a Multi/Sub-Object holds, which is what a face's material id picks
+        # from. Everything else here counts from zero, so the ids are mapped
+        # onto the slots this part actually has.
+        worn = materials.get(wearing) if wearing is not None else None
+        slots = []
+        if worn is not None and worn.subs:
+            slots = [material_uids[sub] for sub in worn.subs if sub in material_uids]
+        elif wearing in material_uids:
+            slots = [material_uids[wearing]]
+
+        if len(slots) > 1 and mesh.materials:
+            per_face = [material % len(slots) for material in mesh.materials]
             geometry_children.append(_node("LayerElementMaterial", [_i(0)], [
                 _node("Version", [_i(101)]),
                 _node("MappingInformationType", [_s("ByPolygon")]),
                 _node("ReferenceInformationType", [_s("IndexToDirect")]),
-                _node("Materials", [_array("i", mesh.materials, load_arrays)]),
+                _node("Materials", [_array("i", per_face, load_arrays)]),
+            ]))
+        elif slots:
+            geometry_children.append(_node("LayerElementMaterial", [_i(0)], [
+                _node("Version", [_i(101)]),
+                _node("MappingInformationType", [_s("AllSame")]),
+                _node("ReferenceInformationType", [_s("IndexToDirect")]),
+                _node("Materials", [_array("i", [0], load_arrays)]),
             ]))
         geometry_children.append(_node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
 
@@ -876,6 +1055,8 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                    _node("Properties70", [], model_props)]))
         connections.append(_node("C", [_s("OO"), _l(model_uid), _l(0)]))
         connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
+        for slot in slots:
+            connections.append(_node("C", [_s("OO"), _l(slot), _l(model_uid)]))
 
     root.children.append(_node("GlobalSettings", [], [
         _node("Version", [_i(1000)]),
@@ -895,13 +1076,12 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         _node("Count", [_i(len(objects_node.children))]),
         _node("ObjectType", [_s("Geometry")], [_node("Count", [_i(len(placed))])]),
         _node("ObjectType", [_s("Model")], [_node("Count", [_i(len(placed))])]),
+        _node("ObjectType", [_s("Material")], [_node("Count", [_i(len(material_uids))])]),
     ]))
     root.children.append(objects_node)
     root.children.append(_node("Connections", [], connections))
 
-    triangles = sum(max(0, len(f) - 2) for _, _, mesh, _ in placed
-                    for f in [[0] * 3]) if False else 0
-    vertices = sum(len(mesh.positions) // 3 for _, _, mesh, _ in placed)
+    vertices = sum(len(mesh.positions) // 3 for _, _, mesh, _, _ in placed)
     doc.extra = {
         "streams": compound.names,
         "sector": compound.sector,
@@ -917,6 +1097,8 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         "faces": sum(mesh.faces for mesh in meshes.values()),
         "undecoded": undecoded,
         "build": build,
+        "materials": len(material_uids),
+        "textures": sorted(texture_uids),
     }
     if undecoded:
         doc.warn("no geometry read from "

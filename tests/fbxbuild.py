@@ -1493,6 +1493,21 @@ def _max_class(name: str, super_id: int, class_id: int, dll: int = -1) -> bytes:
                       container=True)
 
 
+def _max_param_colour(param: int, rgb: "tuple[float, float, float]") -> bytes:
+    """One parameter of a ParamBlock2, valued as a colour.
+
+    The id and the type come first, then flags, and a colour is the three
+    floats on the end — which is all a reader can go on, since what the id
+    *means* lives in the plugin and not in the file.
+    """
+    return _max_chunk(0x100E, struct.pack("<HHIIIB3f", param, 2, 0, 0, 0, 0, *rgb))
+
+
+def _max_asset_id(seed: int = 1) -> bytes:
+    """The sixteen bytes an asset and the parameter block naming it share."""
+    return bytes((seed + i) & 0xFF for i in range(16))
+
+
 def _max_face(corners: "list[int]", material: int = 0) -> bytes:
     """A face: its degree, its corners, then the members its flags select.
 
@@ -1572,19 +1587,33 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         class_name = "Editable Poly"
 
     poly = _max_chunk(0x0000, _max_chunk(0x08FE, mesh, container=True), container=True)
+    # A material, the parameter block holding its colour and the identifier of
+    # the picture it wears, and the node that says the mesh wears it.
+    params = _max_chunk(0x0002,
+                        _max_param_colour(1, (0.8, 0.1, 0.05))
+                        + _max_chunk(0x0003, bytes(8) + _max_asset_id() + bytes(8)),
+                        container=True)
+    material = _max_chunk(0x0003,
+                          _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, 2))
+                          + _max_chunk(0x5431,
+                                       _max_chunk(0x4001, _max_utf16("Body paint")),
+                                       container=True),
+                          container=True)
     node = _max_chunk(0x0001,
-                      _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, 0))
+                      _max_chunk(0x2035, struct.pack("<5I", 0x10, 1, 0, 3, 3))
                       + _max_chunk(0x0962, _max_utf16(name)),
                       container=True)
-    scene = _max_wide_chunk(0x2023, poly + node)
+    scene = _max_wide_chunk(0x2023, poly + node + params + material)
 
     classes = (_max_class(class_name, 0x10, 0x1BF8338D, dll=0)
-               + _max_class("Node", 0x01, 0x01))
+               + _max_class("Node", 0x01, 0x01)
+               + _max_class("ParamBlock2", 0x82, 0x82)
+               + _max_class("Standard", 0xC00, 0x02))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),
                       container=True)
-    assets = (b"\x00" * 16 + struct.pack("<I", 6) + _max_utf16("Bitmap")
+    assets = (_max_asset_id() + struct.pack("<I", 6) + _max_utf16("Bitmap")
               + struct.pack("<I", 9) + _max_utf16("paint.jpg")
               + struct.pack("<I", 19) + _max_utf16("C:\\models\\paint.jpg")
               + b"\x00" * 16)
