@@ -404,7 +404,13 @@ def _texture_for(json_doc: dict, pbr: dict, build: _Builder,
         doc.warn("a material names a texture that is not there")
         return
     images = json_doc.get("images") or []
-    source = textures[index].get("source")
+    # A texture names its image directly, or through the extension that says
+    # the image is a KTX2 rather than a PNG.
+    texture = textures[index]
+    source = texture.get("source")
+    if source is None:
+        source = ((texture.get("extensions") or {})
+                  .get("KHR_texture_basisu") or {}).get("source")
     if source is None or not 0 <= source < len(images):
         return
     image = images[source]
@@ -610,8 +616,8 @@ def parse_gltf(
                 if image.get("mimeType") == "image/ktx2")
     if basis:
         doc.warn(f"{basis} texture(s) are KTX2 / Basis Universal "
-                 "(KHR_texture_basisu), which is not an image format a viewer "
-                 "can hand to a browser")
+                 "(KHR_texture_basisu) — the viewer decodes those, this "
+                 "report does not")
 
     # Nodes: the hierarchy, and where each mesh sits in it.
     nodes = json_doc.get("nodes") or []

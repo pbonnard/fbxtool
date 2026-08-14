@@ -1427,3 +1427,6 @@ FBX_EXPORT(0) void *test_heap_base(void) {
 /* Draco decompression, in its own file for length; one translation unit so it
  * shares the bump allocator, the export macro and the build rules. */
 #include "draco.c"
+
+/* And Basis Universal textures, on the same terms. */
+#include "ktx2.c"

@@ -467,6 +467,26 @@ fixture in `samples/draco` decodes to the same values Google's decoder gives,
 and on a 1.9 MiB compressed car of 240,144 triangles across 33 primitives,
 every index and every attribute value matches exactly.
 
+### Basis Universal textures
+
+The other half of a compressed glTF is its textures: `KHR_texture_basisu`
+stores them as KTX2 with Basis supercompression, which is not an image format
+at all — it holds blocks meant to be handed to a GPU, and no browser will make
+a picture of one. So that is decoded here too, in `web/src/ktx2.c`.
+
+ETC1S is a stripped-down ETC1: every 4x4 block is one base colour in 5:5:5,
+one of eight intensity tables, and sixteen 2-bit selectors saying how far each
+pixel moves along that intensity. Both halves live in codebooks shared by the
+whole file, and each block names an entry in each — usually by predicting it
+from its neighbours and coding only the difference. Unpacking is therefore:
+read the codebooks, read the Huffman tables, walk the blocks recovering
+endpoint and selector indices, and turn each block into sixteen pixels. Files
+with transparency carry a second, greyscale slice for the alpha channel.
+
+It is held to Binomial's own transcoder: every fixture in `samples/ktx2`
+decodes byte for byte, and so do all 36 textures of the compressed car —
+including its alpha slices, its 1024x1024 and its non-square images.
+
 ### Importing glTF
 
 The same page reads glTF back, so a `.glb` or a `.gltf` opens like any other
@@ -738,9 +758,11 @@ and SDNA — so the container reader is testable without Blender installed, and
 glTF fixtures in both containers, written to be awkward on purpose.
 
 The Draco fixtures in `samples/draco` are meshes encoded by Draco's own
-encoder, each beside the values Draco's own decoder gives back for it. They
-are regenerated with `npm i draco3d` and the script in the commit that added
-them; the package is a test-time oracle only — nothing ships with a
+encoder, each beside the values Draco's own decoder gives back for it, and the
+KTX2 fixtures in `samples/ktx2` are pictures encoded by Binomial's own encoder
+beside the pixels its own transcoder gives back. They are regenerated with
+`npm i draco3d basis_universal three` and the scripts in the commits that added
+them; those packages are test-time oracles only — nothing ships with a
 dependency.
 
 The web tests skip cleanly when `clang` or `node` is unavailable.

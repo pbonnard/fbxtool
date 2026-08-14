@@ -1264,6 +1264,77 @@ def build_draco_glb(shape: str = "sphere4") -> bytes:
     return bytes(out)
 
 
+def build_basis_glb(texture: str = "bars") -> bytes:
+    """A textured quad whose image is a KTX2 (Basis Universal, ETC1S).
+
+    No browser can decode that image, so anything that appears on screen came
+    out of the transcoder.
+    """
+    here = pathlib.Path(__file__).resolve().parent.parent / "samples" / "ktx2"
+    image = (here / f"{texture}.ktx2").read_bytes()
+
+    positions = [-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0]
+    uvs = [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    indices = [0, 1, 2, 0, 2, 3]
+
+    buffer = bytearray()
+    def region(payload: bytes) -> tuple[int, int]:
+        while len(buffer) % 4:
+            buffer.append(0)
+        start = len(buffer)
+        buffer.extend(payload)
+        return start, len(payload)
+
+    pos_at, pos_len = region(struct.pack(f"<{len(positions)}f", *positions))
+    uv_at, uv_len = region(struct.pack(f"<{len(uvs)}f", *uvs))
+    idx_at, idx_len = region(struct.pack(f"<{len(indices)}I", *indices))
+    img_at, img_len = region(image)
+
+    document = {
+        "asset": {"version": "2.0", "generator": "fbxtool test fixture"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "quad", "mesh": 0}],
+        "meshes": [{"name": "quad", "primitives": [{
+            "attributes": {"POSITION": 0, "TEXCOORD_0": 1},
+            "indices": 2,
+            "material": 0,
+        }]}],
+        "materials": [{"name": "printed", "pbrMetallicRoughness": {
+            "baseColorTexture": {"index": 0},
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0,
+        }}],
+        "textures": [{"sampler": 0, "extensions": {"KHR_texture_basisu": {"source": 0}}}],
+        "samplers": [{}],
+        "images": [{"name": texture, "mimeType": "image/ktx2", "bufferView": 3}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+             "min": [-1.0, -1.0, 0.0], "max": [1.0, 1.0, 0.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"},
+            {"bufferView": 2, "componentType": 5125, "count": 6, "type": "SCALAR"},
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": pos_at, "byteLength": pos_len},
+            {"buffer": 0, "byteOffset": uv_at, "byteLength": uv_len},
+            {"buffer": 0, "byteOffset": idx_at, "byteLength": idx_len},
+            {"buffer": 0, "byteOffset": img_at, "byteLength": img_len},
+        ],
+        "buffers": [{"byteLength": len(buffer)}],
+        "extensionsUsed": ["KHR_texture_basisu"],
+        "extensionsRequired": ["KHR_texture_basisu"],
+    }
+
+    json_chunk = json.dumps(document).encode("utf-8")
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    binary = bytes(buffer) + b"\x00" * (-len(buffer) % 4)
+    total = 12 + 8 + len(json_chunk) + 8 + len(binary)
+    out = bytearray(struct.pack("<4sII", b"glTF", 2, total))
+    out += struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
+    out += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return bytes(out)
+
+
 #: What ``build_draco_glb("sphere4")`` holds, from Draco's own decoder.
 DRACO_GLB_TRIANGLES = 59
 DRACO_GLB_POINTS = 44

@@ -929,8 +929,34 @@
   }
 
   /** Decode one image, from embedded bytes or a file the user supplied. */
+  const KTX2_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
+
+  const looksLikeKtx2 = (bytes) => bytes && bytes.length > 12
+    && KTX2_MAGIC.every((byte, i) => bytes[i] === byte);
+
+  /**
+   * A KTX2 texture, decoded here rather than by the browser.
+   *
+   * KTX2 is not an image format: it holds blocks meant for a GPU, and no
+   * browser will make a picture of it. Ours comes back as pixels, which are
+   * handed on as an ImageBitmap like any other texture.
+   */
+  async function decodeKtx2(bytes) {
+    const mark = FbxWasm.mark();
+    try {
+      const image = FbxWasm.decodeKtx2(bytes);
+      return await createImageBitmap(new ImageData(image.rgba, image.width, image.height));
+    } catch (error) {
+      console.warn('KTX2:', error.message);
+      return null;
+    } finally {
+      FbxWasm.release(mark);
+    }
+  }
+
   async function decodeTexture(request, supplied) {
     if (request.embedded) {
+      if (looksLikeKtx2(request.embedded)) return decodeKtx2(request.embedded);
       const blob = new Blob([request.embedded]);
       try {
         return await createImageBitmap(blob);
@@ -940,6 +966,9 @@
     }
     const file = supplied.get(baseName(request.path));
     if (!file) return null;
+    if (/\.ktx2$/i.test(file.name)) {
+      return decodeKtx2(new Uint8Array(await file.arrayBuffer()));
+    }
     try {
       return await createImageBitmap(file);
     } catch (error) {

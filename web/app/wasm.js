@@ -440,12 +440,53 @@ const FbxWasm = (function () {
     };
   }
 
+  /* ------------------------------------------------------------------ ktx2 */
+
+  const KTX2_ERRORS = [
+    'no error', 'not a KTX2 file', 'a truncated file',
+    'a format other than ETC1S, which this decoder does not do',
+    'a supercompression scheme this decoder does not do',
+    'not enough memory', 'a corrupt file', 'more of something than this decoder allows',
+  ];
+
+  /**
+   * Decode a KTX2 texture — Basis Universal, ETC1S — into RGBA pixels.
+   *
+   * Only the full-size image comes back; the smaller levels are the same
+   * picture again and the viewer builds its own.
+   */
+  function decodeKtx2(bytes) {
+    const block = exports_.fbx_alloc(Math.max(bytes.length, 1));
+    new Uint8Array(exports_.memory.buffer, block, bytes.length).set(bytes);
+    const result = exports_.fbx_ktx2_decode(block, bytes.length);
+    if (!result) throw new Error('decoding ran out of memory');
+
+    const dv = view();
+    const at = (index) => dv.getUint32(result + index * 4, true);
+    if (!at(0)) {
+      const code = at(1);
+      throw new Error(`this texture is ${KTX2_ERRORS[code] || `error ${code}`}`);
+    }
+    const width = at(2);
+    const height = at(3);
+    return {
+      width,
+      height,
+      hasAlpha: at(4) === 1,
+      levels: at(5),
+      // Copied out: the next allocation may move the memory underneath.
+      rgba: new Uint8ClampedArray(
+        new Uint8Array(exports_.memory.buffer, at(6), width * height * 4)),
+    };
+  }
+
   /** Mark the allocator so scratch from one build can be rewound after use. */
   function mark() { return exports_.fbx_heap_mark(); }
   function release(at) { exports_.fbx_heap_release(at); }
 
   return {
-    init, parseBinary, buildMesh, subdivide, decodeDraco, payloadOffset, asFloat64, asInt32,
+    init, parseBinary, buildMesh, subdivide, decodeDraco, decodeKtx2,
+    payloadOffset, asFloat64, asInt32,
     uploadFloat64, uploadInt32, mark, release,
     get exports() { return exports_; },
     get fileOffset() { return fileOffset; },

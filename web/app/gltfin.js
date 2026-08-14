@@ -337,13 +337,19 @@ const FbxGltfIn = (function () {
       const textureIndex = pbr.baseColorTexture && pbr.baseColorTexture.index;
       const texture = textureIndex !== undefined && json.textures
         ? json.textures[textureIndex] : null;
-      const image = texture && json.images ? json.images[texture.source] : null;
+      // A texture names its image directly, or through the extension that
+      // says the image is a KTX2 rather than a PNG.
+      const source = texture
+        ? (texture.source !== undefined ? texture.source
+          : ((texture.extensions || {}).KHR_texture_basisu || {}).source)
+        : undefined;
+      const image = source !== undefined && json.images ? json.images[source] : null;
       if (image) {
         const textureUid = uid();
         const videoUid = uid();
         // An image spelled out in the document itself has no file name.
         const filename = image.uri && !/^data:/i.test(image.uri) ? image.uri : '';
-        const name = image.name || filename || `image${texture.source}`;
+        const name = image.name || filename || `image${source}`;
         objects.push(node('Texture', [L(textureUid), S(`${name}${CLASS_SEP}Texture`), S('')], [
           node('Type', [S('TextureVideoClip')]),
           node('Version', [I(202)]),
@@ -530,12 +536,6 @@ const FbxGltfIn = (function () {
     if (compressed) {
       warnings.push(`${compressed} mesh part(s) are compressed with Draco and `
         + 'would not decompress, so their geometry is missing');
-    }
-    // The same for the textures, so a model that arrives grey says why.
-    const basis = (json.images || []).filter((image) => image.mimeType === 'image/ktx2').length;
-    if (basis) {
-      warnings.push(`${basis} texture(s) are KTX2 / Basis Universal `
-        + '(KHR_texture_basisu), which a browser cannot decode as an image');
     }
 
     /* ---- the document */

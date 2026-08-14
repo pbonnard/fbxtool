@@ -10,6 +10,8 @@ import pytest
 TESTS_DIR = Path(__file__).resolve().parent
 ROOT = TESTS_DIR.parent
 SOURCE = ROOT / "web" / "src" / "fbx.c"
+#: fbx.c includes the rest, so any of them changing means a rebuild.
+SOURCES = sorted((ROOT / "web" / "src").glob("*.c"))
 LIBRARY = ROOT / "web" / "build" / (
     "libfbx.dll" if sys.platform == "win32" else "libfbx.so")
 
@@ -30,7 +32,8 @@ def lib():
     if not SOURCE.exists():  # pragma: no cover - the source is checked in
         pytest.skip("web/src/fbx.c is missing")
     LIBRARY.parent.mkdir(parents=True, exist_ok=True)
-    if not LIBRARY.exists() or SOURCE.stat().st_mtime > LIBRARY.stat().st_mtime:
+    newest = max((path.stat().st_mtime for path in SOURCES), default=0)
+    if not LIBRARY.exists() or newest > LIBRARY.stat().st_mtime:
         result = subprocess.run(
             ["clang", "-DFBX_NATIVE", "-O2", "-shared",
              "-Wno-unknown-attributes", "-o", str(LIBRARY), str(SOURCE)],

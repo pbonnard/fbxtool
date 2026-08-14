@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -301,6 +302,28 @@ def test_a_draco_compressed_glb_renders(built, tmp_path):
     # Something was actually drawn, not merely counted.
     assert "lit samples" in result.stdout
     assert " 0 lit samples" not in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_a_basis_texture_is_drawn(built, tmp_path):
+    """A quad whose texture is a KTX2 (Basis Universal).
+
+    No browser decodes KTX2 — it holds blocks for a GPU, not a picture — so
+    the colours on screen came out of our transcoder.
+    """
+    import fbxbuild as fb
+
+    path = tmp_path / "basis.glb"
+    path.write_bytes(fb.build_basis_glb("bars"))
+    result = _run(["node", str(WEB / "test" / "browser.js"), str(path)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "1/1 textures" in result.stdout, "the texture was not decoded"
+    # Eight colour bars: an untextured quad would be close to flat.
+    match = re.search(r"(\d+) distinct colours", result.stdout)
+    assert match and int(match.group(1)) > 20, result.stdout
 
 
 @needs_clang
