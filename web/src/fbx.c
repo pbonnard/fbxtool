@@ -12,6 +12,7 @@
  */
 
 typedef unsigned char u8;
+typedef signed char i8;
 typedef unsigned short u16;
 typedef unsigned int u32;
 typedef signed int i32;
@@ -1422,3 +1423,7 @@ FBX_EXPORT(0) void *test_heap_base(void) {
     return heap_base_ptr;
 }
 #endif
+
+/* Draco decompression, in its own file for length; one translation unit so it
+ * shares the bump allocator, the export macro and the build rules. */
+#include "draco.c"

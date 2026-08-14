@@ -666,7 +666,9 @@ def parse_gltf(
         "gltf_version": asset.get("version", ""),
         "copyright": asset.get("copyright", ""),
         "meshes": len(json_doc.get("meshes") or []),
-        "primitives": sum(len(parts) for parts in mesh_parts),
+        "primitives": sum(len(mesh.get("primitives") or [])
+                          for mesh in json_doc.get("meshes") or []),
+        "draco_primitives": compressed,
         "nodes": len(nodes),
         "materials": len(json_doc.get("materials") or []),
         "images": len(json_doc.get("images") or []),

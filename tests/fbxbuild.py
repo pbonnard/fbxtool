@@ -9,6 +9,7 @@ shapes a plain exporter never produces — not general-purpose exporters.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 import struct
 import zlib
@@ -1191,6 +1192,81 @@ def gltf_document(image: bytes, *, buffer_uri: str | None,
             {"bufferView": 4, "componentType": 5126, "count": 3, "type": "VEC3"},
         ],
     }
+
+
+def build_draco_glb(shape: str = "sphere4") -> bytes:
+    """A .glb whose geometry is a checked-in Draco block.
+
+    The accessors carry counts and bounds but no bufferView, which is how a
+    compressed file describes the mesh it took away: everything real is in the
+    Draco block, and a reader that cannot decompress it has nothing to draw.
+    """
+    here = pathlib.Path(__file__).resolve().parent.parent / "samples" / "draco"
+    block = (here / f"{shape}.drc").read_bytes()
+    answer = json.loads((here / f"{shape}.json").read_text())
+
+    names = {"POSITION": "POSITION", "NORMAL": "NORMAL", "TEX_COORD": "TEXCOORD_0"}
+    accessors = []
+    attributes = {}
+    draco_attributes = {}
+    for label, entry in answer["attributes"].items():
+        name = names[label]
+        components = entry["numComponents"]
+        values = entry["values"]
+        columns = [[values[i * components + c] for i in range(answer["numPoints"])]
+                   for c in range(components)]
+        attributes[name] = len(accessors)
+        draco_attributes[name] = entry["uniqueId"]
+        accessors.append({
+            "componentType": 5126,
+            "count": answer["numPoints"],
+            "type": {1: "SCALAR", 2: "VEC2", 3: "VEC3", 4: "VEC4"}[components],
+            "min": [min(col) for col in columns],
+            "max": [max(col) for col in columns],
+        })
+    indices_accessor = len(accessors)
+    accessors.append({"componentType": 5125, "count": answer["numFaces"] * 3,
+                      "type": "SCALAR"})
+
+    document = {
+        "asset": {"version": "2.0", "generator": "fbxtool test fixture"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": shape, "mesh": 0}],
+        "meshes": [{"name": shape, "primitives": [{
+            "attributes": attributes,
+            "indices": indices_accessor,
+            "material": 0,
+            "extensions": {"KHR_draco_mesh_compression": {
+                "bufferView": 0,
+                "attributes": draco_attributes,
+            }},
+        }]}],
+        "materials": [{"name": "paint", "pbrMetallicRoughness": {
+            "baseColorFactor": [0.8, 0.1, 0.05, 1.0],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 0.5,
+        }}],
+        "accessors": accessors,
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(block)}],
+        "buffers": [{"byteLength": len(block)}],
+        "extensionsUsed": ["KHR_draco_mesh_compression"],
+        "extensionsRequired": ["KHR_draco_mesh_compression"],
+    }
+
+    json_chunk = json.dumps(document).encode("utf-8")
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    binary = block + b"\x00" * (-len(block) % 4)
+    total = 12 + 8 + len(json_chunk) + 8 + len(binary)
+    out = bytearray(struct.pack("<4sII", b"glTF", 2, total))
+    out += struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
+    out += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return bytes(out)
+
+
+#: What ``build_draco_glb("sphere4")`` holds, from Draco's own decoder.
+DRACO_GLB_TRIANGLES = 59
+DRACO_GLB_POINTS = 44
 
 
 def build_gltf(image: bytes | None = None,

@@ -199,6 +199,9 @@ def _render_gltf_rows(rows: list[tuple[str, Any]], doc) -> None:
     rows.append(("Meshes", f"{extra.get('meshes', 0):,} "
                            f"({primitives:,} primitive{'' if primitives == 1 else 's'}, "
                            f"{extra.get('triangles', 0):,} triangles)"))
+    if extra.get("draco_primitives"):
+        rows.append(("Compressed", f"{extra['draco_primitives']:,} primitive(s) with Draco "
+                                   "— the geometry is not read here"))
     rows.append(("Nodes", f"{extra.get('nodes', 0):,}"))
     rows.append(("Materials", f"{extra.get('materials', 0):,}"))
     rows.append(("Images", f"{extra.get('images', 0):,}"))

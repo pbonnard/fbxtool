@@ -387,12 +387,65 @@ const FbxWasm = (function () {
     };
   }
 
+  /* ----------------------------------------------------------------- draco */
+
+  const DRACO_ERRORS = [
+    'no error', 'not a Draco block', 'an unsupported bitstream version',
+    'point-cloud data rather than a mesh', 'an encoding method this reader does not know',
+    'a truncated block', 'not enough memory', 'more of something than this reader allows',
+    'a feature this reader does not implement', 'a corrupt block',
+  ];
+
+  /**
+   * Decompress a Draco block into per-point attributes and a triangle list.
+   *
+   * `bytes` is the compressed block. What comes back is what glTF wants back:
+   * an index per corner, and for each attribute its values in point order,
+   * keyed by the unique id the glTF extension names them by.
+   */
+  function decodeDraco(bytes) {
+    const block = exports_.fbx_alloc(Math.max(bytes.length, 1));
+    new Uint8Array(exports_.memory.buffer, block, bytes.length).set(bytes);
+    const result = exports_.fbx_draco_decode(block, bytes.length);
+    if (!result) throw new Error('decompressing ran out of memory');
+
+    const dv = view();
+    const at = (index) => dv.getUint32(result + index * 4, true);
+    if (!at(0)) {
+      const code = at(1);
+      throw new Error(`this Draco block has ${DRACO_ERRORS[code] || `error ${code}`}`);
+    }
+    const numFaces = at(2);
+    const numPoints = at(3);
+    const numAttributes = at(4);
+    const buffer = exports_.memory.buffer;
+    const attributes = [];
+    for (let i = 0; i < numAttributes; i++) {
+      const entry = at(6) + i * 16;          // DracoAttrOut[i]
+      const field = (k) => dv.getUint32(entry + k * 4, true);
+      const components = field(1);
+      attributes.push({
+        uniqueId: field(0),
+        components,
+        dataType: field(2),
+        // A view into linear memory: copied out before the next decode.
+        values: new Float32Array(buffer, field(3), numPoints * components),
+      });
+    }
+    return {
+      numFaces,
+      numPoints,
+      indices: new Uint32Array(buffer, at(5), numFaces * 3),
+      attributes,
+    };
+  }
+
   /** Mark the allocator so scratch from one build can be rewound after use. */
   function mark() { return exports_.fbx_heap_mark(); }
   function release(at) { exports_.fbx_heap_release(at); }
 
   return {
-    init, parseBinary, buildMesh, subdivide, payloadOffset, asFloat64, asInt32,
+    init, parseBinary, buildMesh, subdivide, decodeDraco, payloadOffset, asFloat64, asInt32,
     uploadFloat64, uploadInt32, mark, release,
     get exports() { return exports_; },
     get fileOffset() { return fileOffset; },

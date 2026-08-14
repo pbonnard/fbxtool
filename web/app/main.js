@@ -555,6 +555,12 @@
     return Promise.resolve();
   }
 
+  /** A measurement with enough digits to be worth reading: a model a fifth of
+   *  a unit across should not be reported as "0.0". */
+  const measure = (size) => size
+    .map((v) => v.toFixed(Math.abs(v) >= 1 ? 1 : 3))
+    .join(' × ');
+
   /** What the viewport should say about smoothing, if anything. */
   function smoothingNote(mesh) {
     if (!(subdivisionLevel > 0 && mesh && mesh.triangleCount)) return '';
@@ -1064,7 +1070,7 @@
       const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
       let text = `${built.parts} part${built.parts === 1 ? '' : 's'} · `
         + `${built.mesh.triangleCount.toLocaleString()} `
-        + `triangles · ${size.map((v) => v.toFixed(1)).join(' × ')} units · `
+        + `triangles · ${measure(size)} units · `
         + `${elapsed.toFixed(0)} ms · ${built.palette.length} material colours`;
       text += smoothingNote(built.mesh);
       text += seeThrough(built.palette);
@@ -1212,7 +1218,7 @@
       const size = [0, 1, 2].map((i) => (mesh.max[i] - mesh.min[i]));
       let text = `${mesh.triangleCount.toLocaleString()} triangles from `
         + `${mesh.polygonCount.toLocaleString()} polygons · `
-        + `${size.map((v) => v.toFixed(1)).join(' × ')} units · ${elapsed.toFixed(0)} ms`;
+        + `${measure(size)} units · ${elapsed.toFixed(0)} ms`;
       text += palette.length
         ? ` · ${palette.length} material colours`
         : ' · no material colours in this file';

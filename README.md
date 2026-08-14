@@ -7,7 +7,7 @@ with **no dependencies** and without the Autodesk FBX SDK.
 | --- | --- |
 | **FBX** binary and ASCII | full — inspect and render |
 | **Wavefront OBJ** (+ `.mtl`) | full — inspect and render |
-| **glTF 2.0** (`.gltf` and `.glb`) | full — inspect, render and export |
+| **glTF 2.0** (`.gltf` and `.glb`) | full — inspect, render and export; Draco-compressed geometry is decompressed |
 | **Blender `.blend`** | inspect and render, for the `MVert`/`MPoly`/`MLoop` layout |
 
 OBJ, glTF and `.blend` are normalised into the same record tree as FBX, so
@@ -433,6 +433,40 @@ The export is checked against the **Khronos glTF-Validator**
 that comes out is the one that went in — same triangle count, same bounds, and
 on small meshes every triangle compared corner by corner.
 
+### Draco compression
+
+Most glTF found in the wild is compressed: `KHR_draco_mesh_compression`
+replaces the vertex streams with a block of its own, leaving accessors that
+carry counts, types and bounds but no data. A reader that ignores it builds a
+mesh with every vertex at the origin — present, counted, and invisible.
+
+So the decompressor is written here, in `web/src/draco.c`, from the Draco
+bitstream specification with the shipping decoder consulted wherever the two
+disagree — and they do, in ways that matter:
+
+- the specification's depth-first traversal is keyed on "attributes decoder 0
+  is the positions", which files need not honour: they are keyed by a signed
+  attribute-data id, and this one puts the positions second;
+- `SetLeftMostCorner` is folded into `MapCornerToVertex` in the prose but is
+  separate in the decoder, and it decides where the fan around a vertex
+  starts — which decides the order points are numbered in;
+- a vertex is on a boundary when swinging left from its left-most corner
+  leaves the mesh, not when it has no corner at all;
+- the tagged symbol decoder reads its bits straight through rather than
+  realigning per group.
+
+What it implements: EdgeBreaker connectivity (standard and valence traversal)
+and sequential connectivity, rANS symbol decoding both tagged and raw, the
+attribute seams that split a vertex where a texture is cut, depth-first and
+prediction-degree traversal, and the prediction schemes — difference,
+parallelogram, constrained multi-parallelogram, portable texture coordinates
+and geometric normals — with the wrap and octahedral transforms.
+
+It is held to Draco's own decoder, not to a tolerance. Every checked-in
+fixture in `samples/draco` decodes to the same values Google's decoder gives,
+and on a 1.9 MiB compressed car of 240,144 triangles across 33 primitives,
+every index and every attribute value matches exactly.
+
 ### Importing glTF
 
 The same page reads glTF back, so a `.glb` or a `.gltf` opens like any other
@@ -702,6 +736,12 @@ node web/test/reload.js a.fbx b.fbx                  # one file replacing anothe
 `tests/fbxbuild.py` also writes `.blend` fixtures — a real header, file-blocks
 and SDNA — so the container reader is testable without Blender installed, and
 glTF fixtures in both containers, written to be awkward on purpose.
+
+The Draco fixtures in `samples/draco` are meshes encoded by Draco's own
+encoder, each beside the values Draco's own decoder gives back for it. They
+are regenerated with `npm i draco3d` and the script in the commit that added
+them; the package is a test-time oracle only — nothing ships with a
+dependency.
 
 The web tests skip cleanly when `clang` or `node` is unavailable.
 

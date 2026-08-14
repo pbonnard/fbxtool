@@ -282,6 +282,29 @@ def test_gltf_export(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_a_draco_compressed_glb_renders(built, tmp_path):
+    """A .glb whose geometry is only in a Draco block draws, in the page.
+
+    The accessors in such a file carry counts but no data, so anything that
+    comes out on screen came out of the decompressor.
+    """
+    import fbxbuild as fb
+
+    path = tmp_path / "draco.glb"
+    path.write_bytes(fb.build_draco_glb())
+    result = _run(["node", str(WEB / "test" / "browser.js"), str(path)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert f"{fb.DRACO_GLB_TRIANGLES} triangles" in result.stdout
+    assert "no warnings  — clean" in result.stdout
+    # Something was actually drawn, not merely counted.
+    assert "lit samples" in result.stdout
+    assert " 0 lit samples" not in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_gltf_import(built):
     """Read glTF back: our own export, round-tripped, and a hand-written file
     using what the exporter never writes — interleaving, 16-bit indices, a

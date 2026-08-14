@@ -218,6 +218,54 @@ const FbxGltfIn = (function () {
     return { translation: t, rotation: eulerFromMatrix(m).rotation, scale: s };
   }
 
+  /**
+   * A Draco-compressed primitive, decompressed into the same arrays the plain
+   * path reads from accessors.
+   *
+   * The block holds the whole primitive — its triangles and every attribute —
+   * so the accessors are only consulted for which unique id is which
+   * attribute. What comes back is copied out of the module's memory before it
+   * is handed anything else to do.
+   */
+  function decompress(json, buffers, draco, warnings) {
+    const view = (json.bufferViews || [])[draco.bufferView];
+    const bytes = view ? buffers[view.buffer || 0] : null;
+    if (!view || !bytes) {
+      warnings.push('a Draco block points at a buffer that was not supplied');
+      return null;
+    }
+    const start = view.byteOffset || 0;
+    const block = bytes.subarray(start, start + view.byteLength);
+
+    const mark = FbxWasm.mark();
+    try {
+      const out = FbxWasm.decodeDraco(block);
+      const take = (name, components) => {
+        const id = (draco.attributes || {})[name];
+        if (id === undefined) return null;
+        const found = out.attributes.find((a) => a.uniqueId === id);
+        if (!found) {
+          warnings.push(`a Draco block has no ${name} where the file says it does`);
+          return null;
+        }
+        if (components && found.components !== components) return null;
+        return found.values.slice();          // out of the module's memory
+      };
+      return {
+        positions: take('POSITION', 3),
+        normals: take('NORMAL', 3),
+        uvs: take('TEXCOORD_0', 2),
+        indices: Array.from(out.indices),
+        vertexCount: out.numPoints,
+      };
+    } catch (error) {
+      warnings.push(`a Draco block would not decompress: ${error.message}`);
+      return null;
+    } finally {
+      FbxWasm.release(mark);
+    }
+  }
+
   /* --------------------------------------------------------------- reading */
 
   /**
@@ -340,18 +388,24 @@ const FbxGltfIn = (function () {
             + 'does not turn into polygons');
           return null;
         }
-        // Draco replaces the vertex streams with its own compressed block, so
-        // the accessors it leaves behind describe a mesh that is not there.
-        if ((primitive.extensions || {}).KHR_draco_mesh_compression) {
+        // Draco replaces the vertex streams with a compressed block of its
+        // own: the accessors it leaves behind describe a mesh that is not
+        // there, so everything comes out of the block instead.
+        const draco = (primitive.extensions || {}).KHR_draco_mesh_compression;
+        const decoded = draco ? decompress(json, buffers, draco, warnings) : null;
+        if (draco && !decoded) {
           compressed++;
           return null;
         }
-        const positions = readAccessor(json, buffers, primitive.attributes.POSITION, warnings);
+
+        const positions = decoded ? decoded.positions
+          : readAccessor(json, buffers, primitive.attributes.POSITION, warnings);
         if (!positions || !positions.length) return null;
 
         const vertexCount = positions.length / 3;
-        let indices = primitive.indices !== undefined
-          ? readAccessor(json, buffers, primitive.indices, warnings) : null;
+        let indices = decoded ? decoded.indices
+          : (primitive.indices !== undefined
+            ? readAccessor(json, buffers, primitive.indices, warnings) : null);
         if (!indices) {
           indices = new Array(vertexCount);
           for (let i = 0; i < vertexCount; i++) indices[i] = i;
@@ -374,8 +428,9 @@ const FbxGltfIn = (function () {
           node('PolygonVertexIndex', [array('i', polygons)]),
           node('GeometryVersion', [I(124)]),
         ];
-        const normals = primitive.attributes.NORMAL !== undefined
-          ? readAccessor(json, buffers, primitive.attributes.NORMAL, warnings) : null;
+        const normals = decoded ? decoded.normals
+          : (primitive.attributes.NORMAL !== undefined
+            ? readAccessor(json, buffers, primitive.attributes.NORMAL, warnings) : null);
         if (normals && normals.length === positions.length) {
           geometry.push(node('LayerElementNormal', [I(0)], [
             node('Version', [I(101)]),
@@ -384,8 +439,9 @@ const FbxGltfIn = (function () {
             node('Normals', [array('d', normals)]),
           ]));
         }
-        const uvs = primitive.attributes.TEXCOORD_0 !== undefined
-          ? readAccessor(json, buffers, primitive.attributes.TEXCOORD_0, warnings) : null;
+        const uvs = decoded ? decoded.uvs
+          : (primitive.attributes.TEXCOORD_0 !== undefined
+            ? readAccessor(json, buffers, primitive.attributes.TEXCOORD_0, warnings) : null);
         if (uvs && uvs.length === vertexCount * 2) {
           // glTF measures V downwards from the top; FBX upwards.
           const flipped = new Array(uvs.length);
@@ -472,9 +528,8 @@ const FbxGltfIn = (function () {
     }
     if (triangleless) warnings.push(`${triangleless} primitive(s) held no triangles`);
     if (compressed) {
-      warnings.push(`${compressed} mesh part(s) are compressed with Draco `
-        + '(KHR_draco_mesh_compression), which this reader cannot decompress — '
-        + 'their geometry is not in the file in any other form');
+      warnings.push(`${compressed} mesh part(s) are compressed with Draco and `
+        + 'would not decompress, so their geometry is missing');
     }
     // The same for the textures, so a model that arrives grey says why.
     const basis = (json.images || []).filter((image) => image.mimeType === 'image/ktx2').length;
