@@ -630,17 +630,31 @@
     history.future.length = 0;
   }
 
+  /** Every material the file itself holds, whatever part of it is on screen. */
+  function fileMaterialNames() {
+    const names = new Set();
+    for (const object of (currentAnalysis && currentAnalysis.objects) || []) {
+      if (object.nodeType === 'Material') names.add(object.displayName);
+    }
+    return names;
+  }
+
   /**
-   * Build the materials a saved assignment says were added here.
+   * Build the materials an assignment names that the file does not hold.
    *
-   * They are not in the file, so nothing else would ever make them: without
-   * this the assignment would hold a colour for a material that no longer
-   * exists, and the parts wearing it would come back undressed.
+   * Nothing else would ever make them, so without this the assignment keeps a
+   * colour for a material that is not there — and a part wearing it comes back
+   * undressed. Whether anything wears it does not come into it: a material
+   * that was added is part of the palette in its own right, and a list of
+   * materials is what an assignment is. The `added` flag records where one
+   * came from; it is not what makes it real, so an assignment written by hand,
+   * or by a version that did not write the flag, is honoured just the same.
    */
   function restoreAddedMaterials() {
+    const inFile = fileMaterialNames();
     extraMaterials = [];
     for (const [name, set] of Object.entries(materialOverrides)) {
-      if (!set || set.added !== true) continue;
+      if (!set || inFile.has(name)) continue;
       extraMaterials.push(newMaterial(name));
     }
     extraCount = extraMaterials.length;
@@ -1356,9 +1370,11 @@
     materialOverrides = incoming.materials;
     partAssignments = incoming.parts || {};
 
-    // Materials it added have to be built and the parts dressed in them again,
-    // and both of those are read while the scene is put together.
-    if (builtPieces && !currentGeometry) {
+    // Materials it names that the file has not got have to be built, and the
+    // parts dressed in them again: both are read while the scene is put
+    // together. One geometry on its own has no parts to dress, but it has the
+    // same palette, so it goes the same way.
+    if (builtPieces) {
       restoreAddedMaterials();
       resetSegments();
       setSelectedPart(-1);
@@ -2237,6 +2253,9 @@
           materialNames: palette.map((material) => material.name),
         }],
       };
+      // One geometry has no parts for an assignment to dress, but the
+      // materials it names are the same materials, so they are built here too.
+      restoreAddedMaterials();
       resetSegments();
       const built = assemble(builtPieces, currentSegments());
       const mesh = built.mesh;
@@ -2253,7 +2272,9 @@
 
       const textures = await resolveTextures(palette);
       missingTextures = textures.missing;
-      installPalette(palette, mesh);
+      // The assembled palette, not the geometry's own: an assignment can add
+      // materials to it, and the mesh was put together against that one.
+      installPalette(built.palette, mesh);
       viewer.setTextures(textures.images);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0;

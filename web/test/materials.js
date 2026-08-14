@@ -345,6 +345,51 @@ ${path.basename(second)}`);
   check('"Clear all" takes it away again', !swept.there && swept.worn < 0,
     JSON.stringify(swept));
 
+  /* An assignment is a list of materials, and a material in it that the file
+   * has not got is one the viewer must build — whether or not anything wears
+   * it, and whether or not it is marked as ours. Written by hand here, which
+   * is also what an assignment saved by an older build looks like. */
+  console.log('\nmaterials the file has not got');
+  const strangerPath = path.join(path.dirname(await addedFile.path()), 'stranger.json');
+  fs.writeFileSync(strangerPath, JSON.stringify({
+    fbxtoolMaterials: 1,
+    materials: {
+      paint: { roughness: 0.2 },
+      Violet: { colour: [0.6, 0.1, 0.7], name: 'Deep violet' },
+    },
+  }, null, 2));
+
+  const listed = () => page.evaluate(() => ({
+    palette: window.fbxtool.palette.map((m) => m.name),
+    rows: [...document.querySelectorAll('.material .material-name')].map((e) => e.textContent),
+    worn: window.fbxtool.partTable.some((part) => part.materials.includes('Violet')),
+    colour: (window.fbxtool.palette.find((m) => m.fromFile.name === 'Violet') || {}).colour,
+  }));
+
+  await fresh();
+  await page.setInputFiles('#file-input', [target, strangerPath]);
+  await page.waitForFunction(() => window.fbxtool.loadCount > 0, { timeout: 180000 });
+  await page.waitForTimeout(400);
+  const stranger = await listed();
+  check('a material only the assignment knows about is built anyway',
+    stranger.palette.includes('Deep violet') && stranger.rows.includes('Deep violet'),
+    stranger.rows.join(', '));
+  check('with the colour it was given, and nobody wearing it',
+    stranger.colour && Math.abs(stranger.colour[2] - 0.7) < 1e-6 && !stranger.worn,
+    JSON.stringify(stranger.colour));
+
+  // The same list when one geometry is shown on its own, which is a different
+  // palette put together a different way.
+  await page.selectOption('#geometry-select', '0');
+  await page.waitForTimeout(700);
+  const alone = await listed();
+  check('and it is there for one geometry on its own too',
+    alone.palette.includes('Deep violet') && alone.rows.includes('Deep violet'),
+    alone.rows.join(', '));
+  await page.selectOption('#geometry-select', 'scene');
+  await page.waitForTimeout(700);
+  await page.evaluate(() => window.fbxtool.clearMaterials());
+
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 
   await browser.close();

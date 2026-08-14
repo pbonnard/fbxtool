@@ -695,11 +695,16 @@ JSON:
 ```
 
 The key is always the file's own name — that is what makes a rename portable —
-and `name` is what to call it instead. `added` marks a material that is in no
-file: nothing else would ever build it again, so the assignment says to. And
-`parts` says who wears what, keyed by the model's own address — the UID a 7.x
-file gives it, the name a 6.x one does — so the map still finds the part when
-the file is read again.
+and `name` is what to call it instead. `parts` says who wears what, keyed by
+the model's own address — the UID a 7.x file gives it, the name a 6.x one does
+— so the map still finds the part when the file is read again.
+
+**Any material the assignment names that the file has not got is built**, and
+`added` only records where it came from. An assignment is a list of materials,
+so a material in it exists whether or not the file knows the name, whether or
+not anything is wearing it, and whether or not it was made here — which is what
+makes one written by hand, or by an older version, work as well as one saved
+yesterday.
 
 Drop that file back in to apply it again, so an assignment can travel with a
 model that does not carry its own. Any order will do: with the model, before it
