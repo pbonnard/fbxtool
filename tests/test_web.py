@@ -194,18 +194,20 @@ def test_the_two_gltf_readers_agree(built, tmp_path, container):
 
 @needs_clang
 @needs_node
-def test_the_two_max_readers_agree(built, tmp_path):
+@pytest.mark.parametrize("shader", [None, "Blinn", "VRayMtl", "CoronaMtl"])
+def test_the_two_max_readers_agree(built, tmp_path, shader):
     """A .max is read twice over — once here, once in the page — and the two
     have to produce the same records, down to the last vertex.
 
     Nothing about this format is documented, so there is no third party to
     check against: what the two readers share is one account of the format,
-    and this is what keeps them from drifting apart.
+    and this is what keeps them from drifting apart.  Each shader lays its
+    block out differently, so each is read both ways.
     """
     import fbxbuild as fb
 
     path = tmp_path / "scene.max"
-    path.write_bytes(fb.build_max())
+    path.write_bytes(fb.build_max(shader=shader))
 
     js = _wasm_dump(str(path))
     python = _python_dump(str(path))

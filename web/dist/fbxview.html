@@ -3223,6 +3223,7 @@ const FbxMax = (function () {
   const CLASS_IDS = 0x2060;
   // A material and its parameter blocks.
   const MTL_BASE = 0x5431;
+  const MTL_PLUGIN_BASE = 0x0fa0;   // the same block, where a plugin keeps it
   const MTL_NAME = 0x4001;
   const PARAM = 0x100e;
   const ASSET_REF = 0x0003;
@@ -3231,6 +3232,7 @@ const FbxMax = (function () {
   // whole numbers; the rest of what a shader keeps is float-valued.
   const PARAM_INT = 1;
   const PARAM_BOOL = 4;
+  const PARAM_TEXMAP = 15;          // a slot for a map, with no value of its own
 
   const node = (name, props = [], children = []) => ({ name, props, children });
   const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
@@ -3741,11 +3743,23 @@ const FbxMax = (function () {
 
   /* ------------------------------------------------------------ materials */
 
+  /**
+   * What the scene calls a material.
+   *
+   * 3ds Max's own materials keep the name in the block every `MtlBase`
+   * carries; a plugin's material writes the same block under an id of its own
+   * — Corona's is 0x0FA0 — with the same name chunk inside it. Both are read,
+   * since a Corona scene otherwise comes out as a list of numbered materials
+   * and its V-Ray twin as a list of named ones.
+   */
   function materialName(view, bytes, entity) {
-    const block = findChunk(view, entity.start, entity.end, MTL_BASE);
-    if (!block) return '';
-    const found = findChunk(view, block[0], block[1], MTL_NAME);
-    return found ? text(view, bytes, found[0], found[1]) : '';
+    for (const wanted of [MTL_BASE, MTL_PLUGIN_BASE]) {
+      const block = findChunk(view, entity.start, entity.end, wanted);
+      if (!block) continue;
+      const found = findChunk(view, block[0], block[1], MTL_NAME);
+      if (found) return text(view, bytes, found[0], found[1]);
+    }
+    return '';
   }
 
   /**
@@ -3755,14 +3769,21 @@ const FbxMax = (function () {
    * value is the last four bytes or, for a colour, the last twelve. What an id
    * *means* is the plugin's business — but the class table says which plugin,
    * and for the shaders 3ds Max itself ships the layout is published.
+   *
+   * How much flag sits between the two varies, so a scalar can be as little as
+   * nineteen bytes. That is exactly what a Corona material writes, and every
+   * number describing its surface — its glossiness above all — was below the
+   * cutoff and thrown away. A slot for a map is smaller still and carries no
+   * value at all, which its type is what says.
    */
   function paramsOf(view, entity) {
     const out = [];
     chunks(view, entity.start, entity.end, (id, body, tail) => {
       const size = tail - body;
-      if (id !== PARAM || size < 21) return true;
+      if (id !== PARAM || size < 19) return true;
       const param = view.getUint16(body, true);
       const kind = view.getUint16(body + 2, true);
+      if (kind === PARAM_TEXMAP) return true;
       if (size >= 27) {
         const rgb = [view.getFloat32(tail - 12, true), view.getFloat32(tail - 8, true),
           view.getFloat32(tail - 4, true)];
@@ -3790,10 +3811,14 @@ const FbxMax = (function () {
    * the Blinn family reads at the same two places; Strauss is a shader of one
    * colour and keeps nothing where the others do.
    *
-   * A plugin's own material — VRay, Corona, Arnold — is not in this table and
-   * is not read as though it were: it keeps today's rule, that the first
-   * colour in the block is the diffuse, and its finish is left to the
-   * Materials tab.
+   * A plugin's own material that is not in this table is not read as though it
+   * were: it keeps today's rule, that the first colour in the block is the
+   * diffuse, and its finish is left to the Materials tab.
+   *
+   * Some plugins put a level beside each colour rather than folding it in, so
+   * a channel can name one of its own: `diffuseLevel` and the rest multiply
+   * the colour they belong to, and a channel whose level is zero is off
+   * however bright its colour.
    */
   const SHADERS = new Map([
     ['blinn', { diffuse: 1, specular: 2, glossiness: 5, level: 6 }],
@@ -3814,7 +3839,27 @@ const FbxMax = (function () {
      * eight colours under the same ids, and the three that refract in one car
      * share a fog colour of (0.90, 0.96, 0.95) — the green a windscreen is. */
     ['vraymtl', { diffuse: 1, specular: 2, refraction: 5 }],
+    /* Corona keeps its surface in one block, every channel a colour with a
+     * level beside it, and its glossiness at 180 where nothing else is near.
+     *
+     * These ids were checked against the answer rather than guessed at: five
+     * of these cars ship a Corona scene and a V-Ray scene of the same model,
+     * with the same material names in both. Read this way, 174 of the 176
+     * materials that appear in both come out with the same diffuse, specular,
+     * glossiness and opacity as the V-Ray twin the tool already read — and the
+     * two that differ are a windscreen and a body the artist tuned separately
+     * for each renderer, which the rest of their own numbers agree about.
+     *
+     * Corona renamed the material when the newer one arrived; the block did
+     * not change, so a scene saved by either reads the same. */
+    ['coronamtl', {
+      diffuse: 101, diffuseLevel: 121,
+      specular: 102, specularLevel: 122,
+      refraction: 103, refractionLevel: 123,
+      glossiness: 180,
+    }],
   ]);
+  SHADERS.set('coronalegacymtl', SHADERS.get('coronamtl'));
 
   /** A shader's own name for itself, or nothing when the plugin is its own. */
   const shaderLayout = (name) => SHADERS.get(String(name || '').trim().toLowerCase()) || null;
@@ -3832,15 +3877,25 @@ const FbxMax = (function () {
       const found = params.find((p) => p.id === layout[which] && p[key] !== undefined);
       return found ? found[key] : null;
     };
-    const colour = at('diffuse', 'colour');
+    /** A colour, dimmed by the level its shader keeps beside it. */
+    const scaled = (which) => {
+      const colour = at(which, 'colour');
+      if (!colour) return null;
+      const stated = at(`${which}Level`, 'value');
+      if (stated === null || stated === 1) return colour;
+      const level = Math.min(1, Math.max(0, stated));
+      return colour.map((c) => c * level);
+    };
+
+    const colour = scaled('diffuse');
     if (!colour) return null;
     // What a material refracts is what it lets through, so it is the opposite
     // of its opacity. Taken from the brightest channel: a tinted refraction is
     // still a measure of how much gets past.
-    const refraction = at('refraction', 'colour');
+    const refraction = scaled('refraction');
     return {
       colour,
-      specular: at('specular', 'colour'),
+      specular: scaled('specular'),
       glossiness: at('glossiness', 'value'),
       level: at('level', 'value'),
       opacity: refraction === null

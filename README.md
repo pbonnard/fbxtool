@@ -302,8 +302,29 @@ VRayMtl blocks across three car scenes carry the same eight colours under the
 same ids, and id 5 settles itself — it is stored as a colour, which a
 glossiness never is, and it is exactly zero on fourteen of twenty materials in
 one car, implausible for a glossiness and exactly right for an opaque surface.
-Corona's layout has not been worked out, so a `CoronaLegacyMtl` still keeps the
-older rule.
+
+**CoronaMtl** is read too, and it took two things rather than one. Corona keeps
+a level beside every colour instead of folding it in, so a channel is the pair
+— a white refraction at level 0 is a solid surface, and the colour on its own
+says the opposite. And it writes its numbers in shorter chunks than the shaders
+3ds Max ships do: a scalar of nineteen bytes where the reader started reading
+at twenty-one, so every number describing the surface fell under the cutoff and
+was thrown away, the glossiness with it. A slot for a map is shorter still and
+holds no value at all — read as a float it is 2.0, which would pass for a level
+— so what tells the two apart is the type and not the size. Its ids: 101/102/103 the diffuse,
+reflection and refraction, 121/122/123 their levels, 180 the glossiness. Its
+name lives in the same block every material carries, written under an id of its
+own — 0x0FA0 rather than 0x5431 — which is why a Corona scene used to come out
+as a list of numbered materials while its V-Ray twin came out named. A
+`CoronaLegacyMtl` writes the same block and reads the same way.
+
+Those ids were settled against the answer rather than guessed at. Five of the
+cars in one library ship a Corona scene *and* a V-Ray scene of the same model,
+with the same material names in both, and V-Ray was already read. Of the 176
+materials that appear in both, 174 come out with the same diffuse, the same
+specular, the same glossiness and the same opacity from either file — and the
+two that differ are a windscreen and a body the artist tuned separately for
+each renderer, which the rest of their own numbers agree about.
 
 Which id means *diffuse* is otherwise the plugin's own business — the names
 live in the DLL and not in the file — but the file does say *which plugin*, and
@@ -317,12 +338,12 @@ Oren-Nayar-Blinn is Blinn with two parameters added on the end, so the Blinn
 family reads alike; Anisotropic keeps its specular level where Blinn keeps its
 glossiness, and is read its own way round.
 
-A plugin's own material — VRayMtl, VRayLightMtl, CoronaMtl — is not in that
-table and is not read as though it were: it keeps the older rule, **the first
-colour-valued parameter is the diffuse**, and nothing is claimed about its
-finish. What a VRay material *reflects* sits two parameters further on with
-another between them, and reading it by a shader's layout would put the
-reflection where the colour goes. A **Multi/Sub-Object** becomes one material
+A plugin's own material that has not been studied — VRayLightMtl,
+CoronaLightMtl, an Arnold surface — is not in that table and is not read as
+though it were: it keeps the older rule, **the first colour-valued parameter is
+the diffuse**, and nothing is claimed about its finish. What a VRay material
+*reflects* sits two parameters further on with another between them, and
+reading it by a shader's layout would put the reflection where the colour goes. A **Multi/Sub-Object** becomes one material
 per slot, and a face's material id picks between them. The Materials tab is
 where a surface the file does not describe gets its finish, and an assignment
 saved there is remembered for the file.

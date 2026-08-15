@@ -1561,6 +1561,37 @@ def _max_param_float(param: int, value: float) -> bytes:
     return _max_chunk(0x100E, struct.pack("<HHIIIBf", param, 0, 0, 0, 0, 0, value))
 
 
+#: How much flag a parameter carries between its type and its value is the
+#: plugin's own business, and Corona writes four bytes fewer than the shaders
+#: 3ds Max ships — nineteen bytes for a scalar, twenty-seven for a colour.
+#: Written as the real files write it, since the size is exactly what a reader
+#: has to get past to see any of these numbers at all.
+_CORONA_FLAGS = struct.pack("<IIHB", 0x00010000, 0x00000092, 0, 0xC0)
+
+
+def _max_param_small_colour(param: int, rgb: "tuple[float, float, float]") -> bytes:
+    """A colour parameter as a plugin with a shorter header writes it."""
+    return _max_chunk(0x100E, struct.pack("<HH", param, 2) + _CORONA_FLAGS
+                      + struct.pack("<3f", *rgb))
+
+
+def _max_param_small_float(param: int, value: float) -> bytes:
+    """A scalar parameter as a plugin with a shorter header writes it."""
+    return _max_chunk(0x100E, struct.pack("<HH", param, 0) + _CORONA_FLAGS
+                      + struct.pack("<f", value))
+
+
+def _max_param_texmap(param: int) -> bytes:
+    """A slot for a map: shorter still, and carrying no value of its own.
+
+    Read as a float it is 2.0, which would pass for a level or a glossiness if
+    the type were not there to say what it is.
+    """
+    return _max_chunk(0x100E, struct.pack("<HH", param, 15)
+                      + struct.pack("<IIH", 0x40000000, 0x00001081, 0)
+                      + struct.pack("<B", 0x40))
+
+
 def _max_float_controller(value: float) -> bytes:
     """A Bezier Float, which keeps its one value wrapped in a block of its own.
 
@@ -1609,6 +1640,13 @@ MAX_SPECULAR_LEVEL = 0.6
 #: and the one thing a .max says about transparency at all.  Stored as a
 #: colour, as a V-Ray refraction is; a glossiness would be a single float.
 MAX_REFRACTION = (0.35, 0.35, 0.35)
+
+#: Corona keeps a level beside each colour rather than folding it in, so what
+#: the surface is depends on both.  A refraction level below one is a partly
+#: see-through material; at zero the colour beside it means nothing at all.
+MAX_DIFFUSE_LEVEL = 0.75
+MAX_SPECULAR_LEVEL_CORONA = 0.5
+MAX_REFRACTION_LEVEL = 0.4
 
 
 def build_max(*, name: str = "cube001", with_uvs: bool = True,
@@ -1703,6 +1741,20 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         block = (_max_param_colour(1, MAX_DIFFUSE)
                  + _max_param_colour(2, MAX_SPECULAR)
                  + _max_param_colour(5, MAX_REFRACTION))
+    elif shader and shader.strip().lower().startswith("corona"):
+        # Corona's own block: every channel a colour with a level beside it,
+        # its glossiness far behind them at 180, and the whole of it written
+        # four bytes shorter than the shaders 3ds Max ships write theirs.  The
+        # map slot is there because it reads as a plausible number and must be
+        # told from one by its type.
+        block = (_max_param_small_colour(101, MAX_DIFFUSE)
+                 + _max_param_small_colour(102, MAX_SPECULAR)
+                 + _max_param_small_colour(103, MAX_REFRACTION)
+                 + _max_param_small_float(121, MAX_DIFFUSE_LEVEL)
+                 + _max_param_small_float(122, MAX_SPECULAR_LEVEL_CORONA)
+                 + _max_param_small_float(123, MAX_REFRACTION_LEVEL)
+                 + _max_param_texmap(141)
+                 + _max_param_small_float(180, MAX_GLOSSINESS))
     elif shader:
         block = (_max_param_colour(0, MAX_AMBIENT)
                  + _max_param_colour(1, MAX_DIFFUSE)
@@ -1733,9 +1785,13 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                             container=True)
         nxt += 1
 
+    # Every material keeps its name in the same block; a plugin's material
+    # keeps that block under an id of its own, which is Corona's whole reason
+    # for coming out unnamed.
+    base_id = 0x0FA0 if (shader or "").strip().lower().startswith("corona") else 0x5431
     material = _max_chunk(0x0003,
                           _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, parameters))
-                          + _max_chunk(0x5431,
+                          + _max_chunk(base_id,
                                        _max_chunk(0x4001, _max_utf16("Body paint")),
                                        container=True),
                           container=True)

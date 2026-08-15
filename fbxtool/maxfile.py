@@ -146,6 +146,7 @@ _CLASS_IDS = 0x2060
 
 #: Chunks inside a material and its parameter blocks.
 _MTL_BASE = 0x5431          # the block every material carries
+_MTL_PLUGIN_BASE = 0x0FA0   # the same block, where a plugin material keeps it
 _MTL_NAME = 0x4001          # its name, inside that block
 _PARAM = 0x100E             # one parameter of a ParamBlock2
 _ASSET_REF = 0x0003         # a parameter block's reference to a file asset
@@ -154,6 +155,7 @@ _ASSET_REF = 0x0003         # a parameter block's reference to a file asset
 #: whole numbers; the rest of what a shader keeps is float-valued.
 _PARAM_INT = 1
 _PARAM_BOOL = 4
+_PARAM_TEXMAP = 15          # a slot for a map, which carries no value of its own
 
 #: Superclasses, as 3ds Max numbers them.
 _GEOM_CLASS = 0x10
@@ -681,11 +683,22 @@ class _Material:
 
 
 def _material_name(scene: bytes, entity) -> str:
-    block = _find(scene, entity.start, entity.end, _MTL_BASE)
-    if block is None:
-        return ""
-    found = _find(scene, block[0], block[1], _MTL_NAME)
-    return _text(scene[found[0]:found[1]]) if found else ""
+    """What the scene calls a material.
+
+    3ds Max's own materials keep the name in the block every ``MtlBase``
+    carries; a plugin's material writes the same block under an id of its own
+    � Corona's is 0x0FA0 � with the same name chunk inside it.  Both are read,
+    since a Corona scene otherwise comes out as a list of numbered materials
+    and its V-Ray twin as a list of named ones.
+    """
+    for wanted in (_MTL_BASE, _MTL_PLUGIN_BASE):
+        block = _find(scene, entity.start, entity.end, wanted)
+        if block is None:
+            continue
+        found = _find(scene, block[0], block[1], _MTL_NAME)
+        if found:
+            return _text(scene[found[0]:found[1]])
+    return ""
 
 
 def _params_of(scene: bytes, entity):
@@ -695,13 +708,21 @@ def _params_of(scene: bytes, entity):
     the value is the last four bytes or, for a colour, the last twelve.  What
     an id *means* is the plugin's business — but the class table says which
     plugin, and for the shaders 3ds Max itself ships the layout is published.
+
+    How much flag sits between the two varies, so a scalar can be as little as
+    nineteen bytes.  That is exactly what a Corona material writes, and every
+    number describing its surface — its glossiness above all — was below the
+    cutoff and thrown away.  A slot for a map is smaller still and carries no
+    value at all, which its type is what says.
     """
     out: list[tuple[int, str, object]] = []
     for idn, body, tail, _ in _chunks(scene, entity.start, entity.end):
         size = tail - body
-        if idn != _PARAM or size < 21:
+        if idn != _PARAM or size < 19:
             continue
         param, kind = struct.unpack_from("<HH", scene, body)
+        if kind == _PARAM_TEXMAP:
+            continue
         if size >= 27:
             rgb = struct.unpack_from("<3f", scene, tail - 12)
             if all(0.0 <= v <= 1.0 for v in rgb):
@@ -724,9 +745,14 @@ def _params_of(scene: bytes, entity):
 #: the Blinn family reads at the same two places; Strauss is a shader of one
 #: colour and keeps nothing where the others do.
 #:
-#: A plugin's own material — VRay, Corona, Arnold — is not in this table and
-#: is not read as though it were: it keeps the older rule, that the first
-#: colour in the block is the diffuse, and its finish is left alone.
+#: A plugin's own material that is not in this table is not read as though it
+#: were: it keeps the older rule, that the first colour in the block is the
+#: diffuse, and its finish is left alone.
+#:
+#: Some plugins put a level beside each colour rather than folding it in, so a
+#: channel can name one of its own: ``diffuse_level`` and the rest multiply the
+#: colour they belong to, and a channel whose level is zero is off however
+#: bright its colour.
 _SHADERS = {
     "blinn": {"diffuse": 1, "specular": 2, "glossiness": 5, "level": 6},
     "phong": {"diffuse": 1, "specular": 2, "glossiness": 5, "level": 6},
@@ -747,7 +773,27 @@ _SHADERS = {
     # share a fog colour of (0.90, 0.96, 0.95) — the green a windscreen is.
     # Worth checking against a scene whose answer is known independently.
     "vraymtl": {"diffuse": 1, "specular": 2, "refraction": 5},
+    # Corona keeps its surface in one block, every channel a colour with a
+    # level beside it, and its glossiness at 180 where nothing else is near.
+    #
+    # These ids were checked against the answer rather than guessed at: five of
+    # these cars ship a Corona scene and a V-Ray scene of the same model, with
+    # the same material names in both.  Read this way, 174 of the 176 materials
+    # that appear in both come out with the same diffuse, the same specular,
+    # the same glossiness and the same opacity as the V-Ray twin the tool
+    # already read — and the two that differ are a windscreen and a body the
+    # artist tuned differently for each renderer, which the rest of their own
+    # numbers agree about.
+    "coronamtl": {
+        "diffuse": 101, "diffuse_level": 121,
+        "specular": 102, "specular_level": 122,
+        "refraction": 103, "refraction_level": 123,
+        "glossiness": 180,
+    },
 }
+#: Corona renamed its material when the newer one arrived; the block did not
+#: change, and a scene saved by either reads the same.
+_SHADERS["coronalegacymtl"] = _SHADERS["coronamtl"]
 
 
 def _appearance_of(params, layout):
@@ -765,19 +811,30 @@ def _appearance_of(params, layout):
                 return value
         return None
 
-    colour = at("diffuse", "colour")
+    def scaled(which: str):
+        """A colour, dimmed by the level its shader keeps beside it."""
+        colour = at(which, "colour")
+        if colour is None:
+            return None
+        level = at(f"{which}_level", "value")
+        if level is None or level == 1.0:
+            return colour
+        level = min(1.0, max(0.0, level))
+        return tuple(c * level for c in colour)
+
+    colour = scaled("diffuse")
     if colour is None:
         return None
     # What a material refracts is what it lets through, so it is the opposite
     # of its opacity.  Taken from the brightest channel: a tinted refraction is
     # still a measure of how much gets past.
-    refraction = at("refraction", "colour")
+    refraction = scaled("refraction")
     opacity = None
     if refraction is not None:
         opacity = 1.0 - min(1.0, max(0.0, max(refraction)))
     return {
         "colour": colour,
-        "specular": at("specular", "colour"),
+        "specular": scaled("specular"),
         "glossiness": at("glossiness", "value"),
         "level": at("level", "value"),
         "opacity": opacity,

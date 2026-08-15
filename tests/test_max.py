@@ -298,13 +298,13 @@ def test_each_shader_reads_its_own_layout():
 
 
 def test_a_plugins_own_material_is_read_no_further_than_its_colour():
-    """Corona and the rest lay their blocks out as they please.
+    """A renderer nobody has studied lays its block out as it pleases.
 
     Reading one by a shader's layout would put its reflection where its colour
     goes, so a class nobody has studied keeps the older rule — the first colour
     is the diffuse — and states nothing about the finish.
     """
-    props = _material_props(parse_max(fb.build_max(shader="CoronaLegacyMtl"),
+    props = _material_props(parse_max(fb.build_max(shader="ArnoldStandardSurface"),
                                       load_arrays=True))
     assert list(props) == ["DiffuseColor"]
     assert props["DiffuseColor"] == pytest.approx(fb.MAX_AMBIENT, abs=1e-6)
@@ -323,6 +323,58 @@ def test_a_vray_material_is_read_for_what_it_lets_through():
     assert props["SpecularColor"] == pytest.approx(fb.MAX_SPECULAR, abs=1e-6)
     # What it refracts is what it lets through, so it is the opposite of this.
     assert props["Opacity"] == pytest.approx([1 - max(fb.MAX_REFRACTION)], abs=1e-6)
+
+
+@pytest.mark.parametrize("shader", ["CoronaMtl", "CoronaLegacyMtl"])
+def test_a_corona_material_is_read_by_the_layout_it_writes(shader):
+    """Corona keeps a level beside every colour, and its numbers in short
+    chunks.
+
+    Both had to be dealt with for any of it to arrive: the scalars are four
+    bytes shorter than the ones a shader 3ds Max ships writes, so a reader that
+    skips them keeps nothing of the finish at all — and the colour on its own
+    is only half of what the channel is, since a level of zero turns the
+    brightest refraction into a solid surface.
+
+    The ids were settled against the answer: five of these cars ship a Corona
+    scene and a V-Ray scene of the same model, with the same material names in
+    both, and read this way 174 of the 176 shared materials agree with the
+    V-Ray twin on all four of these.
+    """
+    props = _material_props(parse_max(fb.build_max(shader=shader), load_arrays=True))
+    assert props["DiffuseColor"] == pytest.approx(
+        [c * fb.MAX_DIFFUSE_LEVEL for c in fb.MAX_DIFFUSE], abs=1e-6)
+    assert props["SpecularColor"] == pytest.approx(
+        [c * fb.MAX_SPECULAR_LEVEL_CORONA for c in fb.MAX_SPECULAR], abs=1e-6)
+    assert props["ShininessExponent"] == pytest.approx([fb.MAX_GLOSSINESS * 100], abs=1e-4)
+    assert props["Opacity"] == pytest.approx(
+        [1 - max(fb.MAX_REFRACTION) * fb.MAX_REFRACTION_LEVEL], abs=1e-6)
+
+
+def test_a_corona_material_is_named_from_the_block_it_keeps_its_name_in():
+    """A plugin writes the block every material carries under an id of its own.
+
+    Corona's is 0x0FA0 where 3ds Max's own is 0x5431, with the same name chunk
+    inside it — which is why a Corona scene came out as a list of numbered
+    materials while its V-Ray twin, named by the same artist, came out named.
+    """
+    doc = parse_max(fb.build_max(shader="CoronaMtl"), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    material = next(n for n in objects.children if n.name == "Material")
+    assert material.props[1].value.split("\x00")[0] == "Body paint"
+
+
+def test_a_map_slot_is_not_read_as_a_number():
+    """Corona's slots for maps sit among its scalars and read as 2.0.
+
+    Nothing in the size tells them apart — they are smaller, and the reader now
+    goes below that size — so the type is what has to, or a slot at the wrong
+    id would pass for a level and dim the colour beside it.
+    """
+    props = _material_props(parse_max(fb.build_max(shader="CoronaMtl"), load_arrays=True))
+    # 141 is a slot, not a level, so the diffuse is dimmed by 121 alone.
+    assert props["DiffuseColor"] == pytest.approx(
+        [c * fb.MAX_DIFFUSE_LEVEL for c in fb.MAX_DIFFUSE], abs=1e-6)
 
 
 def test_a_material_that_refracts_nothing_says_nothing_about_opacity():
