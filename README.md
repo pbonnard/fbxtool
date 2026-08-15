@@ -344,6 +344,25 @@ gone soft. Measured against the same scene's `.obj` — 3ds Max's own bake of th
 same modifier, with the normals it wrote — reading them recovers 84% of the
 detail that masking them away had cost.
 
+The level the file asks for is a ceiling rather than an instruction. The mesh
+the viewer draws is unindexed and carries thirty floats a triangle — position,
+normal, texture coordinate, material and part, three corners each — so its
+weight on the card is a straight multiple of its triangles, and one round of
+subdivision quadruples it. A Pontiac asking for ×1 is 4.65 million triangles
+and 533 MiB of vertex buffers, which a real Firefox drew nothing at all for:
+the model still read, the parts were still counted, the line still said how
+many triangles were in it, and the viewport was empty. So the automatic level
+is held to 384 MiB — counted over the parts that are drawn rather than the
+meshes they share, and from corners rather than faces, since a cage of
+five-sided faces subdivides to more than one of quads — and the line says what
+was held back. Turning it up is one click, which is the right way round for a
+choice nobody asked for.
+
+The viewer says when it cannot draw, too. There was no `gl.getError`, no
+`webglcontextlost` and no `isContextLost` in it, so a card that could not find
+the room failed in silence; the card gives way a frame or more after the upload
+that caused it, so it is said when it happens rather than when it is asked for.
+
 **What is not decoded**: the modifier stack is not run, so a scene modelled
 with TurboSmooth gives its cage — which is what the viewer's own smoothing is
 for. Edge creases are not read, so subdivision rounds what 3ds Max would have

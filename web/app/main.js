@@ -54,6 +54,8 @@
   let subdivisionLevel = 0;
   /** Parts that would not fit through it, counted for the one build. */
   let unsmoothedParts = 0;
+  /** What the file asked for, where that was more than was drawn unasked. */
+  let heldBackSmoothing = 0;
   /** Whether the shading mode on screen is the user's choice or ours. */
   let modeChosen = false;
   /** The same, for the up axis — remembered per file, so reopening a model
@@ -552,6 +554,15 @@
   function clearDocument() {
     currentDoc = null;
     currentAnalysis = null;
+    // What the last file asked for is nothing to do with the next one, and
+    // neither is how far it was smoothed: leaving the level set meant the next
+    // file never chose its own, since choosing one is skipped when there is
+    // already a level to keep.
+    heldBackSmoothing = 0;
+    if (!modeChosen) {
+      subdivisionLevel = 0;
+      if (dom.subdivSelect) dom.subdivSelect.value = '0';
+    }
     currentGeometry = null;
     currentMesh = null;
     currentPalette = [];
@@ -647,7 +658,6 @@
         upAxisChosen = true;
       }
       objectIndex = buildObjectIndex(currentAnalysis.objects);
-      applySceneSmoothing(doc);
 
       renderReport();
       dom.tree.innerHTML = FbxReport.recordTree(doc.root);
@@ -1177,12 +1187,28 @@
     const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
     dom.meshInfo.textContent = `${built.parts} part${built.parts === 1 ? '' : 's'} · `
       + `${built.mesh.triangleCount.toLocaleString()} triangles · ${measure(size)} units`
-      + editNote();
+      + editNote() + drawNote();
     updateEditControls();
     renderReport();
     // How a part is dressed belongs to the file, the way its colours do.
     persist();
     if (note) setStatus(note, 'ok');
+  }
+
+  /**
+   * What the viewer could not draw, where it could not.
+   *
+   * A scene of several million triangles is hundreds of megabytes of vertex
+   * buffers — this one is 558 MB, against 106 MB for its largest single part,
+   * which is why a card can hold one and not the other. That failure has no
+   * other symptom: the model reads, the parts are counted, the status says how
+   * many triangles are in it, and the viewport stays empty.
+   */
+  function drawNote() {
+    if (!viewer || !viewer.uploadError) return '';
+    const mb = (viewer.uploadBytes / 1048576).toFixed(0);
+    return ` · nothing is drawn — ${viewer.uploadError} (${mb} MiB of vertex buffers).`
+      + ' Pick one part from the list, or turn the smoothing down.';
   }
 
   /** What the mesh line says about the state of the edits. */
@@ -1605,8 +1631,14 @@
 
   /** What the viewport should say about smoothing, if anything. */
   function smoothingNote(mesh) {
-    if (!(subdivisionLevel > 0 && mesh && mesh.triangleCount)) return '';
+    if (!(subdivisionLevel > 0 && mesh && mesh.triangleCount)) {
+      return heldBackSmoothing
+        ? ` · not smoothed — the file asks for ×${heldBackSmoothing}, which is more`
+          + ' than is worth drawing unasked; turn it up if your card can take it' : '';
+    }
     return ` · smoothed ×${subdivisionLevel}`
+      + (heldBackSmoothing ? ` of the ×${heldBackSmoothing} the file asks —`
+        + ' turn it up if your card can take it' : '')
       + (unsmoothedParts ? ` · ${unsmoothedParts} too large to smooth` : '');
   }
 
@@ -2623,6 +2655,9 @@
   function populateGeometry(doc) {
     const candidates = FbxAnalyze.findAllGeometry(doc);
     sceneParts = collectParts();
+    // Which needs the parts, since what is drawn is the parts and not the
+    // meshes they share.
+    applySceneSmoothing(doc, sceneParts);
     dom.geometrySelect.innerHTML = '';
     if (!candidates.length) {
       dom.geometrySelect.disabled = true;
@@ -2684,12 +2719,62 @@
    * on the rounds the modifier asks for. It is a control like any other and
    * can be turned down; what it must not do is override a choice already made.
    */
-  function applySceneSmoothing(doc) {
+  /* What a scene costs to draw, and what to spend without being asked.
+   *
+   * The mesh is unindexed and carries thirty floats a triangle — position,
+   * normal, texture coordinate, material and part, three corners each — so its
+   * weight on the card is a straight multiple of its triangles. A Pontiac
+   * whose file asks for one round of subdivision is 4.65 million triangles and
+   * 533 MiB of vertex buffers, and a card that cannot find the room draws
+   * nothing at all: the model still reads, the parts are still counted, and
+   * the viewport is empty.
+   *
+   * So the level the file asks for is a ceiling rather than an instruction.
+   * The budget is what a machine can be assumed to take rather than what any
+   * particular one will: 384 MiB, against the 533 that drew nothing on a real
+   * Firefox and the 134 that drew. Turning it up by hand is one click away,
+   * which is the right way round for a choice nobody asked for.
+   */
+  const DRAW_BYTES_PER_TRIANGLE = 30 * 4;
+  const AUTO_DRAW_BUDGET = 384 * 1048576;
+
+  /**
+   * How many triangles the scene on screen becomes after so many rounds.
+   *
+   * Counted over the parts that are drawn rather than the meshes that are
+   * stored — a car of 58 parts is often 40 meshes, four wheels being one — and
+   * from corners rather than faces, since a cage of five-sided faces subdivides
+   * to more than one of quads. A face of n corners fans to n-2 triangles and
+   * subdivides into n quads, each of which is two triangles from then on.
+   */
+  function trianglesAfter(parts, level) {
+    let corners = 0;
+    let faces = 0;
+    for (const part of parts) {
+      const run = FbxAnalyze.child(part.geometry.node, 'PolygonVertexIndex');
+      const held = FbxAnalyze.arrayLength(run) || 0;
+      corners += held;
+      // Every polygon ends on a complemented index, so the run says how many
+      // there are without reading a single number of it.
+      faces += Math.max(1, Math.round(held / 4));
+    }
+    if (!corners) return 0;
+    if (level < 1) return Math.max(0, corners - 2 * faces);
+    return 2 * corners * (4 ** (level - 1));
+  }
+
+  function applySceneSmoothing(doc, parts) {
     if (modeChosen || subdivisionLevel) return;
     const rounds = (doc.extra && doc.extra.smoothing) || 0;
-    const parts = (doc.extra && doc.extra.smoothed) || 0;
-    if (!rounds || !parts) return;
-    const wanted = Math.min(rounds, 2);
+    const smoothed = (doc.extra && doc.extra.smoothed) || 0;
+    if (!rounds || !smoothed) return;
+    const asked = Math.min(rounds, 2);
+    let wanted = asked;
+    while (wanted > 0
+      && trianglesAfter(parts, wanted) * DRAW_BYTES_PER_TRIANGLE > AUTO_DRAW_BUDGET) {
+      wanted--;
+    }
+    heldBackSmoothing = wanted < asked ? asked : 0;
     dom.subdivSelect.value = String(wanted);
     subdivisionLevel = wanted;
   }
@@ -2763,6 +2848,7 @@
         text += ` · missing: ${textures.missing.join(', ')}`
           + ' — drop the folder in, or use Open folder';
       }
+      text += drawNote();
       dom.meshInfo.textContent = text;
       // The scene is whole now, so the parts are there to be dressed. This
       // rebuilds it, which is why it comes last rather than in the middle.
@@ -2980,6 +3066,7 @@
           text += `, though the file declares ${currentAnalysis.globalSettings.upAxis}`;
         }
       }
+      text += drawNote();
       dom.meshInfo.textContent = text;
     } catch (error) {
       console.error(error);
@@ -3130,6 +3217,20 @@
     }
     try {
       viewer = new FbxViewer.Viewer(dom.canvas);
+      /* A scene too big to draw has no other symptom: the model reads, the
+       * parts are counted, the line says how many triangles are in it, and the
+       * viewport stays empty. The card gives way a frame or more after the
+       * upload, so this is said when it happens rather than when it is asked
+       * for. */
+      viewer.onDrawFailure = (why, bytes) => {
+        const note = `Nothing is drawn — ${why} `
+          + `(${(bytes / 1048576).toFixed(0)} MiB of vertex buffers). `
+          + 'Turn the smoothing down, or pick one part from the list.';
+        setStatus(note, 'error');
+        if (dom.meshInfo && !/Nothing is drawn/.test(dom.meshInfo.textContent)) {
+          dom.meshInfo.textContent += ` · ${note}`;
+        }
+      };
     } catch (error) {
       dom.stage.classList.add('no-webgl');
       dom.meshInfo.textContent = error.message;

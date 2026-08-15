@@ -596,6 +596,21 @@ ${SHADOW_LOOKUP}
         antialias: true, alpha: false, depth: true, preserveDrawingBuffer: true,
       });
       if (!this.gl) throw new Error('WebGL2 is not available in this browser');
+      /* What the last upload cost and whether it worked. A scene of several
+       * million triangles is hundreds of megabytes of vertex buffers, and a
+       * card that cannot find the room says so once, quietly, in a return
+       * value nobody reads — leaving a viewport that draws nothing over a
+       * status line that says how many triangles are in it. */
+      this.uploadError = null;
+      this.uploadBytes = 0;
+      // Losing the context happens a frame or more after the upload that
+      // caused it, so there is nobody left to return a failure to: whoever
+      // wants to say so is told when it happens.
+      this.canvas.addEventListener('webglcontextlost', (event) => {
+        event.preventDefault();
+        this.uploadError = 'the graphics context was lost';
+        if (this.onDrawFailure) this.onDrawFailure(this.uploadError, this.uploadBytes);
+      });
 
       this.mode = 0;
       this.upAxis = 'y';
@@ -1006,6 +1021,11 @@ ${SHADOW_LOOKUP}
      */
     setMesh(mesh, { keepCamera = false } = {}) {
       const gl = this.gl;
+      // Anything already pending is not this upload's doing.
+      while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
+      this.uploadError = null;
+      this.uploadBytes = (mesh.positions.length + mesh.normals.length
+        + mesh.materials.length + mesh.uvs.length + mesh.triangleCount * 3) * 4;
       gl.bindVertexArray(this.vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
@@ -1019,6 +1039,14 @@ ${SHADOW_LOOKUP}
       gl.bufferData(gl.ARRAY_BUFFER,
         mesh.parts || new Float32Array(mesh.triangleCount * 3), gl.STATIC_DRAW);
       gl.bindVertexArray(null);
+      const failed = gl.getError();
+      if (failed !== gl.NO_ERROR || gl.isContextLost()) {
+        this.uploadError = failed === gl.OUT_OF_MEMORY
+          ? 'the graphics card could not find room for it'
+          : (gl.isContextLost() ? 'the graphics context was lost'
+            : `the graphics card refused it (0x${failed.toString(16)})`);
+        if (this.onDrawFailure) this.onDrawFailure(this.uploadError, this.uploadBytes);
+      }
       this.hasUv = mesh.hasUv;
 
       this.triangleCount = mesh.triangleCount;
