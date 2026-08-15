@@ -294,10 +294,19 @@ ${path.basename(second)}`);
     const secondPath = path.join(path.dirname(await saved2.path()), 'second.json');
     await saved2.saveAs(secondPath);
 
+    /* The colour an assignment carries, read back off the model.
+     *
+     * What it set is the colour before a metalness splits it between a diffuse
+     * and a reflectance, which is what the controls edit; an assignment that
+     * names a colour and no metalness keeps the file's, so the diffuse half of
+     * a material the file calls a quarter metal is three quarters of what was
+     * set. Putting the halves back together is what makes this the colour that
+     * went in rather than an arithmetic accident of the fixture. */
     const worn = () => page.evaluate((key) => {
       const entry = window.fbxtool.palette.find((m) => m.fromFile.name === key);
+      const base = entry ? entry.colour[1] / Math.max(1 - entry.metallic, 1e-3) : -1;
       return {
-        green: entry ? Number(entry.colour[1].toFixed(2)) : -1,
+        green: entry ? Number(base.toFixed(2)) : -1,
         name: entry ? entry.name : '',
         overrides: Object.keys(window.fbxtool.overrides).length,
       };
@@ -539,6 +548,69 @@ ${path.basename(second)}`);
     undone.rows.length === carried.length && undone.records.length === 1,
     `${undone.rows.join(', ')} · ${undone.records.join(', ')}`);
   await page.evaluate(() => window.fbxtool.clearMaterials());
+
+  /* A material whose metalness is in a map rather than in its factor.
+   *
+   * The fixture states no metallicFactor at all, so glTF's default of 1
+   * applies and the map carries the truth: metal on one half of the quad,
+   * dielectric on the other. Read as the factor alone it is a mirror
+   * throughout, and a mirror keeps no diffuse — which is how a tyre comes out
+   * white. The two halves can only differ on screen if the map was sampled. */
+  const third = process.argv[4];
+  if (third && fs.existsSync(third)) {
+    console.log('\na metalness the map states, not the factor');
+    await fresh();
+    await load(page, third);
+    const wiring = await page.evaluate(() => ({
+      layers: window.fbxtool.viewer.finishLayers,
+      slot: window.fbxtool.palette[0].finishLayer,
+      metallic: window.fbxtool.palette[0].metallic,
+    }));
+    check('the map reaches the viewer as a layer of its own',
+      wiring.layers === 1 && wiring.slot === 0,
+      `${wiring.layers} layer(s), material on ${wiring.slot}`);
+    check('over the metalness the file leaves to default', wiring.metallic === 1,
+      String(wiring.metallic));
+
+    // The two halves of the quad, and the same two with the map taken away.
+    const halves = () => page.evaluate(() => {
+      const canvas = document.getElementById('viewport');
+      const gl = canvas.getContext('webgl2');
+      const read = (fx) => {
+        const px = new Uint8Array(4 * 9);
+        gl.readPixels(Math.round(canvas.width * fx) - 1,
+          Math.round(canvas.height * 0.5) - 1, 3, 3, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        const rgb = [0, 1, 2].map((k) => {
+          let sum = 0;
+          for (let i = 0; i < px.length; i += 4) sum += px[i + k];
+          return sum / 9;
+        });
+        return rgb;
+      };
+      return { left: read(0.42), right: read(0.58) };
+    });
+    const red = (rgb) => rgb[0] - (rgb[1] + rgb[2]) / 2;
+    const show = (rgb) => `rgb(${rgb.map((v) => v.toFixed(0)).join(',')})`;
+
+    const sampled = await halves();
+    await page.evaluate(() => {
+      window.fbxtool.palette.forEach((m) => { m.finishLayer = -1; });
+      window.fbxtool.viewer.setPalette(window.fbxtool.palette);
+    });
+    await page.waitForTimeout(300);
+    const flat = await halves();
+    check('the dielectric half keeps the colour the metal half reflects away',
+      red(sampled.left) > 20 && red(sampled.left) > red(sampled.right) + 10,
+      `${show(sampled.left)} against ${show(sampled.right)}`);
+    // Without the map the factor alone stands, and it says pure metal: the
+    // whole quad turns to reflected sky and its own red is cancelled. That is
+    // the tyre, and it is what the map is read to avoid.
+    check('and without the map the factor alone makes a mirror of both',
+      red(flat.left) < 10 && red(flat.right) < 10
+      && (flat.left[0] + flat.left[1] + flat.left[2])
+        > (sampled.left[0] + sampled.left[1] + sampled.left[2]),
+      `${show(flat.left)} against ${show(flat.right)}`);
+  }
 
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 

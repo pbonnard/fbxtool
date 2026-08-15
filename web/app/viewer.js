@@ -293,6 +293,8 @@ ${ENVIRONMENT}
   uniform int uPaletteSize;
   // GLSL ES 3.0 has no default precision for array samplers, unlike sampler2D.
   uniform highp sampler2DArray uTextures; // one layer per distinct image
+  // Metallic-roughness maps, stored linear: these are numbers, not a picture.
+  uniform highp sampler2DArray uFinish;
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -367,8 +369,9 @@ ${SHADOW_LOOKUP}
     int slot = clamp(int(vMaterial + 0.5), 0, max(uPaletteSize - 1, 0));
     // The third row holds opacity and which material group this slot belongs
     // to; the group is wanted in every shading mode, for the highlight.
+    vec4 extra = vec4(0.0, -1.0, 0.0, 0.0);
     if (uPaletteSize > 0) {
-      vec4 extra = texelFetch(uPalette, ivec2(slot, 2), 0);
+      extra = texelFetch(uPalette, ivec2(slot, 2), 0);
       opacity = clamp(extra.r, 0.0, 1.0);
       group = int(extra.g + 0.5);
     }
@@ -385,6 +388,30 @@ ${SHADOW_LOOKUP}
         // A bound diffuse texture replaces the flat colour, as most DCC tools
         // and viewers treat it. The sampler is sRGB, so this is already linear.
         albedo = texture(uTextures, vec3(vUv, float(layer))).rgb;
+      }
+      /* A metallic-roughness map, where the material has one.
+       *
+       * The palette arrives already split into a diffuse and a reflectance by
+       * one metalness for the whole material. A map says the metalness is
+       * different at every texel — so the split is undone and done again here,
+       * per pixel. Without this a tyre whose file leaves metallicFactor out
+       * takes glTF's default of 1 and draws as a white mirror: at full
+       * metalness the diffuse term is cancelled outright, and the tread the
+       * base colour image carries never reaches the screen. */
+      int finishLayer = int(extra.b + 0.5) - 1;
+      if (uUseTextures == 1 && finishLayer >= 0) {
+        // glTF keeps roughness in green and metalness in blue, each of them
+        // multiplying the factor stated beside it.
+        vec3 mr = texture(uFinish, vec3(vUv, float(finishLayer))).rgb;
+        float stated = clamp(extra.a, 0.0, 1.0);
+        // The colour before the split: the image itself where there is one,
+        // and otherwise the two halves put back together.
+        vec3 base = layer >= 0 ? albedo
+          : (stated >= 0.999 ? f0 : albedo / max(1.0 - stated, 1e-3));
+        float m = clamp(stated * mr.b, 0.0, 1.0);
+        roughness = clamp(roughness * mr.g, 0.05, 1.0);
+        albedo = base * (1.0 - m);
+        f0 = mix(vec3(0.04), base, m);
       }
     } else if (uMode == 1) {
       albedo = indexColour(vMaterial);
@@ -629,6 +656,7 @@ ${SHADOW_LOOKUP}
         palette: gl.getUniformLocation(program, 'uPalette'),
         paletteSize: gl.getUniformLocation(program, 'uPaletteSize'),
         textures: gl.getUniformLocation(program, 'uTextures'),
+        finish: gl.getUniformLocation(program, 'uFinish'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -791,6 +819,8 @@ ${SHADOW_LOOKUP}
 
       this.textureArray = gl.createTexture();
       this.textureLayers = 0;
+      this.finishArray = gl.createTexture();
+      this.finishLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -859,9 +889,10 @@ ${SHADOW_LOOKUP}
      * refers to.
      *
      * Three rows: the diffuse colour with the texture layer in alpha, the
-     * specular colour with roughness in alpha, then opacity. Floats, because
-     * the values are linear and eight bits of a linear ramp bands badly in the
-     * darks — the Mercedes' interior sits at 0.05.
+     * specular colour with roughness in alpha, then opacity, the material
+     * group, the metallic-roughness map's layer and the metalness that map
+     * scales. Floats, because the values are linear and eight bits of a linear
+     * ramp bands badly in the darks — the Mercedes' interior sits at 0.05.
      */
     setPalette(materials) {
       const gl = this.gl;
@@ -888,6 +919,12 @@ ${SHADOW_LOOKUP}
         data[(width * 2 + i) * 4] = opacity;
         // Which material this slot belongs to, for the highlight.
         data[(width * 2 + i) * 4 + 1] = Number.isInteger(material.group) ? material.group : -1;
+        // The metallic-roughness map, the same way round as the diffuse one,
+        // and the metalness it multiplies.
+        const finishLayer = Number.isInteger(material.finishLayer) ? material.finishLayer : -1;
+        data[(width * 2 + i) * 4 + 2] = Math.max(0, finishLayer + 1);
+        data[(width * 2 + i) * 4 + 3] = typeof material.metallic === 'number'
+          ? Math.min(1, Math.max(0, material.metallic)) : 0;
         if (opacity < OPAQUE) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -908,8 +945,26 @@ ${SHADOW_LOOKUP}
      * keeps the whole mesh to a single draw call.
      */
     setTextures(images, edge = 1024) {
-      const gl = this.gl;
       this.textureLayers = images.length;
+      // sRGB storage: image files hold display-encoded colour, and shading has
+      // to happen in linear light. The sampler undoes the encoding for free.
+      this._uploadArray(this.textureArray, images, this.gl.SRGB8_ALPHA8, edge);
+    }
+
+    /**
+     * The same, for the maps that are numbers rather than pictures.
+     *
+     * A metallic-roughness map is measured, not seen: its green is a roughness
+     * and its blue a metalness, both already linear. Decoding it as sRGB would
+     * bend both curves, so it is stored as it was written.
+     */
+    setFinishTextures(images, edge = 1024) {
+      this.finishLayers = images.length;
+      this._uploadArray(this.finishArray, images, this.gl.RGBA8, edge);
+    }
+
+    _uploadArray(target, images, internalFormat, edge = 1024) {
+      const gl = this.gl;
       if (!images.length) { this.dirty = true; return; }
 
       const size = Math.min(edge, gl.getParameter(gl.MAX_TEXTURE_SIZE));
@@ -918,10 +973,8 @@ ${SHADOW_LOOKUP}
       canvas.height = size;
       const context = canvas.getContext('2d');
 
-      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
-      // sRGB storage: image files hold display-encoded colour, and shading has
-      // to happen in linear light. The sampler undoes the encoding for free.
-      gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.SRGB8_ALPHA8, size, size, images.length,
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
+      gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, internalFormat, size, size, images.length,
         0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       images.forEach((image, layer) => {
         context.clearRect(0, 0, size, size);
@@ -1369,8 +1422,16 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
       gl.uniform1i(this.uniforms.textures, 1);
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.finishArray);
+      gl.uniform1i(this.uniforms.finish, 4);
+      gl.activeTexture(gl.TEXTURE0);
+      // Either kind of map counts: a material can carry a metallic-roughness
+      // map and no picture at all, and turning textures off has to turn the
+      // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
-        (this.textureLayers > 0 && this.hasUv && this.showTextures !== false) ? 1 : 0);
+        ((this.textureLayers > 0 || this.finishLayers > 0)
+          && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,
         Number.isInteger(this.highlight) ? this.highlight : -1);

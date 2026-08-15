@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,10 +43,20 @@ def _run(args, **kwargs) -> subprocess.CompletedProcess:
 
 
 def _node_env() -> dict[str, str]:
-    """Node needs to find the globally installed playwright."""
+    """Node needs to find the globally installed playwright.
+
+    ``npm`` is asked for where that is, by the path ``shutil.which`` gives
+    rather than by name: on Windows it is ``npm.cmd``, which ``CreateProcess``
+    will not run when it is asked for ``npm``.  Left as it was, every harness
+    below skipped for want of playwright that was installed all along — and a
+    suite that skips itself reads exactly like one that passes.
+    """
     env = dict(os.environ)
+    npm = shutil.which("npm")
+    if npm is None:  # pragma: no cover - npm absent
+        return env
     try:
-        root = _run(["npm", "root", "-g"], timeout=60).stdout.strip()
+        root = _run([npm, "root", "-g"], timeout=60).stdout.strip()
         if root:
             env["NODE_PATH"] = root
     except (OSError, subprocess.SubprocessError):  # pragma: no cover - npm absent
@@ -58,7 +69,10 @@ def built() -> Path:
     """Build the WASM module and the single-file page."""
     if shutil.which("clang") is None:
         pytest.skip("clang is required to build the WebAssembly module")
-    result = _run(["python3", str(WEB / "build.py")], cwd=str(ROOT))
+    # The interpreter running the tests, not whatever "python3" happens to
+    # name: on Windows that is as likely to be an unrelated install, or the
+    # Store's stub, as the one the suite is running under.
+    result = _run([sys.executable, str(WEB / "build.py")], cwd=str(ROOT))
     if result.returncode != 0:
         pytest.fail(f"web build failed:\n{result.stdout}\n{result.stderr}")
     return PAGE
@@ -597,8 +611,12 @@ def test_materials_can_be_assigned(built, tmp_path):
     scene = ROOT / "samples" / "scene_parts.fbx"
     glb = tmp_path / "fixture.glb"
     glb.write_bytes(fb.build_glb())
-    result = _run(["node", str(WEB / "test" / "materials.js"), str(scene), str(glb)],
-                  env=_node_env(), timeout=300)
+    # A material whose metalness is in a map rather than in its factor, which
+    # is what a tyre out of Sketchfab is.
+    finish = tmp_path / "finish.glb"
+    finish.write_bytes(fb.build_finish_glb())
+    result = _run(["node", str(WEB / "test" / "materials.js"), str(scene), str(glb),
+                   str(finish)], env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout

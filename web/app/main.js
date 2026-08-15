@@ -2156,22 +2156,24 @@
   }
 
   /**
-   * Decode each distinct texture once and assign it an array layer, dropping
-   * any that could not be loaded so the shader falls back to flat colour.
+   * Decode each distinct image of one kind once and assign it an array layer,
+   * dropping any that could not be loaded so the shader falls back to what the
+   * material states on its own.
    */
-  async function resolveTextures(palette) {
+  async function resolveLayer(palette, pick, field) {
     const requests = [];
     const layerOf = new Map();
     for (const material of palette) {
-      if (!material.texture) continue;
-      const key = material.texture.embedded
-        ? `embedded:${material.texture.name}`
-        : `file:${baseName(material.texture.path)}`;
+      const request = pick(material);
+      material[field] = -1;
+      if (!request) continue;
+      const key = request.embedded
+        ? `embedded:${request.name}` : `file:${baseName(request.path)}`;
       if (!layerOf.has(key)) {
         layerOf.set(key, requests.length);
-        requests.push(material.texture);
+        requests.push(request);
       }
-      material.layer = layerOf.get(key);
+      material[field] = layerOf.get(key);
     }
     if (!requests.length) return { images: [], missing: [], requested: 0 };
 
@@ -2184,12 +2186,36 @@
       if (image) { remap.set(index, images.length); images.push(image); }
     });
     for (const material of palette) {
-      material.layer = remap.has(material.layer) ? remap.get(material.layer) : -1;
+      material[field] = remap.has(material[field]) ? remap.get(material[field]) : -1;
     }
     const missing = requests
       .filter((_, index) => !decoded[index])
       .map((request) => baseName(request.path) || request.name);
     return { images, missing, requested: requests.length };
+  }
+
+  /**
+   * The images the viewer draws with: the base colour, and the map that says
+   * how metallic and how rough the surface is at each texel.
+   *
+   * The second is not a picture and is never shown as one — it is read so that
+   * a material stating one metalness for the whole of itself, over a map that
+   * varies it, is drawn as the map has it. A tyre whose file leaves
+   * `metallicFactor` out takes glTF's default of 1, and drawn at that it is a
+   * white mirror with its tread cancelled.
+   */
+  async function resolveTextures(palette) {
+    const base = await resolveLayer(palette, (m) => m.texture, 'layer');
+    const finish = await resolveLayer(palette,
+      (m) => m.textures && m.textures.metallicRoughness, 'finishLayer');
+    return {
+      images: base.images,
+      requested: base.requested,
+      // A map that was named and not supplied is worth saying so about,
+      // whichever of the two it was.
+      missing: [...new Set([...base.missing, ...finish.missing])],
+      finish: finish.images,
+    };
   }
 
   function populateGeometry(doc) {
@@ -2307,8 +2333,10 @@
       missingTextures = textures.missing;
       installPalette(built.palette, built.mesh);
       viewer.setTextures(textures.images);
+      viewer.setFinishTextures(textures.finish);
       defaultShadingMode(built.palette.length > 0);
-      dom.textureToggle.disabled = textures.images.length === 0;
+      dom.textureToggle.disabled = textures.images.length === 0
+        && textures.finish.length === 0;
       applyUpAxis(built.mesh);
 
       const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
@@ -2498,8 +2526,10 @@
       // materials to it, and the mesh was put together against that one.
       installPalette(built.palette, mesh);
       viewer.setTextures(textures.images);
+      viewer.setFinishTextures(textures.finish);
       defaultShadingMode(palette.length > 0);
-      dom.textureToggle.disabled = textures.images.length === 0;
+      dom.textureToggle.disabled = textures.images.length === 0
+        && textures.finish.length === 0;
 
       const chosen = applyUpAxis(mesh);
 

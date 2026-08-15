@@ -635,6 +635,18 @@ colours**, **Index colours** (a hue per material index — useful when the real
 colours are near-identical greys), **Clay** and **Normals**, with textures
 toggleable.
 
+A metallic-roughness map is read too, where a material has one. It is never
+shown as a picture — it is not one; its green is a roughness and its blue a
+metalness, both linear, and both multiplying the factor stated beside them. It
+has to be read because glTF's default for a factor a file leaves out is 1, and
+a material that keeps its metalness in a map habitually leaves the factor out:
+the Jaguar's tyres state none at all. Taken as the factor alone they are pure
+metal, and a metal keeps no diffuse — so the tread the base colour image
+carries never reaches the screen and the tyre draws as a white mirror. The
+palette arrives split into a diffuse and a reflectance by one metalness for the
+whole material; where there is a map that split is undone and done again per
+pixel.
+
 ### How it is shaded
 
 A GGX specular lobe over a Lambert diffuse, lit by one sun and by an analytic
@@ -1143,6 +1155,20 @@ them; those packages are test-time oracles only — nothing ships with a
 dependency.
 
 The web tests skip cleanly when `clang` or `node` is unavailable.
+
+Building the module needs two things, not one. `clang` compiles it, and
+`wasm-ld` links it — which ships with LLVM's `lld` rather than with clang
+itself, so a clang that compiles for wasm32 quite happily can still fail to
+link. clang looks that linker up on `PATH` and nowhere else (`--ld-path` is
+accepted and ignored for this target), so `web/build.py` finds it beside clang
+or in the toolchain's own directories and puts it there; if it cannot, it says
+what is missing rather than passing clang's `unable to execute command:
+program not executable` along. `conda install -c conda-forge lld` is one way to
+get it.
+
+The browser harnesses need playwright and, for the export, the Khronos
+glTF-Validator (`npm i -g playwright gltf-validator`); `pytest` points Node at
+the global install for you.
 
 Two real Blender exports are checked in, and the tests that need a file a real
 exporter wrote use them:

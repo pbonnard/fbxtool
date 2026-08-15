@@ -1739,3 +1739,104 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         # mtime zero so the same scene is the same bytes twice running.
         streams = {name: gzip.compress(data, mtime=0) for name, data in streams.items()}
     return _max_compound(streams)
+
+
+# ------------------------------------------------- a metallic-roughness map
+
+#: The trap this fixture is built around: a material that states no
+#: `metallicFactor` at all, so glTF's default of 1 applies and the real
+#: metalness lives in the blue channel of a map.  Read as the factor alone the
+#: surface is a mirror, and a mirror has no diffuse left to show its own colour.
+FINISH_BASE_COLOUR = (200, 40, 40)          # a plain red, obvious when it shows
+
+
+def finish_map_png(size: int = 32) -> bytes:
+    """A metallic-roughness map: rough throughout, metal on one half only.
+
+    glTF keeps roughness in green and metalness in blue.  Splitting the
+    metalness down the middle is what makes the map testable on its own — the
+    two halves can only differ on screen if something sampled it.
+    """
+    out = bytearray()
+    for _ in range(size):
+        for x in range(size):
+            metal = 255 if x >= size // 2 else 0
+            out += bytes((0, 230, metal))
+    return png(size, size, bytes(out))
+
+
+def build_finish_glb() -> bytes:
+    """A .glb of one quad wearing a base colour and a metallic-roughness map.
+
+    Two triangles facing +Z, spanning U across the quad so the map's two halves
+    land on the two halves of the face.
+    """
+    corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+    attributes = bytearray()
+    for x, y in corners:
+        attributes += struct.pack("<3f", x, y, 0.0)         # position
+        attributes += struct.pack("<3f", 0.0, 0.0, 1.0)     # normal
+        attributes += struct.pack("<2f", (x + 1) / 2, (1 - y) / 2)   # uv
+    indices = struct.pack("<6H", 0, 1, 2, 0, 2, 3)
+    colour = png(1, 1, bytes(FINISH_BASE_COLOUR))
+    finish = finish_map_png()
+
+    buffer = bytearray()
+    views = []
+
+    def view(payload: bytes, **extra) -> int:
+        buffer.extend(b"\x00" * (-len(buffer) % 4))
+        views.append({"buffer": 0, "byteOffset": len(buffer),
+                      "byteLength": len(payload), **extra})
+        buffer.extend(payload)
+        return len(views) - 1
+
+    attribute_view = view(bytes(attributes), byteStride=32)
+    index_view = view(indices)
+    colour_view = view(colour)
+    finish_view = view(finish)
+
+    document = {
+        "asset": {"version": "2.0", "generator": "fbxtool finish fixture"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "quad", "mesh": 0}],
+        "meshes": [{"name": "quad", "primitives": [{
+            "attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2},
+            "indices": 3, "material": 0,
+        }]}],
+        "materials": [{
+            "name": "finish",
+            # No metallicFactor and no baseColorFactor: both default, which is
+            # the whole point of the fixture.
+            "pbrMetallicRoughness": {
+                "baseColorTexture": {"index": 0},
+                "metallicRoughnessTexture": {"index": 1},
+            },
+        }],
+        "textures": [{"source": 0}, {"source": 1}],
+        "images": [
+            {"name": "finishBase", "mimeType": "image/png", "bufferView": colour_view},
+            {"name": "finishMap", "mimeType": "image/png", "bufferView": finish_view},
+        ],
+        "buffers": [{"byteLength": len(buffer)}],
+        "bufferViews": views,
+        "accessors": [
+            {"bufferView": attribute_view, "byteOffset": 0, "componentType": 5126,
+             "count": 4, "type": "VEC3",
+             "min": [-1.0, -1.0, 0.0], "max": [1.0, 1.0, 0.0]},
+            {"bufferView": attribute_view, "byteOffset": 12, "componentType": 5126,
+             "count": 4, "type": "VEC3"},
+            {"bufferView": attribute_view, "byteOffset": 24, "componentType": 5126,
+             "count": 4, "type": "VEC2"},
+            {"bufferView": index_view, "componentType": 5123, "count": 6, "type": "SCALAR"},
+        ],
+    }
+    json_chunk = json.dumps(document).encode("utf-8")
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    binary = bytes(buffer) + b"\x00" * (-len(buffer) % 4)
+    total = 12 + 8 + len(json_chunk) + 8 + len(binary)
+    out = bytearray(struct.pack("<4sII", b"glTF", 2, total))
+    out += struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
+    out += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return bytes(out)
