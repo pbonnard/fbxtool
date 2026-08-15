@@ -344,6 +344,10 @@ const FbxAnalyze = (function () {
     // dielectric reflects 4%. A bare `Metallic` is left alone — that is what
     // this project's own importers write, after folding it themselves.
     const metalness = pbr.metalness !== undefined ? scalar(pbr.metalness) : null;
+    // The colour before the split, which is the one an artist set and the one
+    // the Materials tab has to show: a full metal's diffuse is black, and a
+    // colour picker offering black for chrome is offering the wrong thing.
+    let base = albedo.slice();
     let specularRgb;
     if (metalness !== null) {
       const m = clamp(metalness, 0, 1);
@@ -362,6 +366,14 @@ const FbxAnalyze = (function () {
       const peak = Math.max(specularRgb[0], specularRgb[1], specularRgb[2]);
       if (source.Metallic === undefined && peak > 0.16) {
         specularRgb = specularRgb.map((v) => v * (0.16 / peak));
+      }
+      // A bare `Metallic` arrives already split — this project's own importers
+      // write it that way — so the colour before the split has to be put back
+      // together from the two halves it was split into.
+      const stated = number(source.Metallic, 0);
+      if (stated > 0) {
+        base = stated >= 0.999 ? specularRgb.slice()
+          : albedo.map((c) => Math.min(c / (1 - stated), 1));
       }
     }
 
@@ -382,6 +394,7 @@ const FbxAnalyze = (function () {
 
     return {
       colour: albedo.map((v) => Math.max(0, v)),
+      base: base.map((v) => Math.max(0, v)),
       specular: specularRgb.map((v) => clamp(v, 0, 1)),
       roughness,
       opacity: clamp(opacity, 0, 1),

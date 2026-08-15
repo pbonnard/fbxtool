@@ -961,6 +961,7 @@
       fromFile: {
         name,
         colour: colour.slice(),
+        base: colour.slice(),
         specular: [0.04, 0.04, 0.04],
         roughness: 0.4,
         opacity: 1,
@@ -1844,6 +1845,9 @@
       fromFile: {
         name: material.displayName,
         colour: look.colour.slice(),
+        // The colour before a metalness split it between diffuse and
+        // reflectance, which is what the Materials tab edits.
+        base: look.base.slice(),
         specular: look.specular.slice(),
         roughness: look.roughness,
         opacity: look.opacity,

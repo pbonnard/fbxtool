@@ -232,6 +232,55 @@ ${path.basename(second)}`);
     // Reloading the page put the Report tab back in front, and the save
     // button lives on the Materials one.
     await page.click('.tab[data-target="tab-materials"]');
+
+    /* Nothing has been set yet, so every control has to read what the file
+     * said. A .glb states a metalness on every material, and the controls used
+     * to open at zero over the diffuse half of a colour the metalness had
+     * already split — so a metal read as a dark dielectric the moment anything
+     * at all was set on it, and that was what got remembered. */
+    const asRead = await page.evaluate(() => {
+      const group = window.fbxtool.materials[0];
+      const row = document.querySelector(`.material[data-key="${CSS.escape(group.origin)}"]`);
+      const field = (name) => row.querySelector(`[data-field="${name}"]`).value;
+      return {
+        metallic: Number(field('metallic')),
+        colour: field('colour'),
+        roughness: Number(field('roughness')),
+        opacity: Number(field('opacity')),
+        file: {
+          metallic: group.entry.fromFile.metallic,
+          colour: FbxPalette.toHex(group.entry.fromFile.base),
+          roughness: group.entry.fromFile.roughness,
+          opacity: group.entry.fromFile.opacity,
+        },
+      };
+    });
+    check('the controls open on what the file says, not on a default',
+      asRead.metallic === Number(asRead.file.metallic.toFixed(2))
+      && asRead.colour === asRead.file.colour
+      && Math.abs(asRead.roughness - asRead.file.roughness) < 0.01
+      && Math.abs(asRead.opacity - asRead.file.opacity) < 0.01,
+      JSON.stringify(asRead));
+    check('and the metalness is the one the .glb states', asRead.metallic > 0,
+      String(asRead.metallic));
+
+    /* Renaming touches neither the colour nor the metalness, so what is drawn
+     * has to come through it untouched — reflectance and all. */
+    const throughRename = await page.evaluate(() => {
+      const group = window.fbxtool.materials[0];
+      const of = (m) => ({ colour: m.colour.slice(), specular: m.specular.slice(),
+        metallic: m.metallic });
+      const entry = window.fbxtool.palette.find((m) => m.fromFile.name === group.origin);
+      const before = of(entry);
+      window.fbxtool.renameMaterial(group.origin, 'Still chrome');
+      const after = of(window.fbxtool.palette.find((m) => m.fromFile.name === group.origin));
+      return { before, after };
+    });
+    check('a rename leaves the surface exactly as it was read',
+      JSON.stringify(throughRename.before) === JSON.stringify(throughRename.after),
+      JSON.stringify(throughRename));
+    await page.evaluate(() => window.fbxtool.clearMaterials());
+
     const chosen = await page.evaluate(() => {
       const group = window.fbxtool.materials[0];
       window.fbxtool.editMaterial(group.origin, { colour: [0, 0.75, 0], roughness: 0.9 });

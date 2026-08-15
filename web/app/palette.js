@@ -113,6 +113,15 @@ const FbxPalette = (function () {
   /* ----------------------------------------------------------- overrides */
 
   /**
+   * The colour a material was read as, before a metalness split it between
+   * diffuse and reflectance. That is the one an artist set and the one the
+   * controls edit; the split halves are what the shader wants. An entry from
+   * an older assignment may not carry it, and its diffuse is the nearest
+   * thing.
+   */
+  const baseOf = (file) => (file.base || file.colour);
+
+  /**
    * Fold the user's settings into the palette, or restore the file's values
    * where nothing is set. Metalness follows the Principled convention: a metal
    * has no diffuse and reflects its own colour, a dielectric reflects 4%.
@@ -121,25 +130,33 @@ const FbxPalette = (function () {
     const settings = overrides || {};
     for (const entry of palette) {
       const origin = originOf(entry);
-      const set = settings[origin];
+      const set = settings[origin] || null;
+      const file = entry.fromFile;
       // A rename is a setting like any other, so it comes and goes with them.
       entry.name = set && typeof set.name === 'string' && set.name ? set.name : origin;
-      if (!set) {
-        entry.colour = entry.fromFile.colour.slice();
-        entry.specular = entry.fromFile.specular.slice();
-        entry.roughness = entry.fromFile.roughness;
-        entry.opacity = entry.fromFile.opacity;
-        entry.metallic = entry.fromFile.metallic || 0;
+      entry.roughness = set && typeof set.roughness === 'number'
+        ? set.roughness : file.roughness;
+      entry.opacity = set && typeof set.opacity === 'number' ? set.opacity : file.opacity;
+
+      /* Colour and metalness are one setting in two halves — each is part of
+       * how the other splits — so neither is recomputed until one of them is
+       * actually set. Until then the file's own values stand as they were
+       * read, tinted reflectance and all, however much else is overridden:
+       * renaming a chrome material used to leave it a dark dielectric. */
+      const metallic = set && typeof set.metallic === 'number' ? set.metallic : null;
+      const colour = set && set.colour ? set.colour : null;
+      if (metallic === null && colour === null) {
+        entry.colour = file.colour.slice();
+        entry.specular = file.specular.slice();
+        entry.metallic = file.metallic || 0;
         continue;
       }
-      const base = set.colour || entry.fromFile.colour;
-      const metallic = typeof set.metallic === 'number' ? set.metallic : 0;
-      entry.colour = base.map((c) => c * (1 - metallic));
-      entry.specular = base.map((c) => 0.04 * (1 - metallic) + c * metallic);
-      entry.metallic = metallic;
-      entry.roughness = typeof set.roughness === 'number'
-        ? set.roughness : entry.fromFile.roughness;
-      entry.opacity = typeof set.opacity === 'number' ? set.opacity : entry.fromFile.opacity;
+      // Whichever half was not set keeps what the file said it was.
+      const m = metallic === null ? (file.metallic || 0) : metallic;
+      const base = colour || baseOf(file);
+      entry.colour = base.map((c) => c * (1 - m));
+      entry.specular = base.map((c) => 0.04 * (1 - m) + c * m);
+      entry.metallic = m;
     }
     return palette;
   }
@@ -149,8 +166,8 @@ const FbxPalette = (function () {
     const set = (overrides || {})[group.origin || group.name] || {};
     const file = group.entry.fromFile;
     return {
-      colour: set.colour || file.colour,
-      metallic: typeof set.metallic === 'number' ? set.metallic : 0,
+      colour: set.colour || baseOf(file),
+      metallic: typeof set.metallic === 'number' ? set.metallic : (file.metallic || 0),
       roughness: typeof set.roughness === 'number' ? set.roughness : file.roughness,
       opacity: typeof set.opacity === 'number' ? set.opacity : file.opacity,
       name: typeof set.name === 'string' && set.name ? set.name : (group.origin || group.name),

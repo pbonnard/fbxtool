@@ -296,6 +296,93 @@ check('a metal takes its reflectance from its colour',
 FbxPalette.apply(slots, { paint: { colour: [0.9, 0.8, 0.5], metallic: 0 } });
 check('a dielectric reflects four per cent', nearAll(slots[0].specular, [0.04, 0.04, 0.04]));
 
+/* A material the file states a metalness for arrives already split between a
+ * diffuse and a reflectance, and `base` is what it was before the split. The
+ * controls edit that, and everything the user has not set has to fall back to
+ * the file rather than to zero — a metal whose metalness fell back to zero
+ * became a dark dielectric the moment anything at all was set on it, and that
+ * was what got remembered against the file. */
+const metal = () => {
+  const made = entry('chrome', 12);
+  made.fromFile = {
+    name: 'chrome',
+    colour: [0, 0, 0],                 // a full metal keeps no diffuse
+    base: [0.86, 0.87, 0.89],
+    specular: [0.86, 0.87, 0.89],
+    roughness: 0.08,
+    opacity: 1,
+    metallic: 1,
+  };
+  return made;
+};
+const chromeRow = FbxPalette.groups([metal()], [10])[0];
+const asRead = FbxPalette.settingsFor(chromeRow, {});
+check('the controls open on the metalness the file states', asRead.metallic === 1,
+  String(asRead.metallic));
+check('and on the colour before it was split, not on the black half',
+  nearAll(asRead.colour, [0.86, 0.87, 0.89]), show(asRead.colour));
+
+const renamedMetal = [metal()];
+FbxPalette.apply(renamedMetal, { chrome: { name: 'Bumper' } });
+check('a rename leaves a metal a metal',
+  renamedMetal[0].metallic === 1 && nearAll(renamedMetal[0].specular, [0.86, 0.87, 0.89])
+  && nearAll(renamedMetal[0].colour, [0, 0, 0]),
+  show(renamedMetal[0].specular));
+
+const roughMetal = [metal()];
+FbxPalette.apply(roughMetal, { chrome: { roughness: 0.4 } });
+check('and so does roughing it up',
+  roughMetal[0].roughness === 0.4 && roughMetal[0].metallic === 1
+  && nearAll(roughMetal[0].specular, [0.86, 0.87, 0.89]),
+  show(roughMetal[0].specular));
+
+const repainted = [metal()];
+FbxPalette.apply(repainted, { chrome: { colour: [0.9, 0.1, 0.1] } });
+check('setting only the colour keeps the file\'s metalness under it',
+  repainted[0].metallic === 1 && nearAll(repainted[0].specular, [0.9, 0.1, 0.1]),
+  show(repainted[0].specular));
+
+const demetalled = [metal()];
+FbxPalette.apply(demetalled, { chrome: { metallic: 0 } });
+check('and turning the metalness off paints it with the colour it had',
+  nearAll(demetalled[0].colour, [0.86, 0.87, 0.89])
+  && nearAll(demetalled[0].specular, [0.04, 0.04, 0.04]),
+  show(demetalled[0].colour));
+
+/* Before `base` was written down there is only the split diffuse to go on. */
+const older = [metal()];
+delete older[0].fromFile.base;
+check('an assignment from before it kept a base still reads',
+  nearAll(FbxPalette.settingsFor(FbxPalette.groups(older, [10])[0], {}).colour, [0, 0, 0]));
+
+console.log('\npalette: what a material is read as');
+const readAs = (props) => FbxAnalyze.materialAppearance(props);
+// The material .glb fixtures carry: base 0.8/0.1/0.05, metalness 0.25.
+const fromGlb = readAs({
+  DiffuseColor: [0.6, 0.075, 0.0375],
+  SpecularColor: [0.23, 0.055, 0.0425],
+  Metallic: 0.25,
+  ShininessExponent: 10.5,
+});
+check('a metalness already split is put back together for the controls',
+  nearAll(fromGlb.base, [0.8, 0.1, 0.05], 1e-6) && fromGlb.metallic === 0.25,
+  show(fromGlb.base));
+check('a full metal takes its base back from its reflectance',
+  nearAll(readAs({ DiffuseColor: [0, 0, 0], SpecularColor: [0.86, 0.87, 0.89], Metallic: 1 }).base,
+    [0.86, 0.87, 0.89]));
+check('a material with no metalness is its own base',
+  nearAll(readAs({ DiffuseColor: [0.4, 0.5, 0.6] }).base, [0.4, 0.5, 0.6]));
+// A Physical Material states its metalness rather than splitting it first.
+const physical = readAs({
+  '3dsMax|main|base_color': [0.8, 0.1, 0.05],
+  '3dsMax|main|metalness': 1,
+  '3dsMax|main|roughness': 0.3,
+});
+check('a stated metalness is split here, and the base kept whole',
+  nearAll(physical.base, [0.8, 0.1, 0.05]) && nearAll(physical.specular, [0.8, 0.1, 0.05])
+  && nearAll(physical.colour, [0, 0, 0]) && physical.roughness === 0.3,
+  show(physical.base));
+
 console.log('\npalette: renaming');
 // The real shape: an entry remembers the name it was read under.
 const named = (name, uid) => {
