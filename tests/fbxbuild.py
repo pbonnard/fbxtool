@@ -1605,6 +1605,10 @@ MAX_DIFFUSE = (0.8, 0.1, 0.05)
 MAX_SPECULAR = (1.0, 0.9, 0.8)
 MAX_GLOSSINESS = 0.25
 MAX_SPECULAR_LEVEL = 0.6
+#: What a V-Ray material lets through, which is the opposite of its opacity —
+#: and the one thing a .max says about transparency at all.  Stored as a
+#: colour, as a V-Ray refraction is; a glossiness would be a single float.
+MAX_REFRACTION = (0.35, 0.35, 0.35)
 
 
 def build_max(*, name: str = "cube001", with_uvs: bool = True,
@@ -1692,12 +1696,21 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     # the picture it wears, and the node that says the mesh wears it. A shader
     # fills that block out; without one it holds the single colour a plugin's
     # own material is read for.
-    block = (_max_param_colour(0, MAX_AMBIENT)
-             + _max_param_colour(1, MAX_DIFFUSE)
-             + _max_param_colour(2, MAX_SPECULAR)
-             + _max_param_float(5, MAX_GLOSSINESS)
-             + _max_param_float(6, MAX_SPECULAR_LEVEL)) if shader \
-        else _max_param_colour(1, MAX_DIFFUSE)
+    if shader and shader.strip().lower() == "vraymtl":
+        # A renderer's own block, laid out as it pleases: the same ids mean
+        # other things, and id 5 is a refraction colour where a shader 3ds Max
+        # ships would keep a glossiness.
+        block = (_max_param_colour(1, MAX_DIFFUSE)
+                 + _max_param_colour(2, MAX_SPECULAR)
+                 + _max_param_colour(5, MAX_REFRACTION))
+    elif shader:
+        block = (_max_param_colour(0, MAX_AMBIENT)
+                 + _max_param_colour(1, MAX_DIFFUSE)
+                 + _max_param_colour(2, MAX_SPECULAR)
+                 + _max_param_float(5, MAX_GLOSSINESS)
+                 + _max_param_float(6, MAX_SPECULAR_LEVEL))
+    else:
+        block = _max_param_colour(1, MAX_DIFFUSE)
     params = _max_chunk(0x0002,
                         block
                         + _max_chunk(0x0003, bytes(8) + _max_asset_id() + bytes(8)),

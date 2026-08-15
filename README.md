@@ -290,9 +290,24 @@ uint16 type            2 for a colour
 float  r, g, b         on the end
 ```
 
-Which id means *diffuse* is the plugin's own business — the names live in the
-DLL and not in the file — but the file does say *which plugin*, and that is
-enough. A material refers to its shader, the shader to the block, and the class
+A renderer's own material is not one of the shaders 3ds Max ships, so none of
+those layouts fits it and the surface came out as whatever colour the walk met
+first. On a car that renders every window solid black: a V-Ray glass has a
+black diffuse — glass takes its look from what it refracts, not from what it
+scatters — and nothing said it was see-through. **VRayMtl** is now read for its
+diffuse, its reflection and its refraction, that last as the opposite of an
+opacity, which is the only thing in a `.max` that carries transparency at all.
+The ids come off the files rather than out of any documentation: fifty-five
+VRayMtl blocks across three car scenes carry the same eight colours under the
+same ids, and id 5 settles itself — it is stored as a colour, which a
+glossiness never is, and it is exactly zero on fourteen of twenty materials in
+one car, implausible for a glossiness and exactly right for an opaque surface.
+Corona's layout has not been worked out, so a `CoronaLegacyMtl` still keeps the
+older rule.
+
+Which id means *diffuse* is otherwise the plugin's own business — the names
+live in the DLL and not in the file — but the file does say *which plugin*, and
+for the shaders 3ds Max ships that is enough. A material refers to its shader, the shader to the block, and the class
 table names the shader; the shaders 3ds Max itself ships agree on the front of
 the block (0 ambient, 1 diffuse, 2 specular, 3 self-illumination) and publish
 where their floats fall. So a **Standard** material is read for its colour,

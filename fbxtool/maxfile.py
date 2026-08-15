@@ -734,6 +734,19 @@ _SHADERS = {
     "oren-nayar-blinn": {"diffuse": 1, "specular": 2, "glossiness": 5, "level": 6},
     "anisotropic": {"diffuse": 1, "specular": 2, "glossiness": 7, "level": 5},
     "strauss": {"diffuse": 0, "glossiness": 1},
+    # A renderer's own material is not one of the shaders 3ds Max ships, so
+    # none of the layouts above fits it and the surface used to come out as
+    # whatever colour the walk met first — for a V-Ray glass, the black diffuse
+    # that glass properly has, with nothing to say it was see-through.  What
+    # refraction it lets through is the one thing worth having beyond the
+    # colours, since nothing else in a .max carries an opacity at all.
+    #
+    # The ids are read off the files rather than out of any documentation:
+    # fifty-five VRayMtl blocks across three car scenes all carry the same
+    # eight colours under the same ids, and the three that refract in one car
+    # share a fog colour of (0.90, 0.96, 0.95) — the green a windscreen is.
+    # Worth checking against a scene whose answer is known independently.
+    "vraymtl": {"diffuse": 1, "specular": 2, "refraction": 5},
 }
 
 
@@ -755,11 +768,19 @@ def _appearance_of(params, layout):
     colour = at("diffuse", "colour")
     if colour is None:
         return None
+    # What a material refracts is what it lets through, so it is the opposite
+    # of its opacity.  Taken from the brightest channel: a tinted refraction is
+    # still a measure of how much gets past.
+    refraction = at("refraction", "colour")
+    opacity = None
+    if refraction is not None:
+        opacity = 1.0 - min(1.0, max(0.0, max(refraction)))
     return {
         "colour": colour,
         "specular": at("specular", "colour"),
         "glossiness": at("glossiness", "value"),
         "level": at("level", "value"),
+        "opacity": opacity,
     }
 
 
@@ -1176,6 +1197,11 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         if look["glossiness"] is not None:
             props.append(_p70("ShininessExponent", "Number",
                               _d(look["glossiness"] * 100)))
+        # Only where the material says so: a .max carries no opacity otherwise,
+        # and writing 1 for every material would say something the file does
+        # not.
+        if look.get("opacity") is not None and look["opacity"] < 1.0:
+            props.append(_p70("Opacity", "Number", _d(look["opacity"])))
         objects_node.children.append(
             _node("Material",
                   [_l(uid), _s(f"{material.name or f'material{index}'}\x00\x01Material"),

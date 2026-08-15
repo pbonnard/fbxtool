@@ -3780,6 +3780,18 @@ const FbxMax = (function () {
     ['oren-nayar-blinn', { diffuse: 1, specular: 2, glossiness: 5, level: 6 }],
     ['anisotropic', { diffuse: 1, specular: 2, glossiness: 7, level: 5 }],
     ['strauss', { diffuse: 0, glossiness: 1 }],
+    /* A renderer's own material is not one of the shaders 3ds Max ships, so
+     * none of the layouts above fits it and the surface used to come out as
+     * whatever colour the walk met first — for a V-Ray glass, the black
+     * diffuse that glass properly has, with nothing to say it was see-through.
+     * What it refracts is the one thing worth having beyond the colours, since
+     * nothing else in a .max carries an opacity at all.
+     *
+     * The ids are read off the files rather than out of any documentation:
+     * fifty-five VRayMtl blocks across three car scenes all carry the same
+     * eight colours under the same ids, and the three that refract in one car
+     * share a fog colour of (0.90, 0.96, 0.95) — the green a windscreen is. */
+    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5 }],
   ]);
 
   /** A shader's own name for itself, or nothing when the plugin is its own. */
@@ -3800,11 +3812,17 @@ const FbxMax = (function () {
     };
     const colour = at('diffuse', 'colour');
     if (!colour) return null;
+    // What a material refracts is what it lets through, so it is the opposite
+    // of its opacity. Taken from the brightest channel: a tinted refraction is
+    // still a measure of how much gets past.
+    const refraction = at('refraction', 'colour');
     return {
       colour,
       specular: at('specular', 'colour'),
       glossiness: at('glossiness', 'value'),
       level: at('level', 'value'),
+      opacity: refraction === null
+        ? null : 1 - Math.min(1, Math.max(0, Math.max(...refraction))),
     };
   }
 
@@ -3865,7 +3883,9 @@ const FbxMax = (function () {
     }
     // A plugin's material lays its block out as it pleases, so all that can be
     // said of one is that the first colour in it is the diffuse.
-    if (!look) look = { colour: plain, specular: null, glossiness: null, level: null };
+    if (!look) {
+      look = { colour: plain, specular: null, glossiness: null, level: null, opacity: null };
+    }
     return { name: materialName(view, bytes, entity), look, texture, subs };
   }
 
@@ -4147,6 +4167,11 @@ const FbxMax = (function () {
       // a percentage, which is the conversion 3ds Max's own exporter makes.
       if (look.glossiness !== null) {
         props.push(p70('ShininessExponent', 'Number', D(look.glossiness * 100)));
+      }
+      // Only where the material says so: a .max carries no opacity otherwise,
+      // and writing 1 for every material would say something the file does not.
+      if (look.opacity !== null && look.opacity !== undefined && look.opacity < 1) {
+        props.push(p70('Opacity', 'Number', D(look.opacity)));
       }
       objects.push(node('Material',
         [L(uid), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [

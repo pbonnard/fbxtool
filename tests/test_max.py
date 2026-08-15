@@ -298,15 +298,38 @@ def test_each_shader_reads_its_own_layout():
 
 
 def test_a_plugins_own_material_is_read_no_further_than_its_colour():
-    """VRay, Corona and the rest lay their blocks out as they please.
+    """Corona and the rest lay their blocks out as they please.
 
     Reading one by a shader's layout would put its reflection where its colour
-    goes, so an unknown class keeps the older rule — the first colour is the
-    diffuse — and states nothing about the finish.
+    goes, so a class nobody has studied keeps the older rule — the first colour
+    is the diffuse — and states nothing about the finish.
     """
-    props = _material_props(parse_max(fb.build_max(shader="VRayMtl"), load_arrays=True))
+    props = _material_props(parse_max(fb.build_max(shader="CoronaLegacyMtl"),
+                                      load_arrays=True))
     assert list(props) == ["DiffuseColor"]
     assert props["DiffuseColor"] == pytest.approx(fb.MAX_AMBIENT, abs=1e-6)
+
+
+def test_a_vray_material_is_read_for_what_it_lets_through():
+    """The one plugin material that has been studied.
+
+    Its ids come off the files rather than any documentation, but id 5 settles
+    itself: it is stored as a colour, which a glossiness never is, and it is
+    exactly zero on fourteen of twenty materials in a real car — implausible
+    for a glossiness and exactly right for an opaque surface.
+    """
+    props = _material_props(parse_max(fb.build_max(shader="VRayMtl"), load_arrays=True))
+    assert props["DiffuseColor"] == pytest.approx(fb.MAX_DIFFUSE, abs=1e-6)
+    assert props["SpecularColor"] == pytest.approx(fb.MAX_SPECULAR, abs=1e-6)
+    # What it refracts is what it lets through, so it is the opposite of this.
+    assert props["Opacity"] == pytest.approx([1 - max(fb.MAX_REFRACTION)], abs=1e-6)
+
+
+def test_a_material_that_refracts_nothing_says_nothing_about_opacity():
+    """A .max carries no opacity otherwise, and writing 1 for every material
+    would say something the file does not."""
+    props = _material_props(parse_max(fb.build_max(shader="Blinn"), load_arrays=True))
+    assert "Opacity" not in props
 
 
 def test_the_picture_a_material_wears_is_named():
