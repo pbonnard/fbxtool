@@ -725,13 +725,66 @@ def build_textured_cube(version: int = 7400, *, embed: bool = True,
                         version=version)
 
 
+def build_bare_twin(version: int = 7400) -> bytes:
+    """The same cube under the same name, with no image and nowhere to put one.
+
+    Half of a pair: this is the file worth opening — it holds the geometry —
+    and it is the one with nothing to draw on it.  Which is how a model saved
+    several ways usually arrives, one saving having kept the mesh and another
+    the maps.
+    """
+    nodes = textured_cube_nodes(version)
+    objects = next(n for n in nodes if n.name == "Objects")
+    connections = next(n for n in nodes if n.name == "Connections")
+    objects.children = [c for c in objects.children if c.name not in ("Texture", "Video")]
+    connections.children = [c for c in connections.children
+                            if c.props[0].value != "OP"
+                            and c.props[1].value != 50]
+    return build_binary(nodes, version=version)
+
+
+def build_scrap_twin(version: int = 7400,
+                     property_name: str = "DiffuseColor") -> bytes:
+    """The other half: one triangle under the same model name, with the image.
+
+    Deliberately the poorer mesh of the two, so which file is opened for its
+    geometry and which is read for its materials cannot come out the same by
+    accident.  `property_name` is what the connection binding the texture is
+    called, which every renderer spells its own way.
+    """
+    nodes = textured_cube_nodes(version)
+    objects = next(n for n in nodes if n.name == "Objects")
+    connections = next(n for n in nodes if n.name == "Connections")
+    for entry in objects.children:
+        if entry.name == "Geometry":
+            entry.children = [
+                N("Vertices", [darr([-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0])]),
+                N("PolygonVertexIndex", [iarr([0, 1, -3])]),
+                N("GeometryVersion", [I(124)]),
+                N("LayerElementMaterial", [I(0)], [
+                    N("Version", [I(101)]),
+                    N("MappingInformationType", [S("AllSame")]),
+                    N("ReferenceInformationType", [S("IndexToDirect")]),
+                    N("Materials", [iarr([0])]),
+                ]),
+                N("Layer", [I(0)], [N("Version", [I(100)])]),
+            ]
+    for entry in connections.children:
+        if entry.props[0].value == "OP":
+            entry.props[3] = S(property_name)
+    return build_binary(nodes, version=version)
+
+
 #: The property a 3ds Max / Corona export names its base colour with, and the
 #: image that ends up two links below it.
 VENDOR_PROPERTY = "3dsMax|CoronaMtlPb|texmapDiffuse"
+#: What V-Ray and Corona write instead, which is most of what leaves 3ds Max.
+VENDOR_PROPERTY_UNDERSCORED = "3dsMax|maps|texmap_diffuse"
 VENDOR_IMAGE = "Maps/checker.png"
 
 
-def build_vendor_textured(version: int = 7400) -> bytes:
+def build_vendor_textured(version: int = 7400,
+                          property_name: str = VENDOR_PROPERTY) -> bytes:
     """A cube textured the way an exporter with its own renderer writes it.
 
     Two things differ from the standard shape and both have to be followed:
@@ -766,7 +819,7 @@ def build_vendor_textured(version: int = 7400) -> bytes:
         and not (c.props[0].value == "OO" and c.props[2].value == texture_uid)
     ]
     connections.children += [
-        N("C", [S("OP"), L(texture_uid), L(material_uid), S(VENDOR_PROPERTY)]),
+        N("C", [S("OP"), L(texture_uid), L(material_uid), S(property_name)]),
         N("C", [S("OP"), L(inner_uid), L(texture_uid), S("3dsMax|parameters|map1")]),
         N("C", [S("OO"), L(video_uid), L(inner_uid)]),
     ]
@@ -1526,18 +1579,19 @@ def _max_asset_id(seed: int = 1) -> bytes:
     return bytes((seed + i) & 0xFF for i in range(16))
 
 
-def _max_face(corners: "list[int]", material: int = 0) -> bytes:
+def _max_face(corners: "list[int]", material: int = 0, groups: int = 0) -> bytes:
     """A face: its degree, its corners, then the members its flags select.
 
-    0x01 carries the material, 0x20 the triangulation of an n-gon — which is
-    two ints per triangle past the first, and the reason a face is not a fixed
-    size.
+    0x01 carries one word holding two things — the material id in its low half
+    and the smoothing groups in its high — and 0x20 the triangulation of an
+    n-gon, which is two ints per triangle past the first and the reason a face
+    is not a fixed size.
     """
     flags = 0x01 | (0x20 if len(corners) > 3 else 0)
     out = struct.pack("<I", len(corners))
     out += struct.pack("<%dI" % len(corners), *corners)
     out += struct.pack("<H", flags)
-    out += struct.pack("<I", material)
+    out += struct.pack("<I", (groups << 16) | (material & 0xFFFF))
     if flags & 0x20:
         out += struct.pack("<%dI" % (2 * (len(corners) - 3)), *([0] * 2 * (len(corners) - 3)))
     return out
@@ -1558,7 +1612,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               kind: str = "poly", compressed: bool = False,
               place: "tuple[float, float, float] | None" = None,
               offset: "tuple[float, float, float] | None" = None,
-              smooth: int = 0, shader: "str | None" = None) -> bytes:
+              smooth: int = 0, shader: "str | None" = None,
+              groups: "list[int] | None" = None) -> bytes:
     """A .max holding one cube under one node.
 
     The cube is a unit cube, which is enough to exercise every rule the reader
@@ -1613,7 +1668,11 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         verts = struct.pack("<I", len(points))
         for x, y, z in points:
             verts += struct.pack("<I3f", 0, x, y, z)
-        faces = struct.pack("<I", len(quads)) + b"".join(_max_face(q) for q in quads)
+        # Each side of the cube in a group of its own, so every edge between
+        # them is hard — which is what a cube's edges are.
+        faces = struct.pack("<I", len(quads)) + b"".join(
+            _max_face(q, groups=(groups[i] if groups else 0))
+            for i, q in enumerate(quads))
         # Edges are counted but not needed; a plausible count keeps the report
         # true.
         edges = struct.pack("<I", 12) + b"\x00" * (12 * 12)

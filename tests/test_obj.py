@@ -210,3 +210,65 @@ def test_missing_mtl_is_reported_not_fatal(tmp_path):
 def test_parse_bytes_handles_obj():
     doc = parse_bytes(SIMPLE.encode())
     assert doc.format == "obj"
+
+# ------------------------------------------------------------------- parts
+
+GROUPED = """v 0 0 0
+v 1 0 0
+v 0 1 0
+v 2 0 0
+vt 0 0
+vt 1 0
+vt 0 1
+vn 0 0 1
+g A
+usemtl Red
+f 1/1/1 2/2/1 3/3/1
+g B
+usemtl Blue
+f 1/1/1 2/2/1 4/3/1
+"""
+
+
+def test_groups_become_parts():
+    """A car written as 164 groups is 164 parts, which is what lets it be
+    exploded, picked at, edited part by part, and matched against the same
+    scene saved in another format."""
+    info = analyze(parse_obj(GROUPED, load_arrays=True))
+    models = [o.name for o in info.objects if o.node_type == "Model"]
+    assert models == ["A", "B"]
+    assert sum(1 for o in info.objects if o.node_type == "Geometry") == 2
+
+
+def test_a_part_carries_only_the_vertices_it_uses():
+    """OBJ indexes one pool from anywhere in the file, so a part is gathered
+    and renumbered rather than sliced."""
+    doc = parse_obj(GROUPED, load_arrays=True)
+    geometries = [c for c in doc.root.get("Objects").children if c.name == "Geometry"]
+    for geometry in geometries:
+        vertices = geometry.get("Vertices").props[0].value
+        polygons = geometry.get("PolygonVertexIndex").props[0].value
+        assert len(vertices) == 9, "three corners, and none of the others"
+        for written in polygons:
+            index = ~written if written < 0 else written
+            assert 0 <= index < 3
+
+
+def test_a_file_naming_no_parts_is_still_one_part():
+    """Only a change of name starts another, so a file with no `o` or `g` at
+    all does not come apart at every face."""
+    info = analyze(parse_obj(FULL, load_arrays=True))
+    assert sum(1 for o in info.objects if o.node_type == "Model") == 1
+
+
+def test_every_part_sees_the_whole_palette():
+    """A per-polygon material index counts the materials connected to that
+    part's own model, so the numbering only holds if each sees the same list."""
+    doc = parse_obj(GROUPED, load_arrays=True,
+                    materials="newmtl Red\nKd 1 0 0\nnewmtl Blue\nKd 0 0 1\n")
+    info = analyze(doc)
+    models = [o for o in info.objects if o.node_type == "Model"]
+    for model in models:
+        worn = [c for c in info.connections
+                if c.kind == "OO" and c.dst == model.uid]
+        assert len(worn) == 3, "two materials and the geometry"

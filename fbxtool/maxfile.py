@@ -84,7 +84,10 @@ What is not decoded
 
 The modifier stack is not run.  A scene modelled with TurboSmooth stores the
 cage, and the cage is what comes out — the viewer's own smoothing is the way
-to see it as it was modelled.  Only Editable Poly geometry is read; primitives
+to see it as it was modelled.  A ``.max`` stores no normals either, only the
+cage and a smoothing group per face; those groups are what says which edges
+are hard, and they come out as a ``LayerElementSmoothing`` for the normals to
+be worked out from.  Only Editable Poly geometry is read; primitives
 that were never collapsed (a Box, a Line) and Editable Mesh are counted and
 named in the report but have no vertices here.
 """
@@ -464,7 +467,7 @@ class _Mesh:
     """One Editable Poly, as read."""
 
     __slots__ = ("positions", "polygons", "uvs", "face_uvs", "faces", "edges",
-                 "materials")
+                 "materials", "groups")
 
     def __init__(self) -> None:
         self.positions: list[float] = []
@@ -474,6 +477,8 @@ class _Mesh:
         self.faces = 0
         self.edges = 0
         self.materials: list[int] = []
+        #: Smoothing groups, one bitmask per face; 0 where the file gives none.
+        self.groups: list[int] = []
 
 
 def _read_points(data: bytes, start: int, end: int, stride: int) -> list[float]:
@@ -506,10 +511,11 @@ def _read_faces(data: bytes, start: int, end: int, vertices: int
     get one wrong and the next face is read out of the middle of this one.
     """
     if end - start < 4:
-        return [], []
+        return [], [], []
     count = struct.unpack_from("<I", data, start)[0]
     faces: list[list[int]] = []
     materials: list[int] = []
+    groups: list[int] = []
     at = start + 4
     for _ in range(count):
         if at + 4 > end:
@@ -525,10 +531,18 @@ def _read_faces(data: bytes, start: int, end: int, vertices: int
         flags = struct.unpack_from("<H", data, at)[0]
         at += 2
         material = 0
+        smoothing = 0
         if flags & 0x01:
             if at + 4 > end:
                 break
-            material = struct.unpack_from("<I", data, at)[0] & 0xFFFF
+            # One word, two things: the material id in the low half and the
+            # smoothing groups in the high.  The groups say which faces share
+            # a smooth normal and, by their absence, where an edge is hard —
+            # without them a mesh with no normals of its own can only be shaded
+            # flat, and every crease on a car body rounds away.
+            word = struct.unpack_from("<I", data, at)[0]
+            material = word & 0xFFFF
+            smoothing = word >> 16
             at += 4
         if flags & 0x08:
             at += 2
@@ -538,7 +552,8 @@ def _read_faces(data: bytes, start: int, end: int, vertices: int
             at += 8 * (degree - 3)
         faces.append(corners)
         materials.append(material)
-    return faces, materials
+        groups.append(smoothing)
+    return faces, materials, groups
 
 
 def _read_map_faces(data: bytes, start: int, end: int) -> list[list[int]]:
@@ -603,9 +618,11 @@ def _read_mesh(data: bytes, start: int, end: int) -> _Mesh | None:
         elif idn == _EDGES and tail - body >= 4:
             mesh.edges = struct.unpack_from("<I", data, body)[0]
         elif idn == _FACES:
-            faces, materials = _read_faces(data, body, tail, len(mesh.positions) // 3)
+            faces, materials, groups = _read_faces(
+                data, body, tail, len(mesh.positions) // 3)
             mesh.faces = len(faces)
             mesh.materials = materials
+            mesh.groups = groups
             for corners in faces:
                 for at, corner in enumerate(corners):
                     mesh.polygons.append(corner if at < len(corners) - 1 else ~corner)
@@ -620,6 +637,8 @@ def _read_mesh(data: bytes, start: int, end: int) -> _Mesh | None:
             triangles = _read_triangles(data, body, tail, len(mesh.positions) // 3)
             mesh.faces = len(triangles)
             mesh.materials = [0] * len(triangles)
+            # An Editable Mesh keeps its smoothing groups elsewhere; none read.
+            mesh.groups = [0] * len(triangles)
             for corners in triangles:
                 mesh.polygons.extend((corners[0], corners[1], ~corners[2]))
         elif idn == _TRI_MAP_VERTS:
@@ -1229,6 +1248,16 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                 _node("MappingInformationType", [_s("AllSame")]),
                 _node("ReferenceInformationType", [_s("IndexToDirect")]),
                 _node("Materials", [_array("i", [0], load_arrays)]),
+            ]))
+        # Which faces share a smooth normal, and so where an edge is hard.  A
+        # .max stores no normals — only the cage — so without this the mesh can
+        # only be shaded flat, and every crease on a car body rounds away.
+        if any(mesh.groups):
+            geometry_children.append(_node("LayerElementSmoothing", [_i(0)], [
+                _node("Version", [_i(102)]),
+                _node("MappingInformationType", [_s("ByPolygon")]),
+                _node("ReferenceInformationType", [_s("Direct")]),
+                _node("Smoothing", [_array("i", mesh.groups, load_arrays)]),
             ]))
         geometry_children.append(_node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
 

@@ -376,3 +376,31 @@ def test_a_scene_modelled_smooth_says_how_smooth():
     once = parse_max(fb.build_max(smooth=1))
     assert once.extra["smoothing"] == 1
     assert parse_max(fb.build_max()).extra["smoothed"] == 0
+
+# --------------------------------------------------------- smoothing groups
+
+
+def test_the_smoothing_groups_come_across():
+    """One word holds the material id and the smoothing groups, and masking
+    the groups off is how a mesh with no normals of its own ends up shaded
+    flat — every crease on a car body rounded away."""
+    data = fb.build_max(groups=[1, 2, 4, 8, 16, 32])
+    doc = parse_max(data)
+    geometry = doc.root.path("Objects", "Geometry")
+    layer = geometry.get("LayerElementSmoothing")
+    assert layer is not None, "no smoothing layer"
+    assert layer.get("MappingInformationType").props[0].value == "ByPolygon"
+    assert layer.get("Smoothing").props[0].value == [1, 2, 4, 8, 16, 32]
+
+
+def test_the_material_id_survives_beside_them():
+    """The two share a word, so reading one must not disturb the other."""
+    doc = parse_max(fb.build_max(groups=[7, 7, 7, 7, 7, 7]))
+    geometry = doc.root.path("Objects", "Geometry")
+    assert geometry.get("LayerElementSmoothing").get("Smoothing").props[0].value         == [7] * 6
+
+
+def test_a_scene_with_no_groups_says_nothing_about_them():
+    """A file that names none gets no layer, rather than one full of zeros."""
+    doc = parse_max(fb.build_max())
+    assert doc.root.path("Objects", "Geometry").get("LayerElementSmoothing") is None

@@ -494,7 +494,7 @@ def test_subdivision_through_the_module(built):
 
 @needs_clang
 @needs_node
-def test_a_dropped_folder_brings_its_textures(built):
+def test_a_dropped_folder_brings_its_textures(built, tmp_path):
     """A model downloaded as a folder keeps its images in a subfolder, and the
     document names them by relative path.  Dropping the folder has to reach
     them: without them every material falls back to what it states alone, and
@@ -506,11 +506,19 @@ def test_a_dropped_folder_brings_its_textures(built):
     except OSError:  # pragma: no cover
         pytest.skip("node is unavailable")
 
+    import fbxbuild as fb
+
+    # The same scene saved twice: one file kept the mesh, the other the maps.
+    rich = tmp_path / "rich.fbx"
+    rich.write_bytes(fb.build_bare_twin())
+    mapped = tmp_path / "mapped.fbx"
+    mapped.write_bytes(fb.build_scrap_twin())
     result = _run(
         ["node", str(WEB / "test" / "drop.js"),
          str(ROOT / "samples" / "pyramid.obj"),
          str(ROOT / "samples" / "pyramid.mtl"),
-         str(ROOT / "samples" / "checker.png")],
+         str(ROOT / "samples" / "checker.png"),
+         str(rich), str(mapped)],
         env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
@@ -519,7 +527,7 @@ def test_a_dropped_folder_brings_its_textures(built):
 
 @needs_clang
 @needs_node
-def test_smoothing_control(built):
+def test_smoothing_control(built, tmp_path):
     """Picking a level rebuilds what is on screen, and rounds it."""
     try:
         probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
@@ -528,10 +536,17 @@ def test_smoothing_control(built):
     except OSError:  # pragma: no cover
         pytest.skip("node is unavailable")
 
+    import fbxbuild as fb
+
+    # Each side of this cube in a smoothing group of its own, so every edge
+    # between them is hard — which a .max can only say this way, storing no
+    # normals of its own.
+    hard = tmp_path / "hard.max"
+    hard.write_bytes(fb.build_max(groups=[1, 2, 4, 8, 16, 32]))
     result = _run(
         ["node", str(WEB / "test" / "smoothing.js"),
          str(ROOT / "samples" / "cube_binary.fbx"),
-         str(ROOT / "samples" / "scene_parts.fbx")],
+         str(ROOT / "samples" / "scene_parts.fbx"), str(hard)],
         env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
@@ -715,6 +730,13 @@ def test_page_renders_in_a_browser(built):
     vendor = Path(tempfile.mkdtemp()) / "vendor.fbx"
     vendor.write_bytes(fb.build_vendor_textured())
     samples.append(f"{vendor}+{ROOT / 'samples' / 'checker.png'}")
+
+    # The same, spelled the way V-Ray and Corona spell it — which is most of
+    # what leaves 3ds Max, and which used to bind no texture at all.
+    underscored = Path(tempfile.mkdtemp()) / "vendor_underscored.fbx"
+    underscored.write_bytes(fb.build_vendor_textured(
+        property_name=fb.VENDOR_PROPERTY_UNDERSCORED))
+    samples.append(f"{underscored}+{ROOT / 'samples' / 'checker.png'}")
 
     # A file in the 6.x layout: named objects, mesh on the model, scalar runs.
     legacy = Path(tempfile.mkdtemp()) / "legacy.fbx"

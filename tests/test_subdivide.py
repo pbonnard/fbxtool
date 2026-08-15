@@ -19,9 +19,10 @@ PARAMS = ["pos_off", "pos_count", "idx_off", "idx_count",
           "nrm_mapping", "nrm_reference",
           "uv_off", "uv_count", "uv_index_off", "uv_index_count",
           "uv_mapping", "uv_reference",
-          "mat_off", "mat_count", "levels"]
+          "mat_off", "mat_count", "smooth_off", "smooth_count", "levels"]
 OUT = ["pos_off", "pos_count", "idx_off", "idx_count", "nrm_off", "nrm_count",
-       "uv_off", "uv_count", "mat_off", "mat_count", "polygon_count", "levels_done"]
+       "uv_off", "uv_count", "mat_off", "mat_count", "smooth_off", "smooth_count",
+       "polygon_count", "levels_done"]
 
 MAP_BY_POLYGON_VERTEX = 1
 
@@ -51,7 +52,7 @@ class Heap:
         return struct.unpack(f"<{count}{fmt}", buffer.raw)
 
     def subdivide(self, positions, indices, *, levels=1, materials=(0,),
-                  normals=None, uvs=None) -> dict:
+                  normals=None, uvs=None, smoothing=None) -> dict:
         values = dict.fromkeys(PARAMS, 0)
         values["pos_off"] = self.put("d", positions)
         values["pos_count"] = len(positions)
@@ -67,6 +68,9 @@ class Heap:
             values["uv_off"] = self.put("d", uvs)
             values["uv_count"] = len(uvs)
             values["uv_mapping"] = MAP_BY_POLYGON_VERTEX
+        if smoothing is not None:
+            values["smooth_off"] = self.put("i", smoothing)
+            values["smooth_count"] = len(smoothing)
         values["levels"] = levels
 
         block = self.put("I", [values[name] for name in PARAMS])
@@ -80,6 +84,8 @@ class Heap:
             out["normals"] = self.get("d", out["nrm_off"], out["nrm_count"])
         if out["uv_count"]:
             out["uvs"] = self.get("d", out["uv_off"], out["uv_count"])
+        if out["smooth_count"]:
+            out["smoothing"] = self.get("I", out["smooth_off"], out["smooth_count"])
         return out
 
 
@@ -270,3 +276,30 @@ def test_an_empty_mesh_is_refused_quietly(heap):
     out = heap.subdivide([], [], levels=1)
     assert out["pos_count"] == 0
     assert out["polygon_count"] == 0
+
+
+def test_smoothing_groups_follow_their_polygon(heap):
+    """Each quad a face becomes is still part of that face, so it keeps the
+    groups that say which of its edges are hard.  Losing them between rounds
+    would leave a subdivided cage with nothing to shade by but its facets."""
+    # A quad and a triangle, in groups 1 and 4.
+    positions = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 0]
+    indices = [0, 1, 2, ~3, 1, 4, ~2]
+    out = heap.subdivide(positions, indices, levels=1, materials=[0, 0],
+                         smoothing=[1, 4])
+    assert out["smooth_count"] == out["polygon_count"]
+    # Four quads out of the quad, three out of the triangle.
+    assert list(out["smoothing"]) == [1, 1, 1, 1, 4, 4, 4]
+
+
+def test_a_second_round_keeps_them(heap):
+    positions = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]
+    out = heap.subdivide(positions, [0, 1, 2, ~3], levels=2, smoothing=[9])
+    assert set(out["smoothing"]) == {9}
+    assert out["smooth_count"] == out["polygon_count"] == 16
+
+
+def test_a_cage_with_no_groups_gets_none(heap):
+    positions = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]
+    out = heap.subdivide(positions, [0, 1, 2, ~3], levels=1)
+    assert out["smooth_count"] == 0

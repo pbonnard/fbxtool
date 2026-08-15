@@ -265,6 +265,7 @@ const FbxWasm = (function () {
     'uvOff', 'uvCount', 'uvIndexOff', 'uvIndexCount', 'uvMapping', 'uvReference',
     'matOff', 'matCount',
     'xformOff', 'normalXformOff', 'flipWinding', 'materialBase',
+    'smoothOff', 'smoothCount',
   ];
 
   /** Field order of the SubdivParams block in fbx.c. */
@@ -272,7 +273,7 @@ const FbxWasm = (function () {
     'posOff', 'posCount', 'idxOff', 'idxCount',
     'nrmOff', 'nrmCount', 'nrmIndexOff', 'nrmIndexCount', 'nrmMapping', 'nrmReference',
     'uvOff', 'uvCount', 'uvIndexOff', 'uvIndexCount', 'uvMapping', 'uvReference',
-    'matOff', 'matCount', 'levels',
+    'matOff', 'matCount', 'smoothOff', 'smoothCount', 'levels',
   ];
 
   const slot = (pair) => (pair ? pair.offset : 0);
@@ -297,6 +298,7 @@ const FbxWasm = (function () {
       uvMapping: MAPPING[spec.uvMapping] || 0,
       uvReference: REFERENCE[spec.uvReference] || 0,
       matOff: slot(spec.materials), matCount: size(spec.materials),
+      smoothOff: slot(spec.smoothing), smoothCount: size(spec.smoothing),
       levels: Math.max(0, Math.min(4, levels | 0)),
     };
     const block = exports_.fbx_alloc(SUBDIV_FIELDS.length * 4);
@@ -321,8 +323,11 @@ const FbxWasm = (function () {
       uvMapping: 'byPolygonVertex',
       uvReference: 'direct',
       materials: pair(at(8), at(9)),
-      polygonCount: at(10),
-      levels: at(11),
+      // Smoothing groups follow the polygons through, so the mesh builder can
+      // still tell a hard edge from a soft one after any number of rounds.
+      smoothing: pair(at(10), at(11)),
+      polygonCount: at(12),
+      levels: at(13),
     };
   }
 
@@ -349,6 +354,7 @@ const FbxWasm = (function () {
       normalXformOff: spec.normalTransform ? uploadFloat64(spec.normalTransform).offset : 0,
       flipWinding: spec.flipWinding ? 1 : 0,
       materialBase: spec.materialBase || 0,
+      smoothOff: slot(spec.smoothing), smoothCount: size(spec.smoothing),
     };
     const block = exports_.fbx_alloc(PARAM_FIELDS.length * 4);
     const params = new Uint32Array(exports_.memory.buffer, block, PARAM_FIELDS.length);

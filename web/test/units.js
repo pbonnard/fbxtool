@@ -252,6 +252,20 @@ check('so are the rest of the slots glTF keeps',
   && FbxAnalyze.textureSlot('MetallicRoughness') === 'metallicRoughness');
 check('a glossiness map is still nothing this tool can place',
   FbxAnalyze.textureSlot('3dsMax|CoronaMtlPb|texmapReflectGlossiness') === null);
+/* V-Ray and Corona both write the underscored spelling, and between them that
+ * is most of what comes out of 3ds Max: a Toyota, a Mini and a Volkswagen in
+ * one library named every one of their maps `3dsMax|maps|texmap_diffuse` and
+ * not one of them bound. */
+check('the underscored spelling is the same slot',
+  FbxAnalyze.textureSlot('3dsMax|maps|texmap_diffuse') === 'baseColor'
+  && FbxAnalyze.textureSlot('3dsMax|maps|texmap_bump') === 'normal',
+  String(FbxAnalyze.textureSlot('3dsMax|maps|texmap_diffuse')));
+check('and reflection is still not one of them',
+  FbxAnalyze.textureSlot('3dsMax|maps|texmap_reflection') === null
+  && FbxAnalyze.textureSlot('3dsMax|maps|texmap_reflectionGlossiness') === null);
+check('a base colour under any of its spellings',
+  ['Maya|base_color', '3dsMax|main|base_color', 'Maya|baseColor', 'DiffuseColor']
+    .every((name) => FbxAnalyze.drivesBaseColour(name)));
 check('wrap modes come back as the numbers glTF writes',
   FbxAnalyze.wrapModes({ WrapModeU: 1, WrapModeV: 0 }).wrapS === 33071
   && FbxAnalyze.wrapModes({ WrapModeU: 1, WrapModeV: 0 }).wrapT === 10497);

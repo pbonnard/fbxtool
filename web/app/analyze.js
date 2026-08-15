@@ -275,7 +275,17 @@ const FbxAnalyze = (function () {
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
   ];
 
-  const plainName = (name) => String(name).split('|').pop().trim().toLowerCase();
+  /**
+   * A property name reduced to what it says.
+   *
+   * The vendor prefix goes, and so does every separator: renderers spell the
+   * same slot `texmapDiffuse`, `texmap_diffuse` and `base_color` depending on
+   * which of them wrote the file, and V-Ray and Corona both write the
+   * underscored form — `3dsMax|maps|texmap_diffuse` — so a match that wants
+   * the letters run together finds all of them.
+   */
+  const plainName = (name) => String(name).split('|').pop()
+    .trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 
   /** The glTF map a property drives, or null for one that drives none. */
   function textureSlot(prop) {

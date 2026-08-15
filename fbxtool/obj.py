@@ -148,6 +148,62 @@ class _Mesh:
     polygon_count: int = 0
     has_normals: bool = False
     has_uvs: bool = False
+    #: Where each face starts in the polygon run, and how many corners it has,
+    #: so a part can be cut out of the arrays every part shares.
+    face_start: list[int] = field(default_factory=list)
+    face_size: list[int] = field(default_factory=list)
+    #: One (name, [face]) per `o` / `g`, which are the file's own parts.
+    pieces: list[tuple[str, list[int]]] = field(default_factory=list)
+
+
+@dataclass
+class _Held:
+    """One part's share of the arrays every part shares."""
+
+    positions: list[float]
+    normals: list[float]
+    uvs: list[float]
+    polygons: list[int]
+    face_normals: list[int]
+    face_uvs: list[int]
+    face_materials: list[int]
+
+
+def _cut(mesh: _Mesh, faces: list[int]) -> _Held:
+    """Gather one part out of the pools the whole file indexes.
+
+    OBJ addresses one set of vertices, normals and texture coordinates from
+    anywhere in the file, so a part cannot take a slice: each pool is gathered
+    as it is referenced and renumbered from zero.
+    """
+    held = _Held([], [], [], [], [], [], [])
+    maps: list[dict[int, int]] = [{}, {}, {}]
+
+    def take(pool: int, index: int, source: list[float],
+             target: list[float], width: int) -> int:
+        at = maps[pool].get(index)
+        if at is None:
+            at = len(target) // width
+            maps[pool][index] = at
+            target.extend(source[index * width:(index + 1) * width])
+        return at
+
+    for face in faces:
+        start = mesh.face_start[face]
+        size = mesh.face_size[face]
+        for corner in range(size):
+            written = mesh.polygons[start + corner]
+            vertex = ~written if written < 0 else written
+            local = take(0, vertex, mesh.positions, held.positions, 3)
+            held.polygons.append(~local if corner == size - 1 else local)
+            normal = mesh.face_normals[start + corner]
+            held.face_normals.append(
+                take(1, normal, mesh.normals, held.normals, 3) if normal >= 0 else -1)
+            uv = mesh.face_uvs[start + corner]
+            held.face_uvs.append(
+                take(2, uv, mesh.uvs, held.uvs, 2) if uv >= 0 else -1)
+        held.face_materials.append(mesh.face_materials[face])
+    return held
 
 
 def _resolve(index: int, count: int) -> int:
@@ -186,6 +242,7 @@ def parse_obj(
     comments: list[str] = []
     smoothing_groups = 0
     line_statements = 0
+    piece_name = ""
 
     for number, raw in enumerate(text.splitlines(), 1):
         stripped = raw.strip()
@@ -223,6 +280,16 @@ def parse_obj(
                 doc.warn(f"line {number}: face with fewer than three corners; skipped")
                 continue
 
+            # A face before any `o` or `g` goes into a part of no name, which
+            # is what a file with no parts is.
+            # Compared on the name as written: resolving it first made a
+            # file that names no parts at all start a new one at every face.
+            if not mesh.pieces or mesh.pieces[-1][0] != piece_name:
+                mesh.pieces.append((piece_name, []))
+            mesh.pieces[-1][1].append(len(mesh.face_materials))
+            mesh.face_start.append(len(mesh.polygons))
+            mesh.face_size.append(len(corners))
+
             vertex_total = len(mesh.positions) // 3
             uv_total = len(mesh.uvs) // 2
             normal_total = len(mesh.normals) // 3
@@ -247,8 +314,12 @@ def parse_obj(
             libraries.extend(rest)
         elif key == "o":
             objects.append(" ".join(rest))
+            piece_name = " ".join(rest)
         elif key == "g":
             groups.append(" ".join(rest))
+            # `o Body` followed by `g Body` names one part twice, which is
+            # what 3ds Max writes; only a change of name starts another.
+            piece_name = " ".join(rest)
         elif key == "s":
             smoothing_groups += 1
         elif key in ("l", "p"):
@@ -383,55 +454,79 @@ def _build_records(doc: Document, mesh: _Mesh, palette: list[_PaletteEntry],
         _node("Creator", [_s(creator)]),
     ]))
 
-    geometry_uid, model_uid = 1, 2
     material_base, texture_base, video_base = 100, 200, 300
 
-    geometry_children = [
-        _node("Vertices", [_array("d", mesh.positions, load_arrays)]),
-        _node("PolygonVertexIndex", [_array("i", mesh.polygons, load_arrays)]),
-        _node("GeometryVersion", [_i(124)]),
-    ]
-
-    # OBJ indexes normals and UVs per polygon vertex, which is exactly the
-    # IndexToDirect layout the rest of the pipeline already understands.
-    if mesh.has_normals and any(i >= 0 for i in mesh.face_normals):
-        geometry_children.append(_node("LayerElementNormal", [_i(0)], [
+    def geometry_children(held: _Held) -> list[Node]:
+        """The Geometry record for one part's arrays."""
+        children = [
+            _node("Vertices", [_array("d", held.positions, load_arrays)]),
+            _node("PolygonVertexIndex", [_array("i", held.polygons, load_arrays)]),
+            _node("GeometryVersion", [_i(124)]),
+        ]
+        # OBJ indexes normals and UVs per polygon vertex, which is exactly the
+        # IndexToDirect layout the rest of the pipeline already understands.
+        if held.normals and any(i >= 0 for i in held.face_normals):
+            children.append(_node("LayerElementNormal", [_i(0)], [
+                _node("Version", [_i(101)]),
+                _node("Name", [_s("")]),
+                _node("MappingInformationType", [_s("ByPolygonVertex")]),
+                _node("ReferenceInformationType", [_s("IndexToDirect")]),
+                _node("Normals", [_array("d", held.normals, load_arrays)]),
+                _node("NormalsIndex", [_array("i", held.face_normals, load_arrays)]),
+            ]))
+        if held.uvs and any(i >= 0 for i in held.face_uvs):
+            children.append(_node("LayerElementUV", [_i(0)], [
+                _node("Version", [_i(101)]),
+                _node("Name", [_s("map1")]),
+                _node("MappingInformationType", [_s("ByPolygonVertex")]),
+                _node("ReferenceInformationType", [_s("IndexToDirect")]),
+                _node("UV", [_array("d", held.uvs, load_arrays)]),
+                _node("UVIndex", [_array("i", held.face_uvs, load_arrays)]),
+            ]))
+        children.append(_node("LayerElementMaterial", [_i(0)], [
             _node("Version", [_i(101)]),
-            _node("Name", [_s("")]),
-            _node("MappingInformationType", [_s("ByPolygonVertex")]),
+            _node("MappingInformationType", [_s("ByPolygon")]),
             _node("ReferenceInformationType", [_s("IndexToDirect")]),
-            _node("Normals", [_array("d", mesh.normals, load_arrays)]),
-            _node("NormalsIndex", [_array("i", mesh.face_normals, load_arrays)]),
+            _node("Materials", [_array("i", held.face_materials, load_arrays)]),
         ]))
-    if mesh.has_uvs and any(i >= 0 for i in mesh.face_uvs):
-        geometry_children.append(_node("LayerElementUV", [_i(0)], [
-            _node("Version", [_i(101)]),
-            _node("Name", [_s("map1")]),
-            _node("MappingInformationType", [_s("ByPolygonVertex")]),
-            _node("ReferenceInformationType", [_s("IndexToDirect")]),
-            _node("UV", [_array("d", mesh.uvs, load_arrays)]),
-            _node("UVIndex", [_array("i", mesh.face_uvs, load_arrays)]),
-        ]))
-    geometry_children.append(_node("LayerElementMaterial", [_i(0)], [
-        _node("Version", [_i(101)]),
-        _node("MappingInformationType", [_s("ByPolygon")]),
-        _node("ReferenceInformationType", [_s("IndexToDirect")]),
-        _node("Materials", [_array("i", mesh.face_materials, load_arrays)]),
-    ]))
-    geometry_children.append(_node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
+        children.append(_node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
+        return children
 
-    objects_node = _node("Objects", [], [
-        _node("Geometry", [_l(geometry_uid), _s(f"{name}\x00\x01Geometry"), _s("Mesh")],
-              geometry_children),
-        _node("Model", [_l(model_uid), _s(f"{name}\x00\x01Model"), _s("Mesh")], [
-            _node("Version", [_i(232)]),
-        ]),
-    ])
-
-    connections = [
-        _node("C", [_s("OO"), _l(model_uid), _l(0)]),
-        _node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]),
-    ]
+    # A file's `o` and `g` lines are its parts, and they are kept apart: a car
+    # written as 164 groups is 164 parts, which is what lets it be exploded,
+    # picked at, edited part by part, and matched against the same scene saved
+    # in another format.  A file naming none is one part, as it always was.
+    objects_node = _node("Objects", [], [])
+    connections: list[Node] = []
+    models: list[int] = []
+    if len(mesh.pieces) > 1:
+        for index, (piece_name, faces) in enumerate(mesh.pieces):
+            geometry_uid, model_uid = 1000 + index * 2, 1001 + index * 2
+            objects_node.children.append(_node(
+                "Geometry",
+                [_l(geometry_uid),
+                 _s(f"{piece_name or name}\x00\x01Geometry"), _s("Mesh")],
+                geometry_children(_cut(mesh, faces))))
+            objects_node.children.append(_node(
+                "Model",
+                [_l(model_uid), _s(f"{piece_name or name}\x00\x01Model"), _s("Mesh")],
+                [_node("Version", [_i(232)])]))
+            connections.append(_node("C", [_s("OO"), _l(model_uid), _l(0)]))
+            connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
+            models.append(model_uid)
+    else:
+        geometry_uid, model_uid = 1, 2
+        objects_node.children.append(_node(
+            "Geometry", [_l(geometry_uid), _s(f"{name}\x00\x01Geometry"), _s("Mesh")],
+            geometry_children(_Held(
+                mesh.positions, mesh.normals, mesh.uvs, mesh.polygons,
+                mesh.face_normals, mesh.face_uvs, mesh.face_materials))))
+        objects_node.children.append(_node(
+            "Model", [_l(model_uid), _s(f"{name}\x00\x01Model"), _s("Mesh")],
+            [_node("Version", [_i(232)])]))
+        connections.append(_node("C", [_s("OO"), _l(model_uid), _l(0)]))
+        connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
+        models.append(model_uid)
 
     for index, entry in enumerate(palette):
         material = entry.material
@@ -453,7 +548,12 @@ def _build_records(doc: Document, mesh: _Mesh, palette: list[_PaletteEntry],
                 _node("Properties70", [], props),
             ])
         )
-        connections.append(_node("C", [_s("OO"), _l(uid), _l(model_uid)]))
+        # Every part is connected to the whole palette, in palette order: a
+        # per-polygon material index refers to the materials on that part's own
+        # model, counted in the order they connect, so the numbering only holds
+        # if each model sees the same list.
+        for model in models:
+            connections.append(_node("C", [_s("OO"), _l(uid), _l(model)]))
 
         if material.diffuse_map:
             texture_uid = texture_base + index
@@ -482,8 +582,8 @@ def _build_records(doc: Document, mesh: _Mesh, palette: list[_PaletteEntry],
     definitions = _node("Definitions", [], [
         _node("Version", [_i(100)]),
         _node("Count", [_i(len(objects_node.children))]),
-        _node("ObjectType", [_s("Geometry")], [_node("Count", [_i(1)])]),
-        _node("ObjectType", [_s("Model")], [_node("Count", [_i(1)])]),
+        _node("ObjectType", [_s("Geometry")], [_node("Count", [_i(len(models))])]),
+        _node("ObjectType", [_s("Model")], [_node("Count", [_i(len(models))])]),
         _node("ObjectType", [_s("Material")], [_node("Count", [_i(len(palette))])]),
     ])
 

@@ -109,6 +109,17 @@ arrays, `f` becomes the polygon index run, `usemtl` becomes a per-polygon
 material layer, and `map_Kd` becomes a texture reference. Face indices may be
 given in any of the five OBJ syntaxes, including negative (relative) ones.
 
+`o` and `g` are the file's own parts, and are kept apart: a car written as 164
+groups reads as 164 parts rather than one mesh, which is what lets it be
+exploded, picked at, edited part by part, and matched against the same scene
+saved in another format. OBJ addresses one pool of vertices, normals and
+texture coordinates from anywhere in the file, so a part is not a slice — each
+pool is gathered as it is referenced and renumbered from zero, and every part
+is connected to the whole material palette in palette order, since a
+per-polygon material index counts the materials on that part's own model. A
+file naming no parts at all is one part, as it always was; only a change of
+name starts another, so `o Body` followed by `g Body` is one.
+
 ### glTF 2.0
 
 `fbxinfo model.glb` — or `model.gltf`, whose `.bin` is read from beside it —
@@ -307,9 +318,23 @@ a name and the path it had on the machine that made it — `F:\rcartton\Smart 1
 Brabus\specular.jpg`. The reader ties the two together and names the file, so
 the image loads the way an `.obj`'s does: drop it in beside the model.
 
+A `.max` stores no normals — only the cage — so what it is shaded by comes from
+its **smoothing groups**: a bitmask per face saying which groups that face is
+in. Two faces meeting along an edge share a normal where they share a group and
+keep their own where they do not, which is how a car body has both a smooth
+flank and a crisp shut line. They live in the same word as the material id, the
+groups in its high half and the id in its low, and reading only the id is how a
+subdivided cage comes out shaded flat: the shape is right and every crease has
+gone soft. Measured against the same scene's `.obj` — 3ds Max's own bake of the
+same modifier, with the normals it wrote — reading them recovers 84% of the
+detail that masking them away had cost.
+
 **What is not decoded**: the modifier stack is not run, so a scene modelled
 with TurboSmooth gives its cage — which is what the viewer's own smoothing is
-for. Primitives nobody collapsed (a Box, a Line) and classes from plugins are
+for. Edge creases are not read, so subdivision rounds what 3ds Max would have
+held sharp; the iteration count is taken as the highest any part asks for and
+applied to all of them, which over-smooths the few that ask for less or none.
+Primitives nobody collapsed (a Box, a Line) and classes from plugins are
 counted and named in the report but have no vertices here.
 
 Read on twelve car scenes from as many sources — 2016 to 2018 releases, 30 MB
@@ -394,6 +419,41 @@ a subfolder — the page is handed the files chosen and nothing else — so open
 is picked; a directory picker hands over everything under the folder at once.
 A folder that turns out to be a library rather than a model is read as far as
 512 files, models and their images first, and says how many it left.
+
+A folder often holds the same scene saved several ways, and the ways disagree
+about what survived. Every model in a drop is read before any of them is
+opened, and the one with the most to draw is the one that opens — which is a
+fact rather than a judgement, and worth deciding rather than taking whichever
+file came first. A cage with a subdividing modifier counts for what it becomes:
+a 217,930-vertex `.max` beats the 1,912,893-vertex `.obj` baked out of it,
+because the tool subdivides further than the export did — 6.4 million triangles
+against 1.9.
+
+Not by a hair, though. Two savings of one scene differ by a rounding when they
+differ at all, and a mesh chosen on that margin can arrive with nothing on it:
+another Smart's `.obj` has two per cent more vertices than its `.max` and two
+`wire_` placeholders where the `.max` has 25 materials and two textures.
+Anything within a tenth counts as the same mesh, and then what each file
+carries besides is what separates them.
+
+Where that file has no maps at all, materials are taken from whichever of the
+others does, matched part by part. The parts answer to the same names —
+`desirefx.me_002` in the `.max` is `desirefx_me_002` in the `.obj`, the exporter
+having replaced what a name cannot hold — so matching with the punctuation taken
+out lines up 164 of 164 on that car, and 93 of 94, 118 of 125 and 220 of 220 on
+three others. Material names are no use for this: a `.max` gives them names of
+its own making where the `.fbx` beside it has `Aluminium Brushed`.
+
+It is deliberately only done where the opened file has nothing. Which file has
+the *better* materials is not a fact and counting does not find it: a Ferrari's
+`.fbx` has 58 materials under real names against the `.max`'s 47 under invented
+ones, and more texture records besides — and taking them turns a white car grey,
+because they are V-Ray materials whose Phong approximation is empty.
+`Carpaint Blue` reads as 0.16 grey and `Aluminium Clean` as black. What comes
+from where is said out loud, and Ctrl+Z puts the file's own materials back.
+
+A scene of one part is not dressed from a donor of many, since the whole model
+would come out in whatever that single name happens to wear.
 
 Where the images sit inside the folder does not matter. `textures/` is what
 Sketchfab writes, `maps/` is what plenty of others write, and a model saved out
@@ -650,9 +710,15 @@ that it never arrived.
 
 Two things make that less simple than it sounds. Exporters name the property
 after their own renderer — `3dsMax|CoronaMtlPb|texmapDiffuse`, `Maya|baseColor`
-— so the vendor prefix is dropped before matching, and only the base colour is
-followed: bump, normal and glossiness maps are recognised as not being it, and
-left alone. And the image is often several links down, with colour corrections
+— so the vendor prefix and every separator are dropped before matching, since
+the same slot is `texmapDiffuse` to one renderer and `texmap_diffuse` to the
+next. V-Ray and Corona both write the underscored form, which is most of what
+leaves 3ds Max: a Toyota, a Mini and a Volkswagen in one library named every
+map `3dsMax|maps|texmap_diffuse`, and not one of them bound until the
+separators went. Each slot is told from the others by the same means — a bump
+or normal map is recognised as one and kept for the export, and a glossiness
+map as nothing either the viewer or glTF has a place for, and left alone. And
+the image is often several links down, with colour corrections
 or mixes in between, so the chain is walked to the first record that names a
 file or carries the bytes. A chain that ends at no image at all is a procedural
 map, and nothing is drawn for it.

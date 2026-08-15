@@ -176,6 +176,35 @@ async function main() {
   check('and they are still assembled as a scene', /3 parts/.test(smoothed.info),
     smoothed.info.slice(0, 70));
 
+  /* A .max stores no normals — only the cage — so what it is shaded by comes
+   * from its smoothing groups. Each side of this cube is in a group of its
+   * own, which makes every edge between them hard: a corner's normal must be
+   * its own face's, not an average of the three sides meeting there. */
+  const hardFile = process.argv[4];
+  if (hardFile && fs.existsSync(hardFile)) {
+    console.log('\nsmoothing groups say which edges are hard');
+    await load(hardFile);
+    // The cage itself: what the groups say is only visible before subdividing
+    // rounds the corners it is meant to keep.
+    const cube = await setLevel(page, 0);
+    check('the cube is there', cube.triangles === 12, `${cube.triangles} triangles`);
+    const normals = await page.evaluate(() => {
+      const mesh = window.fbxtool.exportMesh();
+      return Array.from(mesh.normals);
+    });
+    // Six sides, so six distinct normals and no others: an averaged corner
+    // would be a seventh direction pointing out of it.
+    const seen = new Set();
+    for (let i = 0; i < normals.length; i += 3) {
+      seen.add([0, 1, 2].map((k) => normals[i + k].toFixed(2)).join(','));
+    }
+    check('a face keeps its own normal at every corner', seen.size === 6,
+      `${seen.size} distinct normals: ${[...seen].slice(0, 8).join(' ')}`);
+    check('and each one points down an axis',
+      [...seen].every((n) => n.split(',').filter((v) => Math.abs(Number(v)) > 0.99).length === 1),
+      [...seen].join(' '));
+  }
+
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 
   await browser.close();

@@ -775,6 +775,7 @@ typedef struct {
     u32 normal_xform_off;           /* 9 f64; 0 for identity */
     u32 flip_winding;               /* set when the transform mirrors */
     u32 material_base;              /* added to each index, for a shared palette */
+    u32 smooth_off, smooth_count;   /* i32 smoothing groups, one per polygon */
 } MeshParams;
 
 typedef struct {
@@ -837,7 +838,9 @@ static u32 attribute_slot(u32 mapping, u32 reference, const i32 *index,
  *
  * which is the shape the modelling package would have rendered. Per-corner
  * data — normals and UVs — is subdivided linearly instead, so seams and hard
- * edges stay exactly where the file put them.
+ * edges stay exactly where the file put them. Smoothing groups follow their
+ * polygon: every quad a face becomes is still part of that face, so a mesh
+ * that arrived with no normals can still be shaded by them afterwards.
  */
 
 typedef struct {
@@ -850,6 +853,7 @@ typedef struct {
     u32 uv_index_off, uv_index_count;
     u32 uv_mapping, uv_reference;
     u32 mat_off, mat_count;         /* i32, one per polygon or one overall */
+    u32 smooth_off, smooth_count;   /* i32 smoothing groups, one per polygon */
     u32 levels;
 } SubdivParams;
 
@@ -859,6 +863,7 @@ typedef struct {
     u32 nrm_off, nrm_count;         /* f64 triples, one per corner */
     u32 uv_off, uv_count;           /* f64 pairs, one per corner */
     u32 mat_off, mat_count;         /* i32, one per polygon */
+    u32 smooth_off, smooth_count;   /* u32 smoothing groups, one per polygon */
     u32 polygon_count;
     u32 levels_done;
 } SubdivOut;
@@ -898,6 +903,7 @@ typedef struct {
     f64 *normals;                   /* per corner, or NULL */
     f64 *uvs;                       /* per corner, or NULL */
     i32 *materials;                 /* per polygon */
+    u32 *groups;                    /* smoothing groups per polygon, or NULL */
     u32 polygon_count;
 } Cage;
 
@@ -1051,9 +1057,11 @@ static int subdivide_once(const Cage *in, Cage *out) {
     f64 *positions = (f64 *)heap_alloc(out_vertices * 3 * sizeof(f64));
     i32 *indices = (i32 *)heap_alloc(out_corners * sizeof(i32));
     i32 *materials = (i32 *)heap_alloc(out_polygons * sizeof(i32));
+    u32 *groups = in->groups ? (u32 *)heap_alloc(out_polygons * sizeof(u32)) : NULL;
     f64 *normals = in->normals ? (f64 *)heap_alloc(out_corners * 3 * sizeof(f64)) : NULL;
     f64 *uvs = in->uvs ? (f64 *)heap_alloc(out_corners * 2 * sizeof(f64)) : NULL;
     if (!positions || !indices || !materials) return 0;
+    if (in->groups && !groups) return 0;
     if ((in->normals && !normals) || (in->uvs && !uvs)) return 0;
 
     for (u32 i = 0; i < nv * 3; i++) positions[i] = vertex_out[i];
@@ -1116,6 +1124,7 @@ static int subdivide_once(const Cage *in, Cage *out) {
                     uvs[(write + 3) * 2 + k] = (d[k] + a[k]) * 0.5;
                 }
             }
+            if (groups) groups[quad] = in->groups[f];
             materials[quad++] = material;
             write += 4;
         }
@@ -1128,6 +1137,7 @@ static int subdivide_once(const Cage *in, Cage *out) {
     out->normals = normals;
     out->uvs = uvs;
     out->materials = materials;
+    out->groups = groups;
     out->polygon_count = out_polygons;
     return 1;
 }
@@ -1147,6 +1157,7 @@ FBX_EXPORT("fbx_subdivide") u32 fbx_subdivide(u32 params_off) {
     cage.normals = NULL;
     cage.uvs = NULL;
     cage.materials = NULL;
+    cage.groups = NULL;
 
     u32 polygons = 0, run = 0;
     for (u32 i = 0; i < cage.corner_count; i++) {
@@ -1177,6 +1188,16 @@ FBX_EXPORT("fbx_subdivide") u32 fbx_subdivide(u32 params_off) {
     }
     cage.materials = (i32 *)heap_alloc(polygons * sizeof(i32));
     if (!cage.materials) return 0;
+    /* Smoothing groups follow the polygons through every round, since each
+     * quad a face becomes is still part of that face. */
+    const i32 *src_groups = p->smooth_off ? (const i32 *)at_off(p->smooth_off) : NULL;
+    if (src_groups && p->smooth_count) {
+        cage.groups = (u32 *)heap_alloc(polygons * sizeof(u32));
+        if (!cage.groups) return 0;
+        for (u32 i = 0; i < polygons; i++) {
+            cage.groups[i] = (u32)src_groups[i < p->smooth_count ? i : p->smooth_count - 1];
+        }
+    }
 
     u32 poly = 0;
     for (u32 c = 0; c < cage.corner_count; c++) {
@@ -1227,8 +1248,113 @@ FBX_EXPORT("fbx_subdivide") u32 fbx_subdivide(u32 params_off) {
     out->uv_count = cage.uvs ? cage.corner_count * 2 : 0;
     out->mat_off = to_off(cage.materials);
     out->mat_count = cage.polygon_count;
+    out->smooth_off = cage.groups ? to_off(cage.groups) : 0;
+    out->smooth_count = cage.groups ? cage.polygon_count : 0;
     out->polygon_count = cage.polygon_count;
     return to_off(out);
+}
+
+/* ------------------------------------------------------ smoothing groups
+ *
+ * A file that carries no normals of its own can only be shaded flat, and a
+ * dense mesh shaded flat is what a subdivided 3ds Max cage looks like: the
+ * shape is right and every crease has gone soft. 3ds Max says which edges are
+ * hard the way it always has, with a smoothing group per face — a bitmask of
+ * the groups that face belongs to. Two faces meeting along an edge share a
+ * normal when they share a group, and keep their own when they do not.
+ *
+ * Each corner accumulates the face normals of the faces around its vertex
+ * that share a group with the face the corner belongs to. The buckets hang off
+ * each vertex in a small pool rather than a table of vertices by groups: a
+ * vertex is in one or two groups in practice, and thirty-two would be
+ * eighty megabytes on a car.
+ */
+typedef struct {
+    u32 mask;                       /* the groups this bucket stands for */
+    u32 next;                       /* index of the next bucket, or NONE */
+    f64 sum[3];
+} SmoothBucket;
+
+#define SMOOTH_NONE 0xffffffffu
+
+/** Per-corner normals from face normals and smoothing groups; NULL if absent. */
+static f64 *smooth_normals(const f64 *positions, const i32 *indices, u32 idx_count,
+                           u32 vertex_count, const i32 *groups, u32 group_count) {
+    if (!groups || !group_count || !vertex_count) return NULL;
+
+    u32 *head = (u32 *)heap_alloc(vertex_count * sizeof(u32));
+    SmoothBucket *pool = (SmoothBucket *)heap_alloc(idx_count * sizeof(SmoothBucket));
+    f64 *out = (f64 *)heap_alloc(idx_count * 3 * sizeof(f64));
+    if (!head || !pool || !out) return NULL;
+    for (u32 i = 0; i < vertex_count; i++) head[i] = SMOOTH_NONE;
+    mem_zero(out, idx_count * 3 * sizeof(f64));
+    u32 used = 0;
+
+    /* Pass one: every face's own normal, into the buckets of its corners. */
+    u32 from = 0, face = 0;
+    for (u32 i = 0; i < idx_count; i++) {
+        if (indices[i] >= 0 && i + 1 < idx_count) continue;
+        u32 n = i - from + 1;
+        if (n >= 3) {
+            u32 mask = (u32)groups[face < group_count ? face : group_count - 1];
+            /* Newell's method: right for an n-gon, and for a face that is not
+               quite planar, which a subdivided quad need not be. */
+            f64 fn[3] = {0.0, 0.0, 0.0};
+            for (u32 c = 0; c < n; c++) {
+                i32 ra = indices[from + c], rb = indices[from + (c + 1) % n];
+                u32 va = (u32)(ra < 0 ? ~ra : ra), vb = (u32)(rb < 0 ? ~rb : rb);
+                const f64 *a = &positions[va * 3], *b = &positions[vb * 3];
+                fn[0] += (a[1] - b[1]) * (a[2] + b[2]);
+                fn[1] += (a[2] - b[2]) * (a[0] + b[0]);
+                fn[2] += (a[0] - b[0]) * (a[1] + b[1]);
+            }
+            for (u32 c = 0; c < n; c++) {
+                i32 raw = indices[from + c];
+                u32 v = (u32)(raw < 0 ? ~raw : raw);
+                if (v >= vertex_count) continue;
+                u32 at = head[v];
+                while (at != SMOOTH_NONE && pool[at].mask != mask) at = pool[at].next;
+                if (at == SMOOTH_NONE) {
+                    if (used >= idx_count) continue;
+                    at = used++;
+                    pool[at].mask = mask;
+                    pool[at].next = head[v];
+                    pool[at].sum[0] = pool[at].sum[1] = pool[at].sum[2] = 0.0;
+                    head[v] = at;
+                }
+                for (u32 k = 0; k < 3; k++) pool[at].sum[k] += fn[k];
+            }
+        }
+        from = i + 1;
+        face++;
+    }
+
+    /* Pass two: each corner takes the buckets it shares a group with. A face
+       in no group at all keeps its own normal, which is a hard edge all
+       round — that is what group zero means. */
+    from = 0; face = 0;
+    for (u32 i = 0; i < idx_count; i++) {
+        if (indices[i] >= 0 && i + 1 < idx_count) continue;
+        u32 n = i - from + 1;
+        if (n >= 3) {
+            u32 mask = (u32)groups[face < group_count ? face : group_count - 1];
+            for (u32 c = 0; c < n; c++) {
+                i32 raw = indices[from + c];
+                u32 v = (u32)(raw < 0 ? ~raw : raw);
+                if (v >= vertex_count) continue;
+                f64 acc[3] = {0.0, 0.0, 0.0};
+                for (u32 at = head[v]; at != SMOOTH_NONE; at = pool[at].next) {
+                    if (mask && !(pool[at].mask & mask)) continue;
+                    if (!mask && pool[at].mask != 0) continue;
+                    for (u32 k = 0; k < 3; k++) acc[k] += pool[at].sum[k];
+                }
+                for (u32 k = 0; k < 3; k++) out[(from + c) * 3 + k] = acc[k];
+            }
+        }
+        from = i + 1;
+        face++;
+    }
+    return out;
 }
 
 FBX_EXPORT("fbx_build_mesh") u32 fbx_build_mesh(u32 params_off) {
@@ -1237,6 +1363,7 @@ FBX_EXPORT("fbx_build_mesh") u32 fbx_build_mesh(u32 params_off) {
     const i32 *indices = (const i32 *)at_off(p->idx_off);
     const f64 *normals = p->nrm_off ? (const f64 *)at_off(p->nrm_off) : NULL;
     const i32 *normal_index = p->nrm_index_off ? (const i32 *)at_off(p->nrm_index_off) : NULL;
+    const i32 *groups = p->smooth_off ? (const i32 *)at_off(p->smooth_off) : NULL;
     const f64 *uvs = p->uv_off ? (const f64 *)at_off(p->uv_off) : NULL;
     const i32 *uv_index = p->uv_index_off ? (const i32 *)at_off(p->uv_index_off) : NULL;
     const i32 *materials = p->mat_off ? (const i32 *)at_off(p->mat_off) : NULL;
@@ -1268,6 +1395,22 @@ FBX_EXPORT("fbx_build_mesh") u32 fbx_build_mesh(u32 params_off) {
     g_mesh = out;
     out->polygon_count = polygons;
     if (!triangles) return to_off(out);
+
+    /* No normals in the file, but smoothing groups to say where the edges are:
+       work them out rather than shade every triangle by its own face. */
+    u32 nrm_mapping = p->nrm_mapping, nrm_reference = p->nrm_reference;
+    u32 nrm_count = p->nrm_count, nrm_index_count = p->nrm_index_count;
+    if (!normals && groups && p->smooth_count) {
+        normals = smooth_normals(positions, indices, idx_count, vertex_count,
+                                 groups, p->smooth_count);
+        if (normals) {
+            normal_index = NULL;
+            nrm_mapping = MAP_BY_POLYGON_VERTEX;
+            nrm_reference = REF_DIRECT;
+            nrm_count = idx_count * 3;
+            nrm_index_count = 0;
+        }
+    }
 
     f32 *pos_out = (f32 *)heap_alloc(triangles * 9 * sizeof(f32));
     f32 *nrm_out = (f32 *)heap_alloc(triangles * 9 * sizeof(f32));
@@ -1357,10 +1500,10 @@ FBX_EXPORT("fbx_build_mesh") u32 fbx_build_mesh(u32 params_off) {
 
                 f32 nv[3] = {face[0], face[1], face[2]};
                 if (normals) {
-                    u32 slot = attribute_slot(p->nrm_mapping, p->nrm_reference,
-                                              normal_index, p->nrm_index_count,
+                    u32 slot = attribute_slot(nrm_mapping, nrm_reference,
+                                              normal_index, nrm_index_count,
                                               corner[c], control[c]);
-                    if (slot != 0xffffffffu && slot * 3 + 2 < p->nrm_count) {
+                    if (slot != 0xffffffffu && slot * 3 + 2 < nrm_count) {
                         f64 nx = normals[slot * 3 + 0];
                         f64 ny = normals[slot * 3 + 1];
                         f64 nz = normals[slot * 3 + 2];

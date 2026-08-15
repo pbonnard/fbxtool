@@ -62,6 +62,10 @@
   /** An assignment dropped before there was a model to put it on, or with the
    *  model it belongs to: either way it is applied once the model is loaded. */
   let pendingAssignment = null;
+  /* A second file, read for its materials, waiting for the scene it dresses. */
+  let pendingDonor = null;
+  /* What a drop of several formats was found to hold, for the record. */
+  let lastSurvey = null;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
@@ -194,6 +198,112 @@
     return { list: kept, left: list.length - kept.length };
   }
 
+  /* ------------------------------------------------- several formats at once
+   *
+   * A model is often downloaded as the same scene saved several ways, and the
+   * ways disagree about what survived. Across eleven cars saved as `.max`,
+   * `.fbx` and `.obj` together: the `.obj` never carried a usable material —
+   * 3ds Max's exporter writes `wire_204204204` placeholders and no maps — one
+   * `.max` had 215,558 vertices beside an `.fbx` with none but 162 textures,
+   * and another had a subdividing modifier on 121 parts beside an `.fbx` that
+   * held the only textures. Neither format wins; each file is asked what it
+   * has.
+   */
+
+  /** What a parsed document holds, for choosing between files. */
+  function holdingsOf(doc, info) {
+    let vertices = 0;
+    const objects = FbxAnalyze.child(doc.root, 'Objects');
+    for (const entry of (objects ? objects.children : [])) {
+      if (entry.name !== 'Geometry' && entry.name !== 'Model') continue;
+      const held = FbxAnalyze.arrayLength(FbxAnalyze.child(entry, 'Vertices'));
+      if (held) vertices += Math.floor(held / 3);
+    }
+    const count = (type) => info.objects.filter((o) => o.nodeType === type).length;
+    return {
+      vertices,
+      materials: count('Material'),
+      textures: count('Texture') + count('Video'),
+      // A cage with a subdividing modifier on it is worth what it becomes, not
+      // what it stores: each level roughly quadruples the faces, which is how
+      // a 217,930-vertex `.max` outruns the 1,912,893-vertex `.obj` baked from
+      // it — the tool subdivides further than the export did.
+      smoothing: (doc.extra && doc.extra.smoothing) || 0,
+    };
+  }
+
+  const richness = (m) => m.vertices * (4 ** Math.min(m.smoothing || 0, 3));
+
+  /** Read every model in a drop, so the best of them can be picked. */
+  async function surveyModels(candidates) {
+    const out = [];
+    for (const file of candidates) {
+      setStatus(`Reading ${file.name}…`);
+      await nextFrame();
+      let doc = null;
+      try {
+        doc = await parseModel(file);
+      } catch (error) {
+        console.warn(`${file.name}: ${error.message}`);
+      }
+      if (!doc) continue;
+      const info = FbxAnalyze.analyze(doc);
+      out.push({ file, doc, info, ...holdingsOf(doc, info) });
+    }
+    return out;
+  }
+
+  /**
+   * Which file to open, and which — if any — to take materials from.
+   *
+   * Geometry decides the first, and decides it well: there is no repairing a
+   * mesh that is not there, and a vertex count is a fact rather than a
+   * judgement.
+   *
+   * Which file has the *better* materials is not a fact, and counting does not
+   * find it. A Ferrari saved both ways has 47 materials in the `.max` under
+   * names of the reader's own making, and 58 in the `.fbx` under real ones —
+   * `Carpaint Blue`, `Chrome Satin Clean`, `Aluminium Brushed` — with more
+   * texture records besides. Taking the `.fbx`'s on the strength of any of
+   * that turns a white car grey: they are V-Ray materials, and the Phong
+   * approximation left in the FBX beside them is empty. `Carpaint Blue` reads
+   * as 0.16 grey and `Aluminium Clean` as black.
+   *
+   * So a donor is used only where the base has no maps at all — an `.obj`
+   * whose exporter wrote `wire_204204204` and nothing else, or a `.max` that
+   * kept none. Then anything the other file has is more than nothing, and the
+   * question of which is better does not arise.
+   */
+  function chooseSources(survey) {
+    const usable = survey.filter((m) => m.vertices > 0);
+    if (!usable.length) return { base: survey[0] || null, donor: null };
+    const most = usable.reduce((best, m) => (richness(m) > richness(best) ? m : best));
+    /* Geometry decides, but not by a hair. Two savings of the same scene
+     * differ by a rounding when they differ at all — one Smart's `.obj` has
+     * 497,850 vertices against its `.max`'s 486,057, two per cent — and a
+     * mesh chosen on that margin can arrive with nothing on it: that `.obj`
+     * carries two `wire_` placeholders where the `.max` has 25 materials and
+     * two textures. Anything within a tenth is the same mesh, and then what
+     * each file carries besides is what separates them. */
+    const close = usable.filter((m) => richness(m) * 1.1 >= richness(most));
+    const base = close.reduce((best, m) => {
+      if (m.textures !== best.textures) return m.textures > best.textures ? m : best;
+      if (m.materials !== best.materials) return m.materials > best.materials ? m : best;
+      return richness(m) > richness(best) ? m : best;
+    });
+    /* Images are the only thing counted for. Having more materials is not
+     * having better ones, which this cost a car to learn twice: a Smart's
+     * `.obj` carries three `wire_` greys against eighteen in the `.fbx` beside
+     * it, and every one of those eighteen reads as pure black — a V-Ray
+     * export whose Phong block was left empty. Merging on the strength of
+     * eighteen against three turns a white car black. An image is a fact; a
+     * count is not. */
+    const donor = base.textures > 0 ? null : survey
+      .filter((m) => m !== base && m.textures > 0)
+      .reduce((best, m) => (!best || m.textures > best.textures ? m : best), null);
+    return { base, donor };
+  }
+
   /** Take a drop or a multi-select: one FBX plus any images it needs. */
   async function loadFiles(files) {
     const { list, left } = withinLimit(Array.from(files));
@@ -247,7 +357,28 @@
     // extension worth the name still gets its turn, since that is how a model
     // saved under an odd name has always been opened.
     const candidates = list.filter((f) => !companions.has(f));
-    const scene = candidates.find((f) => MODEL_NAMES.test(f.name)) || candidates[0];
+    const models = candidates.filter((f) => MODEL_NAMES.test(f.name));
+    // Several savings of the same scene: read them all and open the one with
+    // the most to draw, taking materials from whichever has the most maps.
+    if (models.length > 1) {
+      const survey = await surveyModels(models);
+      const { base, donor } = chooseSources(survey);
+      // What each file was found to hold, and which was picked for what.
+      lastSurvey = {
+        files: survey.map((m) => ({
+          name: m.file.name, vertices: m.vertices, materials: m.materials,
+          textures: m.textures, smoothing: m.smoothing,
+        })),
+        base: base && base.file.name,
+        donor: donor && donor.file.name,
+      };
+      if (base) {
+        await loadFile(base.file, { donor });
+        applyPending();
+        return;
+      }
+    }
+    const scene = models[0] || candidates[0];
     if (scene) {
       await loadFile(scene);
       // Opening a model starts from whatever was remembered for it, so an
@@ -273,6 +404,133 @@
       else if (sceneParts.length) await showScene();
     }
     applyPending();
+  }
+
+  /* ------------------------------------------------- materials from a donor
+   *
+   * The two files hold the same scene, so their parts answer to the same
+   * names — `desirefx.me_002` in the `.max` is `desirefx_me_002` in the `.obj`,
+   * the exporter having replaced what a name cannot hold. Matched with the
+   * punctuation taken out, 164 of 164 parts line up; on the other cars 93 of
+   * 94, 118 of 125, 220 of 220.
+   *
+   * Materials are matched through the parts rather than by their own names,
+   * which do not survive: a `.max` gives them names of its own making —
+   * `material1001` — where the `.fbx` beside it has `Aluminium Brushed`.
+   */
+
+  const plainPart = (name) => String(name).toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+  /** What each of a donor's parts wears, by the name the part goes by. */
+  function donorMaterials(donor) {
+    const index = buildObjectIndex(donor.info.objects);
+    const out = new Map();
+    for (const part of collectParts(donor.info, index)) {
+      const name = plainPart(part.model.displayName);
+      const material = part.materials[0];
+      if (!name || !material || out.has(name)) continue;
+      out.set(name, materialEntry(material, donor.info, index));
+    }
+    return out;
+  }
+
+  /**
+   * Dress the scene on screen in the donor's materials.
+   *
+   * Each donor material becomes one palette entry however many parts wear it,
+   * and every part that answers to a matching name is put in it — through the
+   * same assignment a part given a material by hand uses, so it undoes, saves
+   * into an assignment and exports like anything else.
+   */
+  function applyDonor(donor) {
+    if (!donor || !builtPieces) return null;
+    const wanted = donorMaterials(donor);
+    if (!wanted.size) return null;
+    /* A scene of one part matched against a donor of many is not a merge: the
+     * whole model comes out in whatever that one name happens to wear. A
+     * Wavefront `.obj` reads as one part however many groups it was written
+     * with, so this is what it hits — and one material over a whole car is
+     * worse than the placeholders it replaced. */
+    if (partTable.length === 1 && wanted.size > 1) {
+      console.info(`${donor.file.name}: ${wanted.size} parts to match against one, `
+        + 'so its materials were left where they were');
+      return null;
+    }
+
+    const slotOf = new Map();
+    extraMaterials = extraMaterials.slice(0, extraCount);
+    const base = builtPieces.palette.length;
+    const next = [];
+    let dressed = 0;
+    for (const segment of currentSegments()) {
+      const part = partTable.find((entry) => entry.segment === segment);
+      const found = part ? wanted.get(plainPart(part.name)) : null;
+      if (!found) { next.push(segment); continue; }
+      if (!slotOf.has(found.name)) {
+        slotOf.set(found.name, base + extraMaterials.length);
+        extraMaterials.push(found);
+      }
+      next.push({ ...segment, material: slotOf.get(found.name) });
+      dressed++;
+    }
+    if (!dressed) return null;
+    applyEdit({ segments: next, extras: extraMaterials.length }, null);
+    return { dressed, materials: slotOf.size, of: currentSegments().length };
+  }
+
+  /**
+   * Decode whatever the palette on screen wears, and hand it to the viewer.
+   *
+   * The layer each material samples is part of the palette, so that goes up
+   * again after the images are in: the entries were uploaded before there was
+   * anything for them to point at.
+   */
+  async function refreshTextures() {
+    const textures = await resolveTextures(currentPalette);
+    missingTextures = textures.missing;
+    viewer.setTextures(textures.images);
+    viewer.setFinishTextures(textures.finish);
+    viewer.setPalette(currentPalette);
+    dom.textureToggle.disabled = textures.images.length === 0
+      && textures.finish.length === 0;
+    return textures;
+  }
+
+  /**
+   * Put the donor's materials on, once there is a scene to put them on, and
+   * say what came from where.
+   *
+   * Which file was opened and which was read for its materials is not a
+   * detail: the scene on screen is two files, and an export of it is neither
+   * of them. Saying so is the difference between a merge and a mystery.
+   */
+  async function dressFromDonor() {
+    const donor = pendingDonor;
+    pendingDonor = null;
+    if (!donor || !currentDoc) return;
+    setStatus(`Reading materials from ${donor.file.name}…`);
+    await nextFrame();
+    let put = null;
+    try {
+      put = applyDonor(donor);
+      // An edit normally introduces no image — a material added by hand is a
+      // plain colour — so rebuilding the scene does not go looking for one.
+      // These arrive wearing the donor's, which have never been decoded.
+      if (put) await refreshTextures();
+    } catch (error) {
+      console.error(error);
+    }
+    const opened = `${currentDoc.fileName} for its geometry`;
+    if (!put) {
+      setStatus(`Opened ${opened}. Nothing in ${donor.file.name} answered to the `
+        + 'same part names, so its materials were left where they were.', 'warn');
+      return;
+    }
+    // The textures the donor names are files like any other, and are looked
+    // for the same way, so a folder that holds them has already supplied them.
+    setStatus(`Opened ${opened}, wearing ${put.materials} material(s) from `
+      + `${donor.file.name} on ${put.dressed} of ${put.of} parts — `
+      + 'Ctrl+Z puts the file\'s own back.', 'ok');
   }
 
   /** Put a dropped assignment on the model, once there is one to put it on. */
@@ -326,46 +584,57 @@
     }
   }
 
-  async function loadFile(file) {
+  /**
+   * One file as a document, whichever format it turns out to be.
+   *
+   * Nothing here touches what is on screen, so a second file can be read to
+   * see what it holds without disturbing the one that is open.
+   */
+  async function parseModel(file) {
+    const buffer = new Uint8Array(await file.arrayBuffer());
+    const started = performance.now();
+
+    let doc = null;
+    if (FbxMax.looksLikeMax(buffer)) {
+      // A .max is a compound file, which nothing else here reads, so the
+      // eight bytes of its container are enough to know it.
+      doc = FbxMax.parse(buffer);
+    } else if (FbxBlend.looksLikeBlend(buffer)) {
+      doc = FbxBlend.parse(buffer);
+    } else if (FbxGltfIn.looksLikeGltf(buffer)) {
+      // Both containers, .glb and .gltf, are recognised from the bytes.
+      doc = FbxGltfIn.parse(buffer, { files: suppliedBuffers });
+    } else {
+      doc = FbxWasm.parseBinary(buffer);
+    }
+    if (!doc) {
+      // Not binary — try the text formats.
+      const text = new TextDecoder('utf-8').decode(buffer);
+      if (FbxAscii.looksLikeAscii(text)) doc = FbxAscii.parse(text);
+      else if (FbxObj.looksLikeObj(text)) {
+        doc = FbxObj.parse(text, { materials: suppliedMaterials });
+      } else return null;
+    } else if (doc.format !== 'blend' && doc.format !== 'gltf') {
+      doc.versionSource = 'header';
+    }
+    doc.fileName = file.name;
+    doc.fileSize = file.size;
+    doc.parseMilliseconds = performance.now() - started;
+    return doc;
+  }
+
+  async function loadFile(file, { donor = null } = {}) {
     setStatus(`Reading ${file.name}…`);
     clearDocument();
     try {
-      const buffer = new Uint8Array(await file.arrayBuffer());
-      const started = performance.now();
-
-      let doc = null;
-      if (FbxMax.looksLikeMax(buffer)) {
-        // A .max is a compound file, which nothing else here reads, so the
-        // eight bytes of its container are enough to know it.
-        doc = FbxMax.parse(buffer);
-      } else if (FbxBlend.looksLikeBlend(buffer)) {
-        doc = FbxBlend.parse(buffer);
-      } else if (FbxGltfIn.looksLikeGltf(buffer)) {
-        // Both containers, .glb and .gltf, are recognised from the bytes.
-        doc = FbxGltfIn.parse(buffer, { files: suppliedBuffers });
-      } else {
-        doc = FbxWasm.parseBinary(buffer);
-      }
+      const doc = await parseModel(file);
       if (!doc) {
-        // Not binary — try the text formats.
-        const text = new TextDecoder('utf-8').decode(buffer);
-        if (FbxAscii.looksLikeAscii(text)) {
-          doc = FbxAscii.parse(text);
-        } else if (FbxObj.looksLikeObj(text)) {
-          doc = FbxObj.parse(text, { materials: suppliedMaterials });
-        } else {
-          setStatus(`${file.name} is not a model we recognise — not FBX `
-            + '(binary or ASCII), OBJ, glTF or .blend.', 'error');
-          return;
-        }
-      } else if (doc.format !== 'blend' && doc.format !== 'gltf') {
-        doc.versionSource = 'header';
+        setStatus(`${file.name} is not a model we recognise — not FBX `
+          + '(binary or ASCII), OBJ, glTF or .blend.', 'error');
+        return;
       }
+      pendingDonor = donor;
       lastSceneFile = file;
-      doc.fileName = file.name;
-      doc.fileSize = file.size;
-      doc.parseMilliseconds = performance.now() - started;
-
       currentDoc = doc;
       currentAnalysis = FbxAnalyze.analyze(doc);
       // Whatever was assigned to this file last time it was open.
@@ -417,10 +686,10 @@
    * A mesh is stored in its model's local space, so a scene only assembles
    * correctly once each part is placed by its model's world matrix.
    */
-  function collectParts() {
-    const info = currentAnalysis;
+  function collectParts(analysis, index) {
+    const info = analysis || currentAnalysis;
     if (!info) return [];
-    const { keyOf, resolve } = objectIndex;
+    const { keyOf, resolve } = index || objectIndex;
 
     // Keyed by model, not by geometry: one mesh is often shared by several
     // models — four wheels from one wheel — and each of those is its own part.
@@ -548,7 +817,7 @@
       const geometric = FbxTransform.geometricMatrix(part.properties);
       const placement = geometric ? FbxTransform.multiply(world, geometric) : world;
       const materialBase = palette.length;
-      palette.push(...part.materials.map(materialEntry));
+      palette.push(...part.materials.map((m) => materialEntry(m)));
 
       let mesh;
       try {
@@ -1758,7 +2027,8 @@
         // the numbering would mean nothing, so the whole part is written.
         const source = builtPieces && builtPieces.pieces[index];
         const matched = source && source.triangleCount === written.triangleCount;
-        let palette = FbxPalette.apply(part.materials.map(materialEntry), materialOverrides);
+        let palette = FbxPalette.apply(part.materials.map((m) => materialEntry(m)),
+          materialOverrides);
 
         // A material given to a part by hand is not one of that part's own, so
         // it goes on the end of its palette and the triangles are pointed at
@@ -2082,12 +2352,14 @@
   }
 
   /** One palette entry: how a material shades, and the image it wears. */
-  function materialEntry(material) {
+  function materialEntry(material, analysis, index) {
+    const info = analysis || currentAnalysis;
+    const resolve = (index || objectIndex).resolve;
     // Template defaults sit underneath, so a material with no Properties70
     // still gets the colour and finish its type declares.
-    const props = FbxAnalyze.resolvedProperties(material, currentAnalysis.templates);
+    const props = FbxAnalyze.resolvedProperties(material, info.templates);
     const look = FbxAnalyze.materialAppearance(props);
-    const maps = materialTextures(material, objectIndex.resolve, currentAnalysis.connections);
+    const maps = materialTextures(material, resolve, info.connections);
     const { baseColor, ...rest } = maps;
     return {
       name: material.displayName,
@@ -2158,7 +2430,7 @@
       .filter((c) => c.kind === 'OO' && resolve(c.dst) === model)
       .map((c) => resolve(c.src))
       .filter((o) => o && o.nodeType === 'Material')
-      .map(materialEntry);
+      .map((m) => materialEntry(m));
   }
 
   /* --------------------------------------------------------------- textures */
@@ -2396,7 +2668,12 @@
       dom.geometrySelect.appendChild(option);
     });
     dom.geometrySelect.dataset.count = String(candidates.length);
-    return sceneParts.length > 1 || placed ? showScene() : showGeometry(candidates[0]);
+    // Materials from a second file are matched part by part, so the scene is
+    // what they are put on — even where one part on its own would otherwise be
+    // shown as the mesh it is.
+    const merging = pendingDonor && sceneParts.length > 0;
+    return sceneParts.length > 1 || placed || merging
+      ? showScene() : showGeometry(candidates[0]);
   }
 
   /**
@@ -2487,6 +2764,9 @@
           + ' — drop the folder in, or use Open folder';
       }
       dom.meshInfo.textContent = text;
+      // The scene is whole now, so the parts are there to be dressed. This
+      // rebuilds it, which is why it comes last rather than in the middle.
+      await dressFromDonor();
     } catch (error) {
       console.error(error);
       dom.meshInfo.textContent = `could not assemble the scene: ${error.message}`;
@@ -2556,6 +2836,19 @@
       materials = intsOf(materialLayer.children.find((c) => c.name === 'Materials'));
     }
 
+    /* Which faces share a smooth normal, where the file says so. A 3ds Max
+     * scene stores no normals at all — only the cage — and without this the
+     * mesh can only be shaded flat, whatever it is subdivided to. */
+    let smoothing = null;
+    const smoothingLayer = entry.children.find((c) => c.name === 'LayerElementSmoothing');
+    if (smoothingLayer) {
+      const byPolygon = FbxAnalyze.pathValue(smoothingLayer, ['MappingInformationType']);
+      // Per edge is the other way FBX writes them, and is not what this reads.
+      if (byPolygon === 'ByPolygon') {
+        smoothing = intsOf(smoothingLayer.children.find((c) => c.name === 'Smoothing'));
+      }
+    }
+
     let uvs = null;
     let uvIndex = null;
     let uvMapping = 'none';
@@ -2581,7 +2874,7 @@
       normals, normalMapping: mapping, normalReference: normalReference,
       normalIndex,
       uvs, uvIndex, uvMapping, uvReference,
-      materials,
+      materials, smoothing,
     };
     // Smoothing happens on the polygons, before anything is triangulated. A
     // mesh too big to smooth is drawn as it came rather than dropped: one
@@ -2866,6 +3159,7 @@
       redo: redoEdit,
       restoreAll,
       get lastExport() { return lastExport; },
+      get lastSurvey() { return lastSurvey; },
       exportMesh: () => currentMesh,
       exportGltf,
       get materials() { return materialGroups; },

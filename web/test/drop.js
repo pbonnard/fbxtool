@@ -207,6 +207,55 @@ async function main() {
     fs.rmSync(root, { recursive: true, force: true });
   }
 
+  /* A folder holding the same scene saved twice, as a downloaded model
+   * usually is: one saving kept the mesh, the other kept the maps. The richer
+   * mesh is what gets opened — a vertex count is a fact — and the materials
+   * come from the other only because this one has none of its own. */
+  const twins = process.argv.slice(5, 7);
+  if (twins.length === 2 && twins.every((f) => fs.existsSync(f))) {
+    console.log('\nthe same scene saved twice');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fbxtool-twin-'));
+    const tree = path.join(root, 'twins');
+    fs.mkdirSync(tree, { recursive: true });
+    for (const f of twins) fs.copyFileSync(f, path.join(tree, path.basename(f)));
+
+    await page.reload();
+    await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
+    const seen = await page.evaluate(() => window.fbxtool.loadCount);
+    await page.setInputFiles('#folder-input', [tree]);
+    await page.waitForFunction((was) => window.fbxtool.loadCount > was, seen,
+      { timeout: 120000 });
+    await page.waitForTimeout(1200);
+    const merged = await page.evaluate(() => ({
+      survey: window.fbxtool.lastSurvey,
+      opened: window.fbxtool.doc && window.fbxtool.doc.fileName,
+      triangles: window.fbxtool.viewer.triangleCount,
+      textures: window.fbxtool.viewer.textureLayers,
+      assigned: (window.fbxtool.edits || {}).assigned || 0,
+      names: window.fbxtool.materials.map((g) => g.name),
+    }));
+    const rich = path.basename(twins[0]);
+    const mapped = path.basename(twins[1]);
+    check('both files are read before either is opened',
+      !!merged.survey && merged.survey.files.length === 2,
+      merged.survey ? merged.survey.files.map((f) => f.name).join(', ') : 'no survey');
+    check('the one with the geometry is the one opened',
+      merged.opened === rich && merged.survey.base === rich, String(merged.opened));
+    check('and it is the whole mesh, not the scrap beside it',
+      merged.triangles === 12, `${merged.triangles} triangles`);
+    check('the other is read for its materials',
+      merged.survey.donor === mapped, String(merged.survey.donor));
+    check('which reach the part that answers to the same name',
+      merged.assigned === 1, `${merged.assigned} part(s) reassigned`);
+    check('bringing the image with them',
+      merged.textures === 1, `${merged.textures} texture(s)`);
+    check('and undoing gives the file its own back', await page.evaluate(() => {
+      window.fbxtool.undo();
+      return (window.fbxtool.edits || {}).assigned || 0;
+    }) === 0);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
   await browser.close();
   console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');

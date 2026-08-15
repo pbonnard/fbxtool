@@ -419,10 +419,11 @@ const FbxMax = (function () {
    * their meaning, since one wrong size reads the next face out of this one.
    */
   function readFaces(view, start, end, vertices) {
-    if (end - start < 4) return { polygons: [], materials: [], faces: 0 };
+    if (end - start < 4) return { polygons: [], materials: [], groups: [], faces: 0 };
     const count = view.getUint32(start, true);
     const polygons = [];
     const materials = [];
+    const groups = [];
     let at = start + 4;
     let faces = 0;
     for (let face = 0; face < count; face++) {
@@ -441,14 +442,26 @@ const FbxMax = (function () {
       const flags = view.getUint16(at, true);
       at += 2;
       let material = 0;
-      if (flags & 0x01) { material = view.getUint32(at, true) & 0xffff; at += 4; }
+      let smoothing = 0;
+      if (flags & 0x01) {
+        // One word, two things: the material id in the low half and the
+        // smoothing groups in the high. The groups say which faces share a
+        // smooth normal and, by their absence, where an edge is hard —
+        // without them a mesh that stores no normals of its own can only be
+        // shaded flat, and every crease on a car body rounds away.
+        const word = view.getUint32(at, true);
+        material = word & 0xffff;
+        smoothing = word >>> 16;
+        at += 4;
+      }
       if (flags & 0x08) at += 2;
       if (flags & 0x10) at += 4;
       if (flags & 0x20) at += 8 * (degree - 3);
       materials.push(material);
+      groups.push(smoothing);
       faces += 1;
     }
-    return { polygons, materials, faces };
+    return { polygons, materials, groups, faces };
   }
 
   function readMapFaces(view, start, end) {
@@ -500,6 +513,7 @@ const FbxMax = (function () {
     let positions = null;
     let polygons = null;
     let materials = null;
+    let groups = null;
     let faces = 0;
     let edges = 0;
     let pending = null;
@@ -518,6 +532,7 @@ const FbxMax = (function () {
         const read = readFaces(view, body, tail, positions.length / 3);
         polygons = read.polygons;
         materials = read.materials;
+        groups = read.groups;
         faces = read.faces;
       } else if (id === MAP_VERTS) pending = readPoints(view, body, tail, 12);
       else if (id === MAP_FACES && !uvs && pending && pending.length) {
@@ -530,9 +545,12 @@ const FbxMax = (function () {
         const triangles = readTriangles(view, body, tail, positions.length / 3);
         polygons = [];
         materials = [];
+        // An Editable Mesh keeps its smoothing groups elsewhere; none read.
+        groups = [];
         for (const [a, b, c] of triangles) {
           polygons.push(a, b, ~c);
           materials.push(0);
+          groups.push(0);
         }
         faces = triangles.length;
       } else if (id === TRI_MAP_VERTS) pending = readPoints(view, body, tail, 12);
@@ -544,7 +562,7 @@ const FbxMax = (function () {
     }
     if (!positions || !polygons || !polygons.length) return null;
     if (!faceUvs || faceUvs.length !== polygons.length) { uvs = null; faceUvs = null; }
-    return { positions, polygons, materials, faces, edges, uvs, faceUvs };
+    return { positions, polygons, materials, groups, faces, edges, uvs, faceUvs };
   }
 
   /* ------------------------------------------------------------ materials */
@@ -1051,6 +1069,17 @@ const FbxMax = (function () {
           node('MappingInformationType', [S('AllSame')]),
           node('ReferenceInformationType', [S('IndexToDirect')]),
           node('Materials', [array('i', [0])]),
+        ]));
+      }
+      // Which faces share a smooth normal, and so where an edge is hard. A
+      // .max stores no normals — only the cage — so without this the mesh can
+      // only be shaded flat, and every crease on a car body rounds away.
+      if (entry.mesh.groups && entry.mesh.groups.some((g) => g)) {
+        children.push(node('LayerElementSmoothing', [I(0)], [
+          node('Version', [I(102)]),
+          node('MappingInformationType', [S('ByPolygon')]),
+          node('ReferenceInformationType', [S('Direct')]),
+          node('Smoothing', [array('i', entry.mesh.groups)]),
         ]));
       }
       children.push(node('Layer', [I(0)], [node('Version', [I(100)])]));

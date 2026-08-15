@@ -117,6 +117,13 @@ const FbxObj = (function () {
     const materialIndex = new Map();
     let currentMaterial = -1;
     let smoothing = 0;
+    /* Where each face starts in the polygon run and how many corners it has,
+     * so a part can be cut out of the file's shared arrays afterwards. */
+    const faceStart = [];
+    const faceSize = [];
+    const pieces = [];
+    let piece = null;
+    let pieceName = '';
 
     const lines = text.split(/\r?\n/);
     for (let number = 0; number < lines.length; number++) {
@@ -152,6 +159,17 @@ const FbxObj = (function () {
           warnings.push(`line ${number + 1}: face with fewer than three corners; skipped`);
           continue;
         }
+        // Which part this face belongs to. A face before any `o` or `g` goes
+        // into one of no name, which is what a file with no parts is.
+        // Compared on the name as written: resolving it first made a file
+        // that names no parts at all start a new one at every face.
+        if (!piece || piece.name !== pieceName) {
+          piece = { name: pieceName, faces: [] };
+          pieces.push(piece);
+        }
+        piece.faces.push(faceMaterials.length);
+        faceStart.push(polygons.length);
+        faceSize.push(corners.length);
         const vertexTotal = positions.length / 3;
         const uvTotal = uvs.length / 2;
         const normalTotal = normals.length / 3;
@@ -178,8 +196,12 @@ const FbxObj = (function () {
         libraries.push(...rest);
       } else if (key === 'o') {
         objects.push(rest.join(' '));
+        pieceName = rest.join(' ');
       } else if (key === 'g') {
         groups.push(rest.join(' '));
+        // `o Body` followed by `g Body` names one part twice, which is what
+        // 3ds Max writes; only a change of name starts another.
+        pieceName = rest.join(' ');
       } else if (key === 's') {
         smoothing++;
       }
@@ -210,49 +232,140 @@ const FbxObj = (function () {
       node('Creator', [S(comments[0] || 'Wavefront OBJ')]),
     ]));
 
-    const geometryUid = 1;
-    const modelUid = 2;
-    const geometry = [
-      node('Vertices', [array('d', positions)]),
-      node('PolygonVertexIndex', [array('i', polygons)]),
-      node('GeometryVersion', [I(124)]),
+    /**
+     * One part's share of the file, cut out of the arrays every part shares.
+     *
+     * OBJ indexes one pool of vertices, normals and texture coordinates from
+     * anywhere in the file, so a part cannot simply take a slice: each of the
+     * three is gathered as it is referenced and renumbered from zero. The
+     * remap is a table per pool, stamped with the part being built rather than
+     * cleared — on a car of 1.9 million vertices in 164 parts, clearing it
+     * each time is most of the work.
+     */
+    const remaps = [
+      { at: new Int32Array(positions.length / 3), seen: new Int32Array(positions.length / 3) },
+      { at: new Int32Array(normals.length / 3 || 1), seen: new Int32Array(normals.length / 3 || 1) },
+      { at: new Int32Array(uvs.length / 2 || 1), seen: new Int32Array(uvs.length / 2 || 1) },
     ];
-    if (normals.length && faceNormals.some((i) => i >= 0)) {
-      geometry.push(node('LayerElementNormal', [I(0)], [
-        node('Version', [I(101)]),
-        node('MappingInformationType', [S('ByPolygonVertex')]),
-        node('ReferenceInformationType', [S('IndexToDirect')]),
-        node('Normals', [array('d', normals)]),
-        node('NormalsIndex', [array('i', faceNormals)]),
-      ]));
-    }
-    if (uvs.length && faceUvs.some((i) => i >= 0)) {
-      geometry.push(node('LayerElementUV', [I(0)], [
-        node('Version', [I(101)]),
-        node('Name', [S('map1')]),
-        node('MappingInformationType', [S('ByPolygonVertex')]),
-        node('ReferenceInformationType', [S('IndexToDirect')]),
-        node('UV', [array('d', uvs)]),
-        node('UVIndex', [array('i', faceUvs)]),
-      ]));
-    }
-    geometry.push(node('LayerElementMaterial', [I(0)], [
-      node('Version', [I(101)]),
-      node('MappingInformationType', [S('ByPolygon')]),
-      node('ReferenceInformationType', [S('IndexToDirect')]),
-      node('Materials', [array('i', faceMaterials)]),
-    ]));
-    geometry.push(node('Layer', [I(0)], [node('Version', [I(100)])]));
 
-    const objectsNode = node('Objects', [], [
-      node('Geometry', [L(geometryUid), S(`${name}${CLASS_SEP}Geometry`), S('Mesh')], geometry),
-      node('Model', [L(modelUid), S(`${name}${CLASS_SEP}Model`), S('Mesh')],
-        [node('Version', [I(232)])]),
-    ]);
-    const connections = [
-      node('C', [S('OO'), L(modelUid), L(0)]),
-      node('C', [S('OO'), L(geometryUid), L(modelUid)]),
-    ];
+    const cut = (faces, stamp) => {
+      const outPositions = [];
+      const outNormals = [];
+      const outUvs = [];
+      const outPolygons = [];
+      const outFaceNormals = [];
+      const outFaceUvs = [];
+      const outFaceMaterials = [];
+
+      const take = (pool, index, source, target, width) => {
+        const map = remaps[pool];
+        if (map.seen[index] !== stamp) {
+          map.seen[index] = stamp;
+          map.at[index] = target.length / width;
+          for (let k = 0; k < width; k++) target.push(source[index * width + k]);
+        }
+        return map.at[index];
+      };
+
+      for (const face of faces) {
+        const start = faceStart[face];
+        const size = faceSize[face];
+        for (let corner = 0; corner < size; corner++) {
+          const written = polygons[start + corner];
+          const vertex = written < 0 ? ~written : written;
+          const local = take(0, vertex, positions, outPositions, 3);
+          outPolygons.push(corner === size - 1 ? ~local : local);
+          const normal = faceNormals[start + corner];
+          outFaceNormals.push(normal >= 0 ? take(1, normal, normals, outNormals, 3) : -1);
+          const uv = faceUvs[start + corner];
+          outFaceUvs.push(uv >= 0 ? take(2, uv, uvs, outUvs, 2) : -1);
+        }
+        outFaceMaterials.push(faceMaterials[face]);
+      }
+      return {
+        positions: outPositions,
+        normals: outNormals,
+        uvs: outUvs,
+        polygons: outPolygons,
+        faceNormals: outFaceNormals,
+        faceUvs: outFaceUvs,
+        faceMaterials: outFaceMaterials,
+      };
+    };
+
+    /** The Geometry record for one part's arrays. */
+    const geometryOf = (held) => {
+      const geometry = [
+        node('Vertices', [array('d', held.positions)]),
+        node('PolygonVertexIndex', [array('i', held.polygons)]),
+        node('GeometryVersion', [I(124)]),
+      ];
+      if (held.normals.length && held.faceNormals.some((i) => i >= 0)) {
+        geometry.push(node('LayerElementNormal', [I(0)], [
+          node('Version', [I(101)]),
+          node('Name', [S('')]),
+          node('MappingInformationType', [S('ByPolygonVertex')]),
+          node('ReferenceInformationType', [S('IndexToDirect')]),
+          node('Normals', [array('d', held.normals)]),
+          node('NormalsIndex', [array('i', held.faceNormals)]),
+        ]));
+      }
+      if (held.uvs.length && held.faceUvs.some((i) => i >= 0)) {
+        geometry.push(node('LayerElementUV', [I(0)], [
+          node('Version', [I(101)]),
+          node('Name', [S('map1')]),
+          node('MappingInformationType', [S('ByPolygonVertex')]),
+          node('ReferenceInformationType', [S('IndexToDirect')]),
+          node('UV', [array('d', held.uvs)]),
+          node('UVIndex', [array('i', held.faceUvs)]),
+        ]));
+      }
+      geometry.push(node('LayerElementMaterial', [I(0)], [
+        node('Version', [I(101)]),
+        node('MappingInformationType', [S('ByPolygon')]),
+        node('ReferenceInformationType', [S('IndexToDirect')]),
+        node('Materials', [array('i', held.faceMaterials)]),
+      ]));
+      geometry.push(node('Layer', [I(0)], [node('Version', [I(100)])]));
+      return geometry;
+    };
+
+    /* A file's `o` and `g` lines are its parts, and they are kept apart: a car
+     * written as 164 groups is 164 parts, which is what lets it be exploded,
+     * picked at, edited part by part, and matched against the same scene saved
+     * in another format. A file that names none is one part, as it always was,
+     * and then nothing is cut up or copied. */
+    const objectsNode = node('Objects', [], []);
+    const connections = [];
+    const models = [];
+
+    if (pieces.length > 1) {
+      pieces.forEach((held, index) => {
+        const geometryUid = 1000 + index * 2;
+        const modelUid = 1001 + index * 2;
+        objectsNode.children.push(node('Geometry',
+          [L(geometryUid), S(`${held.name || name}${CLASS_SEP}Geometry`), S('Mesh')],
+          geometryOf(cut(held.faces, index + 1))));
+        objectsNode.children.push(node('Model',
+          [L(modelUid), S(`${held.name || name}${CLASS_SEP}Model`), S('Mesh')],
+          [node('Version', [I(232)])]));
+        connections.push(node('C', [S('OO'), L(modelUid), L(0)]));
+        connections.push(node('C', [S('OO'), L(geometryUid), L(modelUid)]));
+        models.push(modelUid);
+      });
+    } else {
+      const geometryUid = 1;
+      const modelUid = 2;
+      objectsNode.children.push(node('Geometry',
+        [L(geometryUid), S(`${name}${CLASS_SEP}Geometry`), S('Mesh')],
+        geometryOf({ positions, normals, uvs, polygons, faceNormals, faceUvs, faceMaterials })));
+      objectsNode.children.push(node('Model',
+        [L(modelUid), S(`${name}${CLASS_SEP}Model`), S('Mesh')],
+        [node('Version', [I(232)])]));
+      connections.push(node('C', [S('OO'), L(modelUid), L(0)]));
+      connections.push(node('C', [S('OO'), L(geometryUid), L(modelUid)]));
+      models.push(modelUid);
+    }
 
     palette.forEach((material, index) => {
       const uid = 100 + index;
@@ -267,7 +380,11 @@ const FbxObj = (function () {
           node('Properties70', [], props),
         ]),
       );
-      connections.push(node('C', [S('OO'), L(uid), L(modelUid)]));
+      // Every part is connected to the whole palette, in palette order: a
+      // per-polygon material index refers to the materials on that part's own
+      // model, counted in the order they connect, so the numbering only holds
+      // if each model sees the same list.
+      for (const model of models) connections.push(node('C', [S('OO'), L(uid), L(model)]));
 
       if (material.map) {
         const textureUid = 200 + index;
@@ -293,8 +410,8 @@ const FbxObj = (function () {
     root.children.push(node('Definitions', [], [
       node('Version', [I(100)]),
       node('Count', [I(objectsNode.children.length)]),
-      node('ObjectType', [S('Geometry')], [node('Count', [I(1)])]),
-      node('ObjectType', [S('Model')], [node('Count', [I(1)])]),
+      node('ObjectType', [S('Geometry')], [node('Count', [I(models.length)])]),
+      node('ObjectType', [S('Model')], [node('Count', [I(models.length)])]),
       node('ObjectType', [S('Material')], [node('Count', [I(palette.length)])]),
     ]));
     root.children.push(objectsNode);
@@ -313,6 +430,7 @@ const FbxObj = (function () {
       warnings,
       extra: {
         objects, groups, libraries, comments,
+        parts: models.length,
         smoothingGroups: smoothing,
         materialsResolved: palette.length - unresolved.length,
         materialsMissing: unresolved,
