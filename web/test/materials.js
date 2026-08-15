@@ -610,6 +610,27 @@ ${path.basename(second)}`);
       && (flat.left[0] + flat.left[1] + flat.left[2])
         > (sampled.left[0] + sampled.left[1] + sampled.left[2]),
       `${show(flat.left)} against ${show(flat.right)}`);
+
+    // And the row says which file each slot wants, so a metalness of 1 over a
+    // map reads as what it is rather than as a mirror somebody chose.
+    await page.click('.tab[data-target="tab-materials"]');
+    const listed = await page.evaluate(() => {
+      const row = document.querySelector('.material');
+      row.open = true;
+      return {
+        count: (row.querySelector('.material-images') || {}).textContent || '',
+        slots: [...row.querySelectorAll('.material-map-slot')].map((e) => e.textContent),
+        files: [...row.querySelectorAll('.material-map-file')].map((e) => e.textContent),
+        absent: row.querySelectorAll('.material-map.absent').length,
+      };
+    });
+    check('the row names the images the material wears',
+      listed.slots.join(',') === 'Base colour,Metal / rough'
+      && listed.files.length === 2,
+      `${listed.slots.join(', ')} · ${listed.files.join(', ')}`);
+    check('counts them without being opened', /2 images/.test(listed.count), listed.count);
+    check('and calls none of them missing, since the file carries them both',
+      listed.absent === 0, `${listed.absent} absent`);
   }
 
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');

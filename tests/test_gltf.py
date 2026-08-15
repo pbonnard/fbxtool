@@ -407,6 +407,28 @@ def test_the_texture_is_connected_to_the_material_it_colours(glb):
     assert ("OP", "DiffuseColor") in kinds
 
 
+def test_an_escaped_uri_names_the_file_it_actually_is():
+    """glTF names what sits beside it with a URI, and a URI escapes what it
+    cannot hold — a space becomes %20, and so does every byte of a name that is
+    not ASCII.  The file on disk has no escapes in it."""
+    document = json.loads(fb.build_gltf()[0])
+    document["images"] = [{"uri": "textures/tyre%20map%C3%A9.png"}]
+    document["textures"] = [{"source": 0}]
+    doc = parse_gltf(json.dumps(document).encode())
+    texture = objects_of(doc, "Texture")[0]
+    assert values(texture, "RelativeFilename") == "textures/tyre mapé.png"
+
+
+def test_a_buffer_named_the_same_way_is_read_from_beside_the_document(tmp_path):
+    document, buffer = fb.build_gltf(buffer_uri="my%20scene.bin")
+    (tmp_path / "scene.gltf").write_bytes(document)
+    (tmp_path / "my scene.bin").write_bytes(buffer)
+    doc = read_model(tmp_path / "scene.gltf", load_arrays=True)
+    assert doc.warnings == []
+    positions = values(objects_of(doc, "Geometry")[0], "Vertices")
+    assert positions[:3] == [-1.0, -0.5, -3.0]
+
+
 def _document_wearing_every_map() -> dict:
     """One material with a map in each of the slots glTF keeps."""
     document = json.loads(fb.build_gltf()[0])

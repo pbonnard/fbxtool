@@ -9,7 +9,9 @@
   const dom = {
     drop: $('drop'),
     fileInput: $('file-input'),
+    folderInput: $('folder-input'),
     picker: $('picker'),
+    pickerFolder: $('picker-folder'),
     panel: $('panel'),
     status: $('status'),
     canvas: $('viewport'),
@@ -117,10 +119,92 @@
 
   /* --------------------------------------------------------------- loading */
 
+  /* -------------------------------------------------------- dropped folders
+   *
+   * A model downloaded as a folder keeps its images in a subfolder beside it —
+   * a Sketchfab glTF has `textures/`, and the document names them by relative
+   * path. `dataTransfer.files` does not go into a folder, so dropping the
+   * folder used to hand over the document and nothing else: the model arrived
+   * with none of its images, and every material fell back to whatever it
+   * states on its own. On a car that is a set of white chrome tyres, because
+   * glTF's default for a metalness a file leaves out is 1 and the map that
+   * qualifies it was in the folder that did not come.
+   */
+
+  //: Enough for any model's texture folder, and a stop on a whole disk.
+  const DROP_LIMIT = 512;
+  const DROP_DEPTH = 8;
+
+  //: What this reads, for telling the model in a folder from what is beside it.
+  const MODEL_NAMES = /\.(fbx|obj|gltf|glb|blend|max)$/i;
+
+  /** The filesystem entries of a drop, taken before the transfer empties. */
+  function droppedEntries(transfer) {
+    if (!transfer.items) return [];
+    return Array.from(transfer.items)
+      .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+      .filter(Boolean);
+  }
+
+  /** Every file under what was dropped, folders walked through. */
+  async function collectDropped(entries, plain) {
+    if (!entries.length) return plain;
+    const out = [];
+    const fileOf = (entry) => new Promise((resolve) => entry.file(resolve, () => resolve(null)));
+
+    const walk = async (entry, depth) => {
+      if (out.length >= DROP_LIMIT || depth > DROP_DEPTH) return;
+      if (entry.isFile) {
+        const file = await fileOf(entry);
+        if (file) out.push(file);
+        return;
+      }
+      if (!entry.isDirectory) return;
+      const reader = entry.createReader();
+      // readEntries hands back a batch at a time and an empty one at the end,
+      // so it has to be asked until it says there is no more.
+      for (;;) {
+        const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, depth + 1);
+        if (out.length >= DROP_LIMIT) break;
+      }
+    };
+
+    for (const entry of entries) await walk(entry, 0);
+    return out.length ? out : plain;
+  }
+
+  //: What counts as something a model needs rather than something beside it.
+  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|mtl|bin|json)$/i;
+
+  /**
+   * As much of a folder as is worth reading, models and their companions first.
+   *
+   * A folder picked by hand can be a whole library rather than one car, and
+   * every `.mtl` is read as text and every `.bin` into memory on the way in.
+   * What is left out is said out loud: a truncated set that loads quietly is
+   * indistinguishable from a complete one that is missing something.
+   */
+  function withinLimit(list) {
+    if (list.length <= DROP_LIMIT) return { list, left: 0 };
+    const wanted = (f) => MODEL_NAMES.test(f.name) || COMPANION_NAMES.test(f.name);
+    const kept = [...list.filter(wanted), ...list.filter((f) => !wanted(f))]
+      .slice(0, DROP_LIMIT);
+    return { list: kept, left: list.length - kept.length };
+  }
+
   /** Take a drop or a multi-select: one FBX plus any images it needs. */
   async function loadFiles(files) {
-    const list = Array.from(files);
-    const images = list.filter((f) => /\.(png|jpe?g|gif|bmp|webp|tga)$/i.test(f.name));
+    const { list, left } = withinLimit(Array.from(files));
+    if (left) {
+      setStatus(`That is ${(list.length + left).toLocaleString()} files — reading the `
+        + `first ${DROP_LIMIT.toLocaleString()}, models and their images first.`, 'warn');
+    }
+    // KTX2 is a texture rather than a picture, and no browser makes an image
+    // of one — but it is still an image this tool decodes, so it arrives the
+    // same way as the rest rather than being taken for the model.
+    const images = list.filter((f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2)$/i.test(f.name));
     const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
     // A .gltf keeps its vertices in a .bin beside it, the way an .obj keeps its
     // colours in an .mtl.
@@ -157,7 +241,13 @@
     }
 
     const companions = new Set([...images, ...libraries, ...payloads, ...assignments]);
-    const scene = list.find((f) => !companions.has(f));
+    // A folder brings whatever else is in it — a licence, a readme — and any
+    // of those would otherwise be taken for the model on the strength of being
+    // first. Something that names itself a model is preferred; a file with no
+    // extension worth the name still gets its turn, since that is how a model
+    // saved under an odd name has always been opened.
+    const candidates = list.filter((f) => !companions.has(f));
+    const scene = candidates.find((f) => MODEL_NAMES.test(f.name)) || candidates[0];
     if (scene) {
       await loadFile(scene);
       // Opening a model starts from whatever was remembered for it, so an
@@ -1302,7 +1392,8 @@
   }
 
   function renderMaterials() {
-    dom.materials.innerHTML = FbxPalette.render(materialGroups, materialOverrides);
+    dom.materials.innerHTML = FbxPalette.render(materialGroups, materialOverrides,
+      { supplied: new Set(suppliedImages.keys()) });
     const edited = Object.keys(materialOverrides).length;
     dom.materialsSave.disabled = !edited;
     dom.materialsClear.disabled = !edited;
@@ -1754,7 +1845,39 @@
    * that name up with nothing to find. So the export says what it dropped and
    * the removal reads as a list of expected names rather than as nothing.
    */
-  function reportDropped(stats) {
+  /**
+   * Maps a material names that the export could not write.
+   *
+   * This is the one omission that changes what the remaining values mean. A
+   * factor is a multiplier over its map: `metallicFactor` with no
+   * `metallicRoughnessTexture` beside it asserts a surface the file never
+   * claimed, and glTF's default for the factor is 1, so a tyre whose map went
+   * missing exports as a mirror — permanently, in a file nothing downstream
+   * can correct. Supplying the images and exporting again is the fix, which
+   * needs saying rather than leaving to be noticed.
+   */
+  function unwrittenMaps(images, textures) {
+    const out = [];
+    const seen = new Set();
+    for (const entry of currentPalette) {
+      if (seen.has(entry.name)) continue;
+      seen.add(entry.name);
+      const written = new Set([
+        ...(images.has(entry.name) ? ['baseColor'] : []),
+        ...(textures.get(entry.name) || []).map((map) => map.slot),
+      ]);
+      const declared = [
+        ...(entry.texture ? ['baseColor'] : []),
+        ...Object.keys(entry.textures || {}),
+      ];
+      for (const slot of declared) {
+        if (!written.has(slot)) out.push(`${entry.name} ${slot}`);
+      }
+    }
+    return out;
+  }
+
+  function reportDropped(stats, maps) {
     const info = currentAnalysis;
     if (!info) return null;
     const written = new Set(stats.materialNames);
@@ -1771,12 +1894,14 @@
       .filter(([origin, set]) => typeof set.name === 'string' && set.name
         && set.name !== origin && written.has(set.name))
       .map(([origin, set]) => `${origin} → ${set.name}`);
-    const dropped = { materials, nodes, renamed };
-    if (materials.length || nodes.length || renamed.length) {
+    const dropped = { materials, nodes, renamed, maps: maps || [] };
+    if (materials.length || nodes.length || renamed.length || dropped.maps.length) {
       console.info('glTF export:'
         + (materials.length ? `\n  ${materials.length} material(s) dropped: ${materials.join(', ')}` : '')
         + (nodes.length ? `\n  ${nodes.length} node(s) dropped: ${nodes.join(', ')}` : '')
-        + (renamed.length ? `\n  ${renamed.length} material(s) renamed: ${renamed.join(', ')}` : ''));
+        + (renamed.length ? `\n  ${renamed.length} material(s) renamed: ${renamed.join(', ')}` : '')
+        + (dropped.maps.length ? `\n  ${dropped.maps.length} map(s) named but not supplied, so `
+          + `the factors beside them now stand alone: ${dropped.maps.join(', ')}` : ''));
     }
     return dropped;
   }
@@ -1796,8 +1921,12 @@
     ].filter(Boolean);
     const renamed = dropped.renamed.length
       ? ` · ${dropped.renamed.length} renamed` : '';
-    if (!parts.length) return `${renamed || ' · nothing dropped'}`;
-    return ` · dropped ${parts.join(' and ')}${renamed}`;
+    // The one omission worth shouting about: a factor without the map it
+    // multiplies asserts a surface the file never claimed.
+    const maps = (dropped.maps || []).length
+      ? ` · ${dropped.maps.length} map(s) missing — supply the images and export again` : '';
+    if (!parts.length) return `${renamed || ' · nothing dropped'}${maps}`;
+    return ` · dropped ${parts.join(' and ')}${renamed}${maps}`;
   }
 
   async function exportGltf() {
@@ -1830,7 +1959,8 @@
         unitScale: centimetres / 100,
       });
       download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
-      stats.dropped = currentGeometry ? null : reportDropped(stats);
+      const missingMaps = unwrittenMaps(images, textures);
+      stats.dropped = currentGeometry ? null : reportDropped(stats, missingMaps);
       lastExport = stats;
       const instanced = stats.triangles > stats.stored
         ? `, ${stats.stored.toLocaleString()} stored` : '';
@@ -2353,7 +2483,8 @@
         text += ` · ${textures.images.length}/${textures.requested} textures`;
       }
       if (textures.missing.length) {
-        text += ` · missing: ${textures.missing.join(', ')} — drop the image in`;
+        text += ` · missing: ${textures.missing.join(', ')}`
+          + ' — drop the folder in, or use Open folder';
       }
       dom.meshInfo.textContent = text;
     } catch (error) {
@@ -2547,7 +2678,8 @@
         if (!mesh.hasUv) text += ' (no UVs in this mesh)';
       }
       if (textures.missing.length) {
-        text += ` · missing: ${textures.missing.join(', ')} — drop the image in`;
+        text += ` · missing: ${textures.missing.join(', ')}`
+          + ' — drop the folder in, or use Open folder';
       }
       if (chosen.fromGeometry) {
         text += ` · ${chosen.axis.toUpperCase()} up from the geometry`;
@@ -2567,6 +2699,11 @@
 
   function bindUi() {
     dom.picker.addEventListener('click', () => dom.fileInput.click());
+    dom.pickerFolder.addEventListener('click', () => dom.folderInput.click());
+    dom.folderInput.addEventListener('change', () => {
+      if (dom.folderInput.files.length) loadFiles(dom.folderInput.files);
+      dom.folderInput.value = '';
+    });
     dom.fileInput.addEventListener('change', () => {
       if (dom.fileInput.files.length) loadFiles(dom.fileInput.files);
     });
@@ -2589,8 +2726,15 @@
       });
     });
     document.addEventListener('drop', (event) => {
-      const files = event.dataTransfer && event.dataTransfer.files;
-      if (files && files.length) loadFiles(files);
+      if (!event.dataTransfer) return;
+      // The entries have to be taken while the event is still being handled;
+      // the transfer is emptied the moment it returns.
+      const dropped = droppedEntries(event.dataTransfer);
+      const plain = Array.from(event.dataTransfer.files || []);
+      if (!dropped.length && !plain.length) return;
+      collectDropped(dropped, plain).then((files) => {
+        if (files.length) loadFiles(files);
+      });
     });
 
     dom.geometrySelect.addEventListener('change', () => {

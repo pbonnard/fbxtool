@@ -278,6 +278,75 @@ const FbxPalette = (function () {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 
+  /* ---------------------------------------------------------------- images */
+
+  /**
+   * The map slots, in the order they are worth reading: what the material
+   * looks like first, then what shapes and lights it.
+   */
+  const SLOTS = [
+    ['baseColor', 'Base colour'],
+    ['metallicRoughness', 'Metal / rough'],
+    ['normal', 'Normal'],
+    ['occlusion', 'Occlusion'],
+    ['emissive', 'Emissive'],
+  ];
+
+  const fileName = (path) => String(path).split(/[\\/]/).pop();
+
+  /**
+   * The images a material names, and whether each one is here.
+   *
+   * A file names its images by relative path and does not carry them, so a
+   * material can name one that was never supplied — which is how a car arrives
+   * with none of its maps and every material falls back to what it states
+   * alone. Saying which file each slot wants, and which of them is missing, is
+   * the difference between that being visible and being a mystery.
+   */
+  function maps(entry, supplied) {
+    const found = [];
+    const add = (slot, request) => {
+      if (request) found.push({ slot, request });
+    };
+    add('baseColor', entry.texture);
+    for (const [slot, request] of Object.entries(entry.textures || {})) add(slot, request);
+
+    const order = new Map(SLOTS.map(([slot], index) => [slot, index]));
+    found.sort((a, b) => (order.has(a.slot) ? order.get(a.slot) : 99)
+      - (order.has(b.slot) ? order.get(b.slot) : 99));
+
+    return found.map(({ slot, request }) => {
+      const known = SLOTS.find(([name]) => name === slot);
+      const embedded = !!request.embedded;
+      // An image carried inside the file has no name of its own beyond the
+      // record's; one named by path is known by its file.
+      const name = request.path ? fileName(request.path) : (request.name || 'image');
+      return {
+        slot,
+        label: known ? known[1] : slot,
+        name,
+        embedded,
+        here: embedded || !supplied || supplied.has(name.toLowerCase()),
+      };
+    });
+  }
+
+  /** The images block of one material's row. */
+  function mapsMarkup(entry, supplied) {
+    const images = maps(entry, supplied);
+    if (!images.length) return '';
+    const rows = images.map((image) => {
+      const note = image.embedded ? 'in the file' : (image.here ? '' : 'not supplied');
+      return `<span class="material-map${image.here ? '' : ' absent'}">`
+        + `<span class="material-map-slot">${escape(image.label)}</span>`
+        + `<span class="material-map-file" title="${escape(image.name)}">`
+        + `${escape(image.name)}</span>`
+        + (note ? `<span class="material-map-note">${escape(note)}</span>` : '')
+        + '</span>';
+    }).join('');
+    return `<div class="material-maps"><span class="material-maps-title">Images</span>${rows}</div>`;
+  }
+
   const percent = (share) => (share >= 0.001 ? `${(share * 100).toFixed(1)}%` : '<0.1%');
 
   function slider(group, field, value, label) {
@@ -287,8 +356,14 @@ const FbxPalette = (function () {
       + `<output>${value.toFixed(2)}</output></label>`;
   }
 
-  /** The Materials tab: one row per material, biggest first. */
-  function render(list, overrides) {
+  /**
+   * The Materials tab: one row per material, biggest first.
+   *
+   * `supplied` is the set of image file names the page has been given, by
+   * which a map a material names but nobody handed over is told apart from one
+   * that is here.
+   */
+  function render(list, overrides, { supplied = null } = {}) {
     if (!list.length) {
       return '<section class="panel-section placeholder"><h2>No materials</h2>'
         + '<p>This file connects no materials to its meshes, so there is nothing '
@@ -299,6 +374,15 @@ const FbxPalette = (function () {
       const hex = toHex(set.colour);
       const slots = group.slots.length > 1
         ? `<span class="material-slots">${group.slots.length} parts</span>` : '';
+      const images = maps(group.entry, supplied);
+      // Worth seeing without opening the row: which materials wear images at
+      // all, and whether any of them is waiting for a file.
+      const absent = images.filter((image) => !image.here).length;
+      const wears = images.length
+        ? `<span class="material-images${absent ? ' absent' : ''}"`
+          + ` title="${escape(images.map((i) => i.name).join(', '))}">`
+          + `${images.length} image${images.length === 1 ? '' : 's'}`
+          + `${absent ? ` · ${absent} missing` : ''}</span>` : '';
       const options = PRESETS.map((p) => `<option value="${p.id}">${escape(p.label)}</option>`)
         .join('');
       // Renamed rows say what the file called it, so the report and the
@@ -310,7 +394,7 @@ const FbxPalette = (function () {
         + ` data-key="${escape(group.origin)}" data-index="${group.index}">`
         + '<summary>'
         + `<span class="swatch" style="background:${hex}"></span>`
-        + `<span class="material-name">${escape(group.name)}</span>${slots}`
+        + `<span class="material-name">${escape(group.name)}</span>${slots}${wears}`
         + `<span class="material-share">${percent(group.share)}</span>`
         + '</summary>'
         + '<div class="material-edit">'
@@ -325,6 +409,7 @@ const FbxPalette = (function () {
         + slider(group, 'metallic', set.metallic, 'Metal')
         + slider(group, 'roughness', set.roughness, 'Rough')
         + slider(group, 'opacity', set.opacity, 'Opacity')
+        + mapsMarkup(group.entry, supplied)
         + '<div class="material-actions">'
         + `<select data-key="${escape(group.origin)}" data-field="preset">`
         + `<option value="">Preset…</option>${options}</select>`
@@ -338,7 +423,7 @@ const FbxPalette = (function () {
   return {
     toSrgb, fromSrgb, toHex, fromHex,
     PRESETS, preset, groups, apply, settingsFor,
-    load, save, serialise, parse, render, keyOf,
+    load, save, serialise, parse, render, keyOf, maps,
   };
 })();
 

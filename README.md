@@ -377,6 +377,34 @@ That produces one self-contained HTML file — the WebAssembly module, CSS and
 JavaScript are all inlined, so it runs from a `file://` URL with no server, no
 CDN and no network. Open it and drop a file in; nothing is uploaded anywhere.
 
+Drop the whole folder, and everything under it comes with the model — which is
+what a downloaded model needs, since it keeps its images in a subfolder beside
+the document and names them by relative path. A drop only ever offered the
+files at the top level, so dropping the folder used to hand over the document
+and nothing else: the model arrived with none of its images, and every material
+fell back to whatever it states on its own. On a car that is a set of white
+chrome tyres, because glTF's default for a metalness a file leaves out is 1 and
+the map that qualifies it was in the folder that did not come. The model is
+picked out by extension rather than by being first, so a licence or a readme
+sitting beside it is not mistaken for it.
+
+**Open folder** does the same from the button. A file picker cannot reach into
+a subfolder — the page is handed the files chosen and nothing else — so opening
+`scene.gltf` by hand gets the document without its images however carefully it
+is picked; a directory picker hands over everything under the folder at once.
+A folder that turns out to be a library rather than a model is read as far as
+512 files, models and their images first, and says how many it left.
+
+Where the images sit inside the folder does not matter. `textures/` is what
+Sketchfab writes, `maps/` is what plenty of others write, and a model saved out
+of a tool often has them loose beside it — sometimes with the model itself a
+folder down. Everything under the folder is read, and an image is matched to
+whatever names it by file name rather than by path, which is also what lets an
+FBX naming `C:\Users\…\Brabus\specular.jpg` find the file it means. Names are
+matched with their URI escapes undone: a glTF written by an exporter that
+escapes properly names `tyre%20map.png` for a file called `tyre map.png`, and
+every byte of a name that is not ASCII is escaped the same way.
+
 | Layer | Where it runs |
 | --- | --- |
 | DEFLATE, binary record walking, polygon triangulation, normal generation | WebAssembly (`web/src/fbx.c`, freestanding, no libc, **no imports**) |
@@ -611,6 +639,15 @@ through the connection graph.
 Textures are followed from `Material` through the object-to-property connection
 that drives its base colour, then down to whatever image is at the end.
 
+Each row in the Materials tab says which images its material names — the slot,
+the file, and whether that file is here. A model names its images by relative
+path and does not carry them, so a material can perfectly well name one nobody
+supplied; a row then reads *3 images · 2 missing* without being opened, and
+names the two inside. That is what makes a white chrome tyre legible: the
+metalness slider says 1.00 because the file left the factor out, and the row
+beside it says the map that qualifies it is `tire_metallicRoughness.png` and
+that it never arrived.
+
 Two things make that less simple than it sounds. Exporters name the property
 after their own renderer — `3dsMax|CoronaMtlPb|texmapDiffuse`, `Maya|baseColor`
 — so the vendor prefix is dropped before matching, and only the base colour is
@@ -760,6 +797,14 @@ here rather than at runtime, but not one worth making in silence. So the
 export diffs itself against the file it came from and prints what went:
 *n* materials removed, by name, *n* nodes removed, *n* renamed. Removing a
 number plate then reads as four expected names rather than as nothing at all.
+
+It also says when a map a material names was not supplied, which is the one
+omission that changes what the values left behind mean. A factor multiplies its
+map: `metallicFactor` with no `metallicRoughnessTexture` beside it asserts a
+surface the file never claimed, and glTF's default for that factor is 1 — so a
+tyre exported without its map is a mirror, permanently, in a file nothing
+downstream can put right. Supplying the images and exporting again is the fix,
+and it is worth being told rather than left to notice.
 Names are the keys everything downstream finds a body panel or a wheel by, and
 a merge nobody noticed is a car that can no longer be painted.
 
@@ -1139,6 +1184,7 @@ node web/test/smoothing.js samples/cube_binary.fbx samples/scene_parts.fbx
 node web/test/gltfin.js samples/cube_textured.fbx     # export, then read it back
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
+node web/test/drop.js samples/pyramid.obj samples/pyramid.mtl samples/checker.png
 node web/test/edits.js samples/Shelby.fbx            # deleting and splitting
 ```
 

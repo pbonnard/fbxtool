@@ -475,5 +475,49 @@ ul.record-tree .count { color: var(--muted); }
   color: var(--muted);
 }
 
+/* The images a material names: which slot wants which file, and which of
+ * those files the page has actually been given. */
+.material-images {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  flex: none;
+}
+.material-images.absent { color: var(--warn); }
+
+.material-maps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line, #23303f);
+}
+.material-maps-title {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.material-map {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.material-map-slot { color: var(--muted); flex: none; min-width: 92px; }
+/* The file name is the point of the row, so it is what survives a squeeze. */
+.material-map-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.material-map-note { color: var(--muted); flex: none; font-style: italic; }
+.material-map.absent .material-map-file,
+.material-map.absent .material-map-note { color: var(--warn); }
+
 .material-actions { display: flex; gap: 8px; padding-top: 2px; }
 .material-actions select, .material-actions button { font-size: 12px; padding: 3px 8px; }

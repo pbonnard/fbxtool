@@ -15,8 +15,14 @@
   <div class="bar-right">
     <span id="status" class="status">Loading WebAssembly…</span>
     <button id="picker" type="button" class="primary">Open model</button>
+    <button id="picker-folder" type="button" title="Open a model with the images beside it">
+      Open folder</button>
     <input id="file-input" type="file"
-           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.max,.bin,.json,image/*" multiple hidden>
+           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.max,.bin,.json,.ktx2,image/*" multiple hidden>
+    <!-- A model downloaded as a folder keeps its images in a subfolder and
+         names them by relative path. A file picker cannot reach them; a
+         directory picker hands over everything under the folder at once. -->
+    <input id="folder-input" type="file" webkitdirectory multiple hidden>
   </div>
 </header>
 
@@ -76,9 +82,15 @@
            <code>.blend</code> or a 3ds Max <code>.max</code>. Everything runs in this tab — parsed by a
            WebAssembly module and drawn with WebGL, never leaving your
            machine.</p>
-        <p class="hint">Embedded textures load automatically. Files that
-           reference images, an <code>.mtl</code> or a <code>.bin</code> by name
-           need those dropped in too — together or afterwards.</p>
+        <p class="hint">Drop the whole folder and everything under it comes
+           with the model, which is what a download needs: it keeps its images
+           in a subfolder and names them by relative path. <strong>Open
+           folder</strong> does the same from the picker, which cannot reach
+           into a subfolder on its own.</p>
+        <p class="hint">Embedded textures load on their own. A file that
+           references images, an <code>.mtl</code> or a <code>.bin</code> by
+           name and arrives without them says which it is waiting for; drop
+           those in afterwards and it reads again.</p>
         <p class="hint">Drag to orbit, shift-drag to pan, scroll to zoom. Click
            a part to pick it out; pull the <em>explode</em> slider to take the
            model apart.</p>

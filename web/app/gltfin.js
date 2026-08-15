@@ -142,6 +142,24 @@ const FbxGltfIn = (function () {
 
   const baseName = (path) => String(path).split(/[\\/]/).pop().toLowerCase();
 
+  /**
+   * A URI as the name of a file.
+   *
+   * glTF names what sits beside it with a URI, which escapes anything a URI
+   * cannot hold — a space becomes `%20`, and so does every byte of a name that
+   * is not ASCII. The file on disk has no escapes in it, so a document written
+   * by an exporter that escapes properly names an image nothing can match
+   * until they are undone. A stray `%` that is not an escape is left alone
+   * rather than throwing.
+   */
+  function fromUri(uri) {
+    try {
+      return decodeURIComponent(uri);
+    } catch (error) {
+      return uri;
+    }
+  }
+
   const COMPONENT = {
     5120: { array: Int8Array, size: 1 },
     5121: { array: Uint8Array, size: 1 },
@@ -322,9 +340,10 @@ const FbxGltfIn = (function () {
     const buffers = (json.buffers || []).map((buffer, index) => {
       if (buffer.uri === undefined) return binary;
       if (/^data:/i.test(buffer.uri)) return fromDataUri(buffer.uri);
-      const file = supplied.get(baseName(buffer.uri));
+      const named = fromUri(buffer.uri);
+      const file = supplied.get(baseName(named));
       if (!file) {
-        warnings.push(`buffer ${index} is in ${buffer.uri}, which was not supplied`
+        warnings.push(`buffer ${index} is in ${named}, which was not supplied`
           + ' — drop it in beside the model');
         return null;
       }
@@ -352,7 +371,7 @@ const FbxGltfIn = (function () {
       const textureUid = uid();
       const videoUid = uid();
       // An image spelled out in the document itself has no file name.
-      const filename = image.uri && !/^data:/i.test(image.uri) ? image.uri : '';
+      const filename = image.uri && !/^data:/i.test(image.uri) ? fromUri(image.uri) : '';
       const name = image.name || filename || `image${source}`;
       // FBX counts 0 for repeat and 1 for clamp; glTF writes the GL enums.
       // A sampler it leaves out repeats, which is glTF's own default.

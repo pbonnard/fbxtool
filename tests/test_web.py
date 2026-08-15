@@ -494,6 +494,31 @@ def test_subdivision_through_the_module(built):
 
 @needs_clang
 @needs_node
+def test_a_dropped_folder_brings_its_textures(built):
+    """A model downloaded as a folder keeps its images in a subfolder, and the
+    document names them by relative path.  Dropping the folder has to reach
+    them: without them every material falls back to what it states alone, and
+    glTF's default for a metalness a file leaves out is 1."""
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = _run(
+        ["node", str(WEB / "test" / "drop.js"),
+         str(ROOT / "samples" / "pyramid.obj"),
+         str(ROOT / "samples" / "pyramid.mtl"),
+         str(ROOT / "samples" / "checker.png")],
+        env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_smoothing_control(built):
     """Picking a level rebuilds what is on screen, and rounds it."""
     try:

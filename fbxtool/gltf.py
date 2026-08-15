@@ -493,7 +493,10 @@ def _texture_for(json_doc: dict, entry: dict | None, build: _Builder,
     image = images[source]
 
     uri = image.get("uri") or ""
-    filename = "" if uri.startswith("data:") else uri
+    # A URI escapes what it cannot hold — a space becomes %20, and so does every
+    # byte of a name that is not ASCII — and the file on disk has no escapes in
+    # it.  The record carries the name, so it carries the name.
+    filename = "" if uri.startswith("data:") else urllib.parse.unquote(uri)
     name = image.get("name") or filename or f"image{source}"
     texture_uid = build.uid()
     video_uid = build.uid()

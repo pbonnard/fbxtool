@@ -346,6 +346,37 @@ check('the declaration of blending survives at full opacity',
 check('and so does what the material gives off',
   nearAll(badgeLook.emissive, [0.5, 0.25, 0], 1e-9), show(badgeLook.emissive));
 
+/* glTF names what sits beside it with a URI, and a URI escapes what it cannot
+ * hold: a space becomes %20, and so does every byte of a name that is not
+ * ASCII. The file on disk has no escapes in it, so the name has to come back
+ * out of the URI before anything can be matched against what was supplied. */
+const escaped = FbxGltfIn.parse(new TextEncoder().encode(JSON.stringify({
+  asset: { version: '2.0' },
+  scene: 0,
+  scenes: [{ nodes: [] }],
+  images: [{ uri: 'textures/tyre%20map%C3%A9.png' }],
+  textures: [{ source: 0 }],
+  materials: [{ name: 'm', pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
+})));
+const escapedTexture = FbxAnalyze.analyze(escaped).objects.find((o) => o.nodeType === 'Texture');
+check('an escaped image URI names the file it actually is',
+  FbxAnalyze.pathValue(escapedTexture.node, ['RelativeFilename']) === 'textures/tyre mapé.png',
+  FbxAnalyze.pathValue(escapedTexture.node, ['RelativeFilename']));
+check('a buffer named the same way is asked for by that name too', (() => {
+  const doc = FbxGltfIn.parse(new TextEncoder().encode(JSON.stringify({
+    asset: { version: '2.0' },
+    buffers: [{ uri: 'my%20scene.bin', byteLength: 4 }],
+  })));
+  return doc.warnings.some((w) => /my scene\.bin/.test(w));
+})());
+check('and a stray per-cent that is no escape is left as it is', (() => {
+  const doc = FbxGltfIn.parse(new TextEncoder().encode(JSON.stringify({
+    asset: { version: '2.0' },
+    buffers: [{ uri: '100%.bin', byteLength: 4 }],
+  })));
+  return doc.warnings.some((w) => /100%\.bin/.test(w));
+})());
+
 console.log('\npalette: colour inputs');
 // A colour input speaks sRGB; shading is linear. Mid grey is the giveaway:
 // 0.5 linear encodes to #bcbcbc, not #808080.
@@ -549,6 +580,50 @@ check('presets carry an opacity', glassPreset && glassPreset.opacity < 1,
   glassPreset ? String(glassPreset.opacity) : 'missing');
 check('every preset is complete', FbxPalette.PRESETS.every((p) => p.id && p.label
   && Array.isArray(p.colour) && typeof p.roughness === 'number'));
+
+console.log('\npalette: the images a material names');
+const namedMaps = {
+  name: 'tire',
+  texture: { name: 'tire_baseColor', path: 'textures/tire_baseColor.png', embedded: null },
+  textures: {
+    normal: { name: 'tire_normal', path: 'textures\\tire_normal.png', embedded: null },
+    metallicRoughness: { name: 'tire_mr', path: 'tire_metallicRoughness.png', embedded: null },
+  },
+};
+const listed = FbxPalette.maps(namedMaps, new Set(['tire_basecolor.png']));
+check('every slot is listed, base colour first and the finish beside it',
+  listed.map((m) => m.slot).join(',') === 'baseColor,metallicRoughness,normal',
+  listed.map((m) => m.slot).join(','));
+check('by the file name, whichever separator the path used',
+  listed.map((m) => m.name).join(' ')
+  === 'tire_baseColor.png tire_metallicRoughness.png tire_normal.png',
+  listed.map((m) => m.name).join(' '));
+check('and each says whether it is here', listed[0].here === true
+  && listed[1].here === false && listed[2].here === false,
+  listed.map((m) => `${m.name}:${m.here}`).join(' '));
+check('an image carried inside the file is always here', (() => {
+  const inside = FbxPalette.maps(
+    { texture: { name: 'checker', path: '', embedded: new Uint8Array([1]) } }, new Set());
+  return inside.length === 1 && inside[0].here && inside[0].embedded
+    && inside[0].name === 'checker';
+})());
+check('a material with no images lists none',
+  FbxPalette.maps({ name: 'paint' }, new Set()).length === 0);
+check('with nothing supplied to compare against, nothing is called missing',
+  FbxPalette.maps(namedMaps, null).every((m) => m.here));
+
+const markup = FbxPalette.render(FbxPalette.groups([Object.assign(entry('tire', 20), namedMaps)],
+  [10]), {}, { supplied: new Set(['tire_basecolor.png']) });
+check('the row says how many images and how many are waiting',
+  /3 images/.test(markup) && /2 missing/.test(markup));
+check('and names each file against its slot',
+  /Base colour/.test(markup) && /tire_metallicRoughness\.png/.test(markup)
+  && /not supplied/.test(markup));
+check('the file name is escaped like everything else',
+  !/<script>/.test(FbxPalette.render(
+    FbxPalette.groups([Object.assign(entry('x', 21), {
+      texture: { name: '<script>', path: '', embedded: new Uint8Array([1]) },
+    })], [1]), {}, {})));
 
 console.log('\npalette: saved assignments');
 const written = FbxPalette.serialise({ paint: { colour: [0.2, 0.4, 0.6], opacity: 0.5 } });
