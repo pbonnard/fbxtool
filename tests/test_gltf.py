@@ -366,6 +366,67 @@ def test_the_texture_is_connected_to_the_material_it_colours(glb):
     assert ("OP", "DiffuseColor") in kinds
 
 
+def _document_wearing_every_map() -> dict:
+    """One material with a map in each of the slots glTF keeps."""
+    document = json.loads(fb.build_gltf()[0])
+    document["images"] = document["images"] * 4
+    document["samplers"] = [{"wrapS": 10497, "wrapT": 10497},
+                            {"wrapS": 33071, "wrapT": 33071}]
+    document["textures"] = [{"sampler": 1, "source": 0}, {"sampler": 0, "source": 1},
+                            {"sampler": 0, "source": 2}, {"sampler": 0, "source": 3}]
+    material = document["materials"][0]
+    material["pbrMetallicRoughness"]["baseColorTexture"] = {"index": 0}
+    material["pbrMetallicRoughness"]["metallicRoughnessTexture"] = {"index": 3}
+    material["normalTexture"] = {"index": 1}
+    material["emissiveTexture"] = {"index": 2}
+    return document
+
+
+def test_every_map_a_material_wears_comes_across():
+    """Only the base colour is ever drawn, but a normal map that is not read is
+    a normal map that cannot be written out again — and on a body panel that is
+    the difference between a shut line and a stripe painted on."""
+    document = _document_wearing_every_map()
+    info = analyze(parse_gltf(json.dumps(document).encode()))
+    bound = {c.prop for c in info.connections if c.kind == "OP"}
+    assert bound == {"DiffuseColor", "NormalMap", "EmissiveColor", "MetallicRoughness"}
+
+
+def test_a_clamped_sampler_stays_clamped():
+    """A tiling trim or tread that comes back clamped is a visible change."""
+    document = _document_wearing_every_map()
+    doc = parse_gltf(json.dumps(document).encode())
+    wraps = []
+    for texture in objects_of(doc, "Texture"):
+        props = {p.props[0].value: p.props[4].value
+                 for p in child(texture, "Properties70").children}
+        wraps.append((props["WrapModeU"], props["WrapModeV"]))
+    # The base colour is the clamped one; the other three repeat.
+    assert sorted(wraps) == [(0, 0), (0, 0), (0, 0), (1, 1)]
+
+
+def test_what_a_material_gives_off_is_read():
+    document = json.loads(fb.build_gltf()[0])
+    document["materials"][0]["emissiveFactor"] = [0.5, 0.25, 0.0]
+    document["materials"][0]["extensions"] = {
+        "KHR_materials_emissive_strength": {"emissiveStrength": 2.0},
+    }
+    props = _material_props(parse_gltf(json.dumps(document).encode()))
+    assert props["EmissiveColor"] == pytest.approx([1.0, 0.5, 0.0])
+
+
+def test_a_declared_alpha_mode_survives_a_full_opacity():
+    """An opacity factor is not the only place transparency lives: a badge is a
+    decal whose alpha is in its own texture, and its factor is 1."""
+    document = json.loads(fb.build_gltf()[0])
+    document["materials"][0]["alphaMode"] = "MASK"
+    document["materials"][0]["alphaCutoff"] = 0.3
+    props = _material_props(parse_gltf(json.dumps(document).encode()))
+    assert props["AlphaMode"] == ["MASK"]
+    assert props["AlphaCutoff"] == pytest.approx([0.3])
+    assert props["Opacity"] == pytest.approx([1.0])
+
+
 # ------------------------------------------------------- buffers beside it
 
 def test_a_gltf_reads_the_bin_beside_it(gltf_pair):

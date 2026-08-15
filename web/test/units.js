@@ -16,6 +16,7 @@ const FbxAscii = require(path.join(APP, 'ascii.js'));
 const FbxAnalyze = require(path.join(APP, 'analyze.js'));
 const FbxPalette = require(path.join(APP, 'palette.js'));
 const FbxGltf = require(path.join(APP, 'gltf.js'));
+const FbxGltfIn = require(path.join(APP, 'gltfin.js'));
 const FbxEdits = require(path.join(APP, 'edits.js'));
 
 let failures = 0;
@@ -241,6 +242,91 @@ check('nor normal maps', !FbxAnalyze.drivesBaseColour('3dsMax|CoronaNormalPb|nor
 check('nor a missing property', !FbxAnalyze.drivesBaseColour(null)
   && !FbxAnalyze.drivesBaseColour(undefined) && !FbxAnalyze.drivesBaseColour(''));
 
+console.log('\nanalyze: the other maps, which are carried rather than drawn');
+check('a normal map is named as one',
+  FbxAnalyze.textureSlot('NormalMap') === 'normal'
+  && FbxAnalyze.textureSlot('3dsMax|CoronaMtlPb|texmapBump') === 'normal');
+check('so are the rest of the slots glTF keeps',
+  FbxAnalyze.textureSlot('EmissiveColor') === 'emissive'
+  && FbxAnalyze.textureSlot('AmbientOcclusion') === 'occlusion'
+  && FbxAnalyze.textureSlot('MetallicRoughness') === 'metallicRoughness');
+check('a glossiness map is still nothing this tool can place',
+  FbxAnalyze.textureSlot('3dsMax|CoronaMtlPb|texmapReflectGlossiness') === null);
+check('wrap modes come back as the numbers glTF writes',
+  FbxAnalyze.wrapModes({ WrapModeU: 1, WrapModeV: 0 }).wrapS === 33071
+  && FbxAnalyze.wrapModes({ WrapModeU: 1, WrapModeV: 0 }).wrapT === 10497);
+check('and a texture that says nothing repeats',
+  FbxAnalyze.wrapModes({}).wrapS === 10497 && FbxAnalyze.wrapModes({}).wrapT === 10497);
+
+console.log('\nanalyze: emission and blending');
+check('an emissive colour is scaled by its factor',
+  nearAll(FbxAnalyze.materialAppearance({ EmissiveColor: [1, 0.5, 0], EmissiveFactor: 0.5 })
+    .emissive, [0.5, 0.25, 0]));
+check('a material that gives off nothing says so',
+  nearAll(FbxAnalyze.materialAppearance({}).emissive, [0, 0, 0]));
+check('a declared alpha mode is read',
+  FbxAnalyze.materialAppearance({ AlphaMode: 'BLEND' }).alphaMode === 'BLEND'
+  && FbxAnalyze.materialAppearance({ AlphaMode: 'MASK', AlphaCutoff: 0.3 }).alphaCutoff === 0.3);
+check('and a file that declares none says nothing',
+  FbxAnalyze.materialAppearance({}).alphaMode === null);
+
+console.log('\ngltf in: what a material brings with it');
+/* A document whose one material wears four maps, declares blending it does not
+ * spend on its base colour factor, glows, and samples one of its images
+ * clamped. Everything here but the base colour is carried rather than drawn,
+ * and all of it is what an export has to put back. */
+const image = (tag) => ({ uri: `data:image/png;base64,${Buffer.from(tag).toString('base64')}` });
+const document = {
+  asset: { version: '2.0' },
+  scene: 0,
+  scenes: [{ nodes: [] }],
+  images: [image('base'), image('norm'), image('emis'), image('mr')],
+  samplers: [{ wrapS: 10497, wrapT: 10497 }, { wrapS: 33071, wrapT: 33071 }],
+  textures: [
+    { sampler: 1, source: 0 }, { sampler: 0, source: 1 },
+    { sampler: 0, source: 2 }, { sampler: 0, source: 3 },
+  ],
+  materials: [{
+    name: 'badge',
+    alphaMode: 'BLEND',
+    emissiveFactor: [0.5, 0.25, 0],
+    pbrMetallicRoughness: {
+      metallicFactor: 0,
+      roughnessFactor: 0.4,
+      baseColorTexture: { index: 0 },
+      metallicRoughnessTexture: { index: 3 },
+    },
+    normalTexture: { index: 1 },
+    emissiveTexture: { index: 2 },
+  }],
+};
+const readBack = FbxGltfIn.parse(
+  new TextEncoder().encode(JSON.stringify(document)));
+const readInfo = FbxAnalyze.analyze(readBack);
+const badgeMaterial = readInfo.objects.find((o) => o.displayName === 'badge');
+const badgeProps = FbxAnalyze.resolvedProperties(badgeMaterial, readInfo.templates);
+const badgeLook = FbxAnalyze.materialAppearance(badgeProps);
+check('four maps come across, not one',
+  readInfo.objects.filter((o) => o.nodeType === 'Texture').length === 4,
+  `${readInfo.objects.filter((o) => o.nodeType === 'Texture').length} texture(s)`);
+const boundSlots = readInfo.connections
+  .filter((c) => c.kind === 'OP')
+  .map((c) => FbxAnalyze.textureSlot(c.prop))
+  .sort();
+check('each under the slot it fills',
+  boundSlots.join(',') === 'baseColor,emissive,metallicRoughness,normal',
+  boundSlots.join(','));
+check('the clamped sampler comes with the texture it clamps', (() => {
+  const clamped = readInfo.objects.filter((o) => o.nodeType === 'Texture')
+    .map((o) => FbxAnalyze.wrapModes(FbxAnalyze.properties(o.node)))
+    .filter((w) => w.wrapS === 33071);
+  return clamped.length === 1;
+})());
+check('the declaration of blending survives at full opacity',
+  badgeLook.alphaMode === 'BLEND' && badgeLook.opacity === 1);
+check('and so does what the material gives off',
+  nearAll(badgeLook.emissive, [0.5, 0.25, 0], 1e-9), show(badgeLook.emissive));
+
 console.log('\npalette: colour inputs');
 // A colour input speaks sRGB; shading is linear. Mid grey is the giveaway:
 // 0.5 linear encodes to #bcbcbc, not #808080.
@@ -348,6 +434,34 @@ check('and turning the metalness off paints it with the colour it had',
   nearAll(demetalled[0].colour, [0.86, 0.87, 0.89])
   && nearAll(demetalled[0].specular, [0.04, 0.04, 0.04]),
   show(demetalled[0].colour));
+
+/* A material that declared blending keeps that declaration until somebody
+ * actually sets an opacity, at which point the factor is the answer. */
+const badge = () => {
+  const made = entry('badge', 13);
+  made.fromFile = {
+    name: 'badge',
+    colour: [0.8, 0.8, 0.8],
+    base: [0.8, 0.8, 0.8],
+    specular: [0.04, 0.04, 0.04],
+    emissive: [0, 0, 0],
+    roughness: 0.4,
+    opacity: 1,
+    metallic: 0,
+    alphaMode: 'BLEND',
+    alphaCutoff: null,
+  };
+  return made;
+};
+const asRead2 = [badge()];
+FbxPalette.apply(asRead2, {});
+check('a declared alpha mode survives being read', asRead2[0].alphaMode === 'BLEND');
+FbxPalette.apply(asRead2, { badge: { roughness: 0.9 } });
+check('and survives an edit that is not about transparency',
+  asRead2[0].alphaMode === 'BLEND');
+FbxPalette.apply(asRead2, { badge: { opacity: 1 } });
+check('but setting the opacity by hand is the decision about transparency',
+  asRead2[0].alphaMode === null);
 
 /* Before `base` was written down there is only the split diffuse to go on. */
 const older = [metal()];
@@ -514,14 +628,75 @@ check('a metal carries its reflectance as its base colour', (() => {
   return nearAll(m.pbrMetallicRoughness.baseColorFactor, [0.9, 0.8, 0.5, 1])
     && m.pbrMetallicRoughness.metallicFactor === 1;
 })());
-check('an unusual reflectance uses the specular extension', (() => {
-  // The extension defines F0 as 0.04 x specularColorFactor, so 16% is a
-  // factor of 4 — and a tint survives, which a single strength could not.
+/* The extension defines F0 as 0.04 x specularColorFactor, so a factor above 1
+ * raises a dielectric's reflectance above the 4% it actually has — and a body
+ * panel whose F0 is raised cancels its own albedo in indirect light, so
+ * repainting it does nothing at all. The factor can only ever lower it. */
+check('a raised reflectance is brought back to a dielectric\'s', (() => {
   const m = asGltf({ specular: [0.16, 0.08, 0.04] });
   const factor = m.extensions && m.extensions.KHR_materials_specular.specularColorFactor;
-  return factor && nearAll(factor, [4, 2, 1]);
+  return factor && nearAll(factor, [1, 0.5, 0.25]);
+})());
+check('and the tint survives being brought back', (() => {
+  const m = asGltf({ specular: [0.8, 0.4, 0.2] });
+  const factor = m.extensions.KHR_materials_specular.specularColorFactor;
+  return nearAll(factor, [1, 0.5, 0.25]) && Math.max(...factor) <= 1;
+})());
+check('a genuinely dull dielectric keeps its lower reflectance', (() => {
+  const m = asGltf({ specular: [0.02, 0.02, 0.02] });
+  return nearAll(m.extensions.KHR_materials_specular.specularColorFactor, [0.5, 0.5, 0.5]);
 })());
 check('an ordinary dielectric does not need it', asGltf({}).extensions === undefined);
+check('nor does one already at the cap', asGltf({ specular: [0.16, 0.16, 0.16] })
+  .extensions === undefined);
+check('a metal is not touched by any of it',
+  asGltf({ colour: [0, 0, 0], specular: [0.9, 0.8, 0.5], metallic: 1 }).extensions === undefined);
+
+console.log('\ngltf: how a material is blended');
+check('an opacity factor still asks for blending',
+  asGltf({ opacity: 0.3 }).alphaMode === 'BLEND');
+// The AMG GT's badges: BLEND declared, no baseColorFactor at all, so the
+// transparency is in the texture's own alpha channel.
+check('a material that declared blending keeps it at full opacity',
+  asGltf({ alphaMode: 'BLEND' }).alphaMode === 'BLEND');
+check('a cutout keeps its threshold', (() => {
+  const m = asGltf({ alphaMode: 'MASK', alphaCutoff: 0.2 });
+  return m.alphaMode === 'MASK' && m.alphaCutoff === 0.2;
+})());
+check('an image with an alpha channel is reason enough on its own',
+  FbxGltf.material({ name: 'badge', colour: [1, 1, 1], specular: [0.04, 0.04, 0.04],
+    roughness: 0.5, opacity: 1 }, { baseColor: 0, baseColorHasAlpha: true })
+    .alphaMode === 'BLEND');
+check('and a plain opaque material is left opaque',
+  FbxGltf.material({ name: 'panel', colour: [1, 1, 1], specular: [0.04, 0.04, 0.04],
+    roughness: 0.5, opacity: 1 }, { baseColor: 0 }).alphaMode === 'OPAQUE');
+check('a file that says opaque is taken at its word all the same',
+  FbxGltf.material({ name: 'panel', colour: [1, 1, 1], specular: [0.04, 0.04, 0.04],
+    roughness: 0.5, opacity: 1, alphaMode: 'OPAQUE' },
+  { baseColor: 0, baseColorHasAlpha: true }).alphaMode === 'OPAQUE');
+check('and transparency the factor states is never lost to it',
+  FbxGltf.material({ name: 'glass', colour: [1, 1, 1], specular: [0.04, 0.04, 0.04],
+    roughness: 0.5, opacity: 0.3, alphaMode: 'OPAQUE' }, {}).alphaMode === 'BLEND');
+
+console.log('\ngltf: the maps a material wears');
+const mapped = FbxGltf.material({
+  name: 'body', colour: [0.5, 0.5, 0.5], specular: [0.04, 0.04, 0.04],
+  roughness: 0.4, opacity: 1, emissive: [1, 0.5, 0],
+}, { baseColor: 0, normal: 1, metallicRoughness: 2, occlusion: 3, emissive: 4 });
+check('every slot is written where glTF keeps it',
+  mapped.pbrMetallicRoughness.baseColorTexture.index === 0
+  && mapped.normalTexture.index === 1
+  && mapped.pbrMetallicRoughness.metallicRoughnessTexture.index === 2
+  && mapped.occlusionTexture.index === 3
+  && mapped.emissiveTexture.index === 4,
+  JSON.stringify(mapped.normalTexture));
+check('an emissive map travels with the colour that lets it show',
+  nearAll(mapped.emissiveFactor, [1, 0.5, 0]));
+check('an emissive map with no colour beside it is still lit',
+  nearAll(FbxGltf.material({ name: 'lamp', colour: [1, 1, 1], specular: [0.04, 0.04, 0.04],
+    roughness: 0.5, opacity: 1 }, { emissive: 0 }).emissiveFactor, [1, 1, 1]));
+check('a material that gives off nothing says nothing about it',
+  asGltf({}).emissiveFactor === undefined);
 
 console.log('\ngltf: the container');
 const built = FbxGltf.build({
@@ -586,6 +761,64 @@ check('every accessor sits inside its bufferView', gltf.accessors.every((a) => {
   const size = { SCALAR: 1, VEC2: 2, VEC3: 3 }[a.type] * (a.componentType === 5125 ? 4 : 4);
   return a.count * size <= view.byteLength && ((view.byteOffset || 0) % 4) === 0;
 }));
+check('it says what it wrote, by name',
+  built.stats.materialNames.join(',') === 'a,b'
+  && built.stats.nodeNames.join(',') === 'left,right',
+  `${built.stats.materialNames.join(',')} · ${built.stats.nodeNames.join(',')}`);
+
+console.log('\ngltf: textures and samplers');
+/* A square wearing one material, with a base colour and a normal map. The
+ * normal map is the same image two materials share, which has to be stored
+ * once however many point at it. */
+const png = (tag) => Uint8Array.from([0x89, 0x50, 0x4e, 0x47, tag]);
+const baseImage = png(1);
+const sharedNormal = png(2);
+const textured = FbxGltf.build({
+  name: 'square',
+  meshes: [{
+    name: 'square',
+    mesh: {
+      triangleCount: 2,
+      hasUv: true,
+      positions: square.positions,
+      normals: square.normals,
+      uvs: square.uvs,
+      materials: new Float32Array([0, 0, 0, 1, 1, 1]),
+    },
+    palette: [
+      { name: 'a', group: 0, colour: [1, 0, 0], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+      { name: 'b', group: 1, colour: [0, 0, 1], specular: [0.04, 0.04, 0.04], roughness: 0.5, opacity: 1 },
+    ],
+  }],
+  nodes: [{ name: 'only', matrix: null, mesh: 0, children: [] }],
+  images: new Map([
+    ['a', { bytes: baseImage, mimeType: 'image/png', wrapS: 33071, wrapT: 33071, hasAlpha: true }],
+  ]),
+  textures: new Map([
+    ['a', [{ slot: 'normal', bytes: sharedNormal, mimeType: 'image/png' }]],
+    ['b', [{ slot: 'normal', bytes: sharedNormal, mimeType: 'image/png' }]],
+  ]),
+});
+const withMaps = JSON.parse(new TextDecoder().decode(
+  new Uint8Array(textured.glb).subarray(20, 20 + new DataView(textured.glb).getUint32(12, true))));
+check('an image two materials share is stored once', withMaps.images.length === 2,
+  `${withMaps.images.length} image(s)`);
+check('a clamped sampler is not the repeating one',
+  withMaps.samplers.length === 2
+  && withMaps.samplers.some((s) => s.wrapS === 33071 && s.wrapT === 33071)
+  && withMaps.samplers.some((s) => s.wrapS === 10497 && s.wrapT === 10497),
+  JSON.stringify(withMaps.samplers));
+check('the maps land on the materials that wear them', (() => {
+  const a = withMaps.materials.find((m) => m.name === 'a');
+  const b = withMaps.materials.find((m) => m.name === 'b');
+  return a.pbrMetallicRoughness.baseColorTexture && a.normalTexture
+    && b.normalTexture && !b.pbrMetallicRoughness.baseColorTexture;
+})());
+check('a material with only a normal map is still blended by its image',
+  withMaps.materials.find((m) => m.name === 'a').alphaMode === 'BLEND');
+check('and a material with a map is written as textured',
+  textured.stats.images === 2 && textured.stats.textures >= 2,
+  `${textured.stats.images} image(s), ${textured.stats.textures} texture(s)`);
 console.log('\nedits: taking a part apart');
 /* Six triangles making three loose pieces, laid out so that the two ways of
  * splitting disagree — the shells cut it 3/2/1, the materials 3/3:

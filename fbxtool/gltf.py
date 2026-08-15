@@ -401,6 +401,16 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
         alpha = base[3] if material.get("alphaMode") == "BLEND" else 1.0
         opacity = min(alpha, 1.0 - float(through) if isinstance(through, (int, float)) else 1.0)
 
+        # What the surface gives off on its own, and how the file asked to be
+        # blended.  Neither is edited anywhere; both are lost if not read.
+        glow = [float(v) for v in material.get("emissiveFactor", (0.0, 0.0, 0.0))]
+        while len(glow) < 3:
+            glow.append(0.0)
+        strength = (extensions.get("KHR_materials_emissive_strength")
+                    or {}).get("emissiveStrength")
+        if isinstance(strength, (int, float)):
+            glow = [c * float(strength) for c in glow]
+
         props = [
             _p70("DiffuseColor", "Color", *(_d(c) for c in diffuse)),
             _p70("SpecularColor", "Color", *(_d(c) for c in specular)),
@@ -408,7 +418,12 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
             _p70("ShininessExponent", "Number", _d(2 / max(roughness * roughness, 1e-4) - 2)),
             _p70("Metallic", "Number", _d(metallic)),
             _p70("Opacity", "Number", _d(opacity)),
+            _p70("EmissiveColor", "Color", *(_d(c) for c in glow[:3])),
+            _p70("EmissiveFactor", "Number", _d(1.0)),
+            _p70("AlphaMode", "KString", _s(material.get("alphaMode") or "OPAQUE")),
         ]
+        if material.get("alphaCutoff") is not None:
+            props.append(_p70("AlphaCutoff", "Number", _d(material["alphaCutoff"])))
         name = material.get("name") or f"material{index}"
         build.objects.append(
             _node("Material", [_l(uid), _s(f"{name}\x00\x01Material"), _s("")], [
@@ -417,17 +432,26 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
                 _node("Properties70", [], props),
             ])
         )
-        # Under the extension's own name for it when the extension is what
-        # states the surface.
-        _texture_for(json_doc, (gloss or {}).get("diffuseTexture")
-                     or pbr.get("baseColorTexture"), build, buffers, uid, doc)
+        # Every map the material wears, under the FBX property name for the
+        # slot it fills — the base colour under the extension's own name for it
+        # when the extension is what states the surface.  Only the base colour
+        # is ever drawn; the rest are read so that nothing reading this tree
+        # has to pretend the file had no normal map.
+        for map_entry, property_name in (
+            ((gloss or {}).get("diffuseTexture") or pbr.get("baseColorTexture"), "DiffuseColor"),
+            (material.get("normalTexture"), "NormalMap"),
+            (material.get("occlusionTexture"), "AmbientOcclusion"),
+            (material.get("emissiveTexture"), "EmissiveColor"),
+            (pbr.get("metallicRoughnessTexture"), "MetallicRoughness"),
+        ):
+            _texture_for(json_doc, map_entry, build, buffers, uid, doc, property_name)
     return uids
 
 
 def _texture_for(json_doc: dict, entry: dict | None, build: _Builder,
                  buffers: Sequence[bytes | None], material_uid: int,
-                 doc: Document) -> None:
-    """The base colour image, wherever it lives."""
+                 doc: Document, property_name: str = "DiffuseColor") -> None:
+    """One glTF texture as the Texture and Video pair an FBX file holds."""
     if not entry:
         return
     textures = json_doc.get("textures") or []
@@ -452,12 +476,23 @@ def _texture_for(json_doc: dict, entry: dict | None, build: _Builder,
     name = image.get("name") or filename or f"image{source}"
     texture_uid = build.uid()
     video_uid = build.uid()
+    # FBX counts 0 for repeat and 1 for clamp; glTF writes the GL enums.  A
+    # sampler it leaves out repeats, which is glTF's own default, and mirrored
+    # repeat has no FBX spelling so a file that had one comes back repeating.
+    sampler_index = texture.get("sampler")
+    samplers = json_doc.get("samplers") or []
+    sampler = samplers[sampler_index] if isinstance(sampler_index, int) \
+        and 0 <= sampler_index < len(samplers) else {}
     build.objects.append(
         _node("Texture", [_l(texture_uid), _s(f"{name}\x00\x01Texture"), _s("")], [
             _node("Type", [_s("TextureVideoClip")]),
             _node("Version", [_i(202)]),
             _node("FileName", [_s(filename)]),
             _node("RelativeFilename", [_s(filename)]),
+            _node("Properties70", [], [
+                _p70("WrapModeU", "enum", _i(1 if sampler.get("wrapS") == 33071 else 0)),
+                _p70("WrapModeV", "enum", _i(1 if sampler.get("wrapT") == 33071 else 0)),
+            ]),
         ])
     )
 
@@ -473,7 +508,7 @@ def _texture_for(json_doc: dict, entry: dict | None, build: _Builder,
         video_children.append(_node("Content", [Property("R", content)]))
     build.objects.append(
         _node("Video", [_l(video_uid), _s(f"{name}\x00\x01Video"), _s("Clip")], video_children))
-    build.connect("OP", texture_uid, material_uid, "DiffuseColor")
+    build.connect("OP", texture_uid, material_uid, property_name)
     build.connect("OO", video_uid, texture_uid)
 
 

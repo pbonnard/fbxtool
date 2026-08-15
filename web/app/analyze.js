@@ -251,18 +251,53 @@ const FbxAnalyze = (function () {
   }
 
   /**
-   * Does a connection's property name mean "this is the base colour"?
+   * Which map a connection's property name drives.
    *
    * Standard FBX writes `DiffuseColor`; exporters write their own renderer's
    * name for the same thing, such as `3dsMax|CoronaMtlPb|texmapDiffuse` or
-   * `Maya|baseColor`, so the vendor prefix is dropped before matching.
+   * `Maya|baseColor`, so the vendor prefix is dropped before matching. The
+   * names are glTF's, because that is what an export has to fill in — only the
+   * base colour is drawn here, but the rest are carried across rather than
+   * dropped on the floor.
+   *
+   * `Bump` is read as a normal map, which is an assumption rather than a fact:
+   * the slot holds a height map in principle and a tangent-space normal map in
+   * practice, and every exporter that writes `texmapBump` on a car has a
+   * normal map behind it. A property this does not name drives nothing an
+   * export can place — a glossiness map has no glTF slot of its own — and is
+   * left where it was.
    */
-  const BASE_COLOUR = /^(diffuse|diffusecolor|basecolor|base_color|texmapdiffuse|color)$/i;
+  const TEXTURE_SLOTS = [
+    ['baseColor', /^(diffuse|diffusecolor|basecolor|base_color|texmapdiffuse|color)$/i],
+    ['normal', /^(normal|normalmap|normal_map|normalcamera|bump|bumpmap|texmapbump|texmapnormal)$/i],
+    ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum)$/i],
+    ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
+    ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
+  ];
 
   const plainName = (name) => String(name).split('|').pop().trim().toLowerCase();
 
+  /** The glTF map a property drives, or null for one that drives none. */
+  function textureSlot(prop) {
+    if (typeof prop !== 'string' || !prop) return null;
+    const plain = plainName(prop);
+    const found = TEXTURE_SLOTS.find(([, pattern]) => pattern.test(plain));
+    return found ? found[0] : null;
+  }
+
   function drivesBaseColour(prop) {
-    return typeof prop === 'string' && BASE_COLOUR.test(plainName(prop));
+    return textureSlot(prop) === 'baseColor';
+  }
+
+  /**
+   * A texture's wrap modes as glTF numbers them.
+   *
+   * FBX writes 0 for repeat and 1 for clamp; glTF writes the GL enums. Mirrored
+   * repeat has no FBX spelling, so a file that had one comes back repeating.
+   */
+  function wrapModes(props) {
+    const gl = (mode) => (mode === 1 ? 33071 : 10497);
+    return { wrapS: gl(props.WrapModeU), wrapT: gl(props.WrapModeV) };
   }
 
   /**
@@ -392,14 +427,27 @@ const FbxAnalyze = (function () {
       opacity = 1 - number(source.TransparencyFactor, 1 - number(source.Opacity, 1));
     }
 
+    // What the surface gives off on its own. Nothing here edits it, but a
+    // material carrying an emissive map and no colour beside it is a map that
+    // can never light anything, so the two travel together.
+    const emissive = scale(vector(source.EmissiveColor, [0, 0, 0]),
+      number(source.EmissiveFactor, 1));
+
     return {
       colour: albedo.map((v) => Math.max(0, v)),
       base: base.map((v) => Math.max(0, v)),
       specular: specularRgb.map((v) => clamp(v, 0, 1)),
+      emissive: emissive.map((v) => clamp(v, 0, 1)),
       roughness,
       opacity: clamp(opacity, 0, 1),
       metallic: metalness !== null ? clamp(metalness, 0, 1)
         : clamp(number(source.Metallic, 0), 0, 1),
+      // How the file itself asked to be blended, where it said so at all — an
+      // opacity factor is not the only place transparency lives, and a badge
+      // keeps its in the alpha channel of its own texture.
+      alphaMode: typeof source.AlphaMode === 'string' && source.AlphaMode
+        ? source.AlphaMode : null,
+      alphaCutoff: typeof source.AlphaCutoff === 'number' ? source.AlphaCutoff : null,
     };
   }
 
@@ -699,6 +747,7 @@ const FbxAnalyze = (function () {
     analyze, describeVersion, splitObjectName, properties, arrayLength, scalarValues,
     child, childAll, pathValue, findGeometry, findAllGeometry, FBX_TIME_UNIT,
     propertyTemplates, resolvedProperties, materialAppearance, drivesBaseColour,
+    textureSlot, wrapModes,
   };
 })();
 

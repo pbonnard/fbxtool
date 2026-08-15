@@ -136,7 +136,19 @@ const FbxPalette = (function () {
       entry.name = set && typeof set.name === 'string' && set.name ? set.name : origin;
       entry.roughness = set && typeof set.roughness === 'number'
         ? set.roughness : file.roughness;
-      entry.opacity = set && typeof set.opacity === 'number' ? set.opacity : file.opacity;
+      const opacity = set && typeof set.opacity === 'number' ? set.opacity : null;
+      entry.opacity = opacity === null ? file.opacity : opacity;
+
+      /* How the file asked to be blended stands until the opacity is actually
+       * edited — an opacity factor is not the only place transparency lives,
+       * and a badge whose texture carries its own is drawn as a solid
+       * rectangle the moment the factor alone is asked. Setting the opacity by
+       * hand is a decision about transparency, and then the factor is the
+       * answer. */
+      entry.alphaMode = opacity === null ? (file.alphaMode || null) : null;
+      entry.alphaCutoff = file.alphaCutoff === undefined ? null : file.alphaCutoff;
+      // Nothing here edits what a surface gives off, so it is the file's.
+      entry.emissive = file.emissive ? file.emissive.slice() : null;
 
       /* Colour and metalness are one setting in two halves — each is part of
        * how the other splits — so neither is recomputed until one of them is

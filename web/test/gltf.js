@@ -226,6 +226,8 @@ async function main() {
         colour: entry.colour,
         opacity: entry.opacity,
         metallic: entry.metallic,
+        // What the file itself said about blending, where it said anything.
+        alphaMode: entry.alphaMode || null,
       })),
     }));
 
@@ -331,12 +333,19 @@ async function main() {
       && (json.materials || []).length <= Math.max(source.materials, 1),
       `${(json.materials || []).length} materials, ${source.materials} in the scene`);
 
-    check('the textures came too', (json.images || []).length === source.textures,
+    // A base colour texture per material shown, and whatever else those
+    // materials wore: the export carries the maps it does not edit rather than
+    // dropping them, so there is never less here than the viewer drew.
+    check('the textures came too', (json.images || []).length >= source.textures,
       `${(json.images || []).length} image(s) exported, ${source.textures} on screen`);
     const readable = (json.images || []).every((image) =>
       image.mimeType === 'image/png' || image.mimeType === 'image/jpeg');
     check('in a format glTF allows', readable,
       [...new Set((json.images || []).map((i) => i.mimeType))].join(', ') || 'none');
+    const slotted = (json.textures || []).every((texture) =>
+      json.images[texture.source] && json.samplers[texture.sampler]);
+    check('every texture names an image and a sampler that are there', slotted,
+      `${(json.textures || []).length} texture(s), ${(json.samplers || []).length} sampler(s)`);
 
     // Materials keep their colour, their transparency and their metalness.
     const wanted = new Map(source.palette.map((m) => [m.name, m]));
@@ -346,7 +355,13 @@ async function main() {
       const factor = m.pbrMetallicRoughness.baseColorFactor;
       const opaque = (entry.opacity === undefined ? 1 : entry.opacity) >= 0.996;
       if (Math.abs(factor[3] - (entry.opacity === undefined ? 1 : entry.opacity)) > 1e-4) return true;
-      if ((m.alphaMode === 'BLEND') === opaque) return true;
+      // Transparency can never be lost; it can only be declared where the file
+      // declared it, or where the base colour image carries its own alpha.
+      const blended = m.alphaMode !== 'OPAQUE';
+      const declared = entry.alphaMode === 'BLEND' || entry.alphaMode === 'MASK';
+      const textured = !!(m.pbrMetallicRoughness.baseColorTexture);
+      if (!opaque && !blended) return true;
+      if (blended && opaque && !declared && !textured) return true;
       const metallic = entry.metallic || 0;
       if (metallic < 0.999
         && [0, 1, 2].some((k) => Math.abs(factor[k] - entry.colour[k] / (1 - metallic)) > 1e-3
@@ -355,6 +370,28 @@ async function main() {
     });
     check('materials keep their colour and their transparency', wrong.length === 0,
       wrong.slice(0, 3).map((m) => m.name).join(', ') || 'all match');
+
+    // A dielectric reflects 4% and no more. Above that it renders as a mirror
+    // and cancels its own albedo in indirect light, so painting it does
+    // nothing — which is the one thing a car exporter must not do.
+    const mirrors = (json.materials || []).filter((m) => {
+      const factor = (m.extensions || {}).KHR_materials_specular;
+      return factor && factor.specularColorFactor
+        && factor.specularColorFactor.some((c) => c > 1.0001);
+    });
+    check('no dielectric reflects more than four per cent', mirrors.length === 0,
+      mirrors.slice(0, 3).map((m) => m.name).join(', ') || 'all within');
+
+    // A single geometry has no scene to compare against, so there is nothing
+    // to report; a whole scene always has one.
+    if (stats.dropped) {
+      const written = new Set((json.materials || []).map((m) => m.name));
+      check('the export says what it left behind',
+        Array.isArray(stats.dropped.materials) && Array.isArray(stats.dropped.nodes)
+        && stats.dropped.materials.every((name) => !written.has(name)),
+        `${stats.dropped.materials.length} material(s), ${stats.dropped.nodes.length} node(s)`
+        + ` dropped: ${stats.dropped.materials.slice(0, 3).join(', ') || 'none'}`);
+    }
 
     if (validator) {
       const report = await validator.validateBytes(bytes);
@@ -413,6 +450,17 @@ async function main() {
           (cut.json.materials || []).some((m) => m.name === 'Renamed for export'),
           (cut.json.materials || []).map((m) => m.name).slice(0, 3).join(', '));
       }
+      // Taking a part out is a decision worth making here rather than at
+      // runtime; making it in silence is not, because the names are the keys
+      // everything downstream finds a body panel and a wheel by.
+      const editedStats = await page.evaluate(() => window.fbxtool.lastExport);
+      if (editedStats.dropped) {
+        check('an edited export names what the edit removed',
+          editedStats.dropped.nodes.length > 0
+          && (!left.renamed || editedStats.dropped.renamed.length > 0),
+          `${editedStats.dropped.nodes.length} node(s), `
+          + `${editedStats.dropped.renamed.length} rename(s)`);
+      }
       if (validator) {
         const report = await validator.validateBytes(editedBytes);
         check('and what comes out is still a valid glTF',
@@ -428,7 +476,12 @@ async function main() {
 
     console.log(`       ${(stats.bytes / 1048576).toFixed(1)} MiB · `
       + `${stats.meshes} mesh(es) in ${stats.nodes} node(s) · `
-      + `${stats.primitives} primitives · ${stats.images} image(s)\n`);
+      + `${stats.primitives} primitives · ${stats.images} image(s) in `
+      + `${stats.textures || 0} slot(s)`
+      + (stats.dropped
+        ? ` · dropped ${stats.dropped.materials.length} material(s), `
+          + `${stats.dropped.nodes.length} node(s)` : '')
+      + '\n');
   }
 
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');

@@ -301,6 +301,63 @@ const FbxGltfIn = (function () {
     let nextUid = 1000;
     const uid = () => ++nextUid;
 
+    /** One glTF texture as the Texture and Video pair an FBX file holds. */
+    function emitTexture(entry, property, materialUid) {
+      const textureIndex = entry && entry.index;
+      const texture = textureIndex !== undefined && json.textures
+        ? json.textures[textureIndex] : null;
+      if (!texture) return;
+      // A texture names its image directly, or through the extension that
+      // says the image is a KTX2 rather than a PNG.
+      const source = texture.source !== undefined ? texture.source
+        : ((texture.extensions || {}).KHR_texture_basisu || {}).source;
+      const image = source !== undefined && json.images ? json.images[source] : null;
+      if (!image) return;
+
+      const textureUid = uid();
+      const videoUid = uid();
+      // An image spelled out in the document itself has no file name.
+      const filename = image.uri && !/^data:/i.test(image.uri) ? image.uri : '';
+      const name = image.name || filename || `image${source}`;
+      // FBX counts 0 for repeat and 1 for clamp; glTF writes the GL enums.
+      // A sampler it leaves out repeats, which is glTF's own default.
+      const sampler = (json.samplers || [])[texture.sampler];
+      const wrap = (mode) => I(mode === 33071 ? 1 : 0);
+      objects.push(node('Texture', [L(textureUid), S(`${name}${CLASS_SEP}Texture`), S('')], [
+        node('Type', [S('TextureVideoClip')]),
+        node('Version', [I(202)]),
+        node('FileName', [S(filename)]),
+        node('RelativeFilename', [S(filename)]),
+        node('Properties70', [], [
+          p70('WrapModeU', 'enum', wrap(sampler && sampler.wrapS)),
+          p70('WrapModeV', 'enum', wrap(sampler && sampler.wrapT)),
+        ]),
+      ]));
+      const video = [
+        node('Type', [S('Clip')]),
+        node('FileName', [S(filename)]),
+        node('RelativeFilename', [S(filename)]),
+      ];
+      // An image inside the container travels with it, as embedded content.
+      let content = null;
+      if (image.bufferView !== undefined && json.bufferViews) {
+        const view = json.bufferViews[image.bufferView];
+        const bytesFor = buffers[view.buffer || 0];
+        if (bytesFor) {
+          content = bytesFor.subarray(view.byteOffset || 0,
+            (view.byteOffset || 0) + view.byteLength);
+        }
+      } else if (image.uri && /^data:/i.test(image.uri)) {
+        content = fromDataUri(image.uri);
+      }
+      if (content && content.length) {
+        video.push(node('Content', [{ code: 'R', typeName: 'raw', value: content }]));
+      }
+      objects.push(node('Video', [L(videoUid), S(`${name}${CLASS_SEP}Video`), S('Clip')], video));
+      connections.push(node('C', [S('OP'), L(textureUid), L(materialUid), S(property)]));
+      connections.push(node('C', [S('OO'), L(videoUid), L(textureUid)]));
+    }
+
     /* ---- materials */
     const materialUids = (json.materials || []).map((material, index) => {
       const id = uid();
@@ -349,6 +406,13 @@ const FbxGltfIn = (function () {
       const opacity = Math.min(alpha,
         typeof transmission === 'number' ? 1 - transmission : 1);
 
+      // What the surface gives off on its own, and how the file asked to be
+      // blended. Neither is edited here; both are lost if they are not read.
+      const glow = material.emissiveFactor || [0, 0, 0];
+      const glowStrength = (extensions.KHR_materials_emissive_strength || {}).emissiveStrength;
+      const emissive = [0, 1, 2].map((k) =>
+        (glow[k] || 0) * (typeof glowStrength === 'number' ? glowStrength : 1));
+
       const props = [
         p70('DiffuseColor', 'Color', ...diffuse.map(D)),
         p70('SpecularColor', 'Color', ...specular.map(D)),
@@ -357,7 +421,13 @@ const FbxGltfIn = (function () {
           D(2 / Math.max(roughness * roughness, 1e-4) - 2)),
         p70('Metallic', 'Number', D(metallic)),
         p70('Opacity', 'Number', D(opacity)),
+        p70('EmissiveColor', 'Color', ...emissive.map(D)),
+        p70('EmissiveFactor', 'Number', D(1)),
+        p70('AlphaMode', 'KString', S(material.alphaMode || 'OPAQUE')),
       ];
+      if (material.alphaCutoff !== undefined) {
+        props.push(p70('AlphaCutoff', 'Number', D(material.alphaCutoff)));
+      }
       objects.push(node('Material',
         [L(id), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),
@@ -365,54 +435,19 @@ const FbxGltfIn = (function () {
           node('Properties70', [], props),
         ]));
 
-      // The base colour image, wherever it lives — under the extension's own
-      // name for it when the extension is what states the surface.
-      const baseColour = (sg && sg.diffuseTexture) || pbr.baseColorTexture;
-      const textureIndex = baseColour && baseColour.index;
-      const texture = textureIndex !== undefined && json.textures
-        ? json.textures[textureIndex] : null;
-      // A texture names its image directly, or through the extension that
-      // says the image is a KTX2 rather than a PNG.
-      const source = texture
-        ? (texture.source !== undefined ? texture.source
-          : ((texture.extensions || {}).KHR_texture_basisu || {}).source)
-        : undefined;
-      const image = source !== undefined && json.images ? json.images[source] : null;
-      if (image) {
-        const textureUid = uid();
-        const videoUid = uid();
-        // An image spelled out in the document itself has no file name.
-        const filename = image.uri && !/^data:/i.test(image.uri) ? image.uri : '';
-        const name = image.name || filename || `image${source}`;
-        objects.push(node('Texture', [L(textureUid), S(`${name}${CLASS_SEP}Texture`), S('')], [
-          node('Type', [S('TextureVideoClip')]),
-          node('Version', [I(202)]),
-          node('FileName', [S(filename)]),
-          node('RelativeFilename', [S(filename)]),
-        ]));
-        const video = [
-          node('Type', [S('Clip')]),
-          node('FileName', [S(filename)]),
-          node('RelativeFilename', [S(filename)]),
-        ];
-        // An image inside the container travels with it, as embedded content.
-        let content = null;
-        if (image.bufferView !== undefined && json.bufferViews) {
-          const view = json.bufferViews[image.bufferView];
-          const bytesFor = buffers[view.buffer || 0];
-          if (bytesFor) {
-            content = bytesFor.subarray(view.byteOffset || 0,
-              (view.byteOffset || 0) + view.byteLength);
-          }
-        } else if (image.uri && /^data:/i.test(image.uri)) {
-          content = fromDataUri(image.uri);
-        }
-        if (content && content.length) {
-          video.push(node('Content', [{ code: 'R', typeName: 'raw', value: content }]));
-        }
-        objects.push(node('Video', [L(videoUid), S(`${name}${CLASS_SEP}Video`), S('Clip')], video));
-        connections.push(node('C', [S('OP'), L(textureUid), L(id), S('DiffuseColor')]));
-        connections.push(node('C', [S('OO'), L(videoUid), L(textureUid)]));
+      /* Every map this material wears, under the FBX property name for the
+       * slot it fills. Only the base colour is drawn — the rest are read so
+       * that an export can put them back where it found them, which is the
+       * difference between re-exporting a car and stripping it. */
+      const maps = [
+        [(sg && sg.diffuseTexture) || pbr.baseColorTexture, 'DiffuseColor'],
+        [material.normalTexture, 'NormalMap'],
+        [material.occlusionTexture, 'AmbientOcclusion'],
+        [material.emissiveTexture, 'EmissiveColor'],
+        [pbr.metallicRoughnessTexture, 'MetallicRoughness'],
+      ];
+      for (const [entry, property] of maps) {
+        emitTexture(entry, property, id);
       }
       return id;
     });

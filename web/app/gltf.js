@@ -110,8 +110,15 @@ const FbxGltf = (function () {
     return [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1];
   }
 
-  /** One glTF material from one palette entry. */
-  function material(entry, textureIndex) {
+  /**
+   * One glTF material from one palette entry.
+   *
+   * `slots` names the texture written into each map, by index, and says
+   * whether the base colour image carries an alpha channel. A bare number is
+   * taken as the base colour index, which is what this used to take.
+   */
+  function material(entry, slots) {
+    const at = typeof slots === 'number' ? { baseColor: slots } : (slots || {});
     const metallic = typeof entry.metallic === 'number'
       ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
     const colour = entry.colour || [0.8, 0.8, 0.8];
@@ -129,23 +136,72 @@ const FbxGltf = (function () {
         metallicFactor: metallic,
         roughnessFactor: typeof entry.roughness === 'number' ? entry.roughness : 0.5,
       },
-      alphaMode: opacity < OPAQUE ? 'BLEND' : 'OPAQUE',
+      alphaMode: alphaModeOf(entry, opacity, at),
     };
-    if (textureIndex >= 0) {
-      out.pbrMetallicRoughness.baseColorTexture = { index: textureIndex };
+    if (out.alphaMode === 'MASK' && typeof entry.alphaCutoff === 'number') {
+      out.alphaCutoff = Math.min(Math.max(entry.alphaCutoff, 0), 1);
+    }
+    if (at.baseColor >= 0) {
+      out.pbrMetallicRoughness.baseColorTexture = { index: at.baseColor };
+    }
+    // The maps this tool does not edit, written back exactly as they came in.
+    // Nothing here is decoded or shown: an index and its image are the whole
+    // of it, and a normal map that survives the round trip is the difference
+    // between a shut line and a stripe painted on the panel.
+    if (at.metallicRoughness >= 0) {
+      out.pbrMetallicRoughness.metallicRoughnessTexture = { index: at.metallicRoughness };
+    }
+    if (at.normal >= 0) out.normalTexture = { index: at.normal };
+    if (at.occlusion >= 0) out.occlusionTexture = { index: at.occlusion };
+    // An emissive image multiplies the factor, which glTF defaults to black —
+    // so passing the map through without the colour beside it writes a map
+    // that can never light anything.
+    const emissive = entry.emissive || (at.emissive >= 0 ? [1, 1, 1] : null);
+    if (emissive && emissive.some((c) => c > 0)) {
+      out.emissiveFactor = emissive.map((c) => Math.min(Math.max(c, 0), 1));
+      if (at.emissive >= 0) out.emissiveTexture = { index: at.emissive };
     }
     // glTF fixes a dielectric's reflectance at 4% unless this extension says
     // otherwise. The extension defines it as 0.04 × specularColorFactor, so
     // that is what the factor is, colour and all — writing the strength
     // instead would lose a tinted reflectance and read low anywhere else.
-    if (metallic < 0.5 && specular.some((c) => Math.abs(c - 0.04) > 0.005)) {
-      out.extensions = {
-        KHR_materials_specular: {
-          specularColorFactor: specular.map((c) => c / 0.04),
-        },
-      };
+    //
+    // A factor above 1 raises the reflectance, and that is never what a source
+    // file meant: a Phong highlight colour is not a Fresnel term, and taken
+    // literally it makes a mirror of a painted panel — one whose albedo is
+    // then cancelled in indirect light, so repainting it does nothing. The
+    // factor is scaled down to its brightest channel, which keeps a dull
+    // dielectric's lower reflectance and its hue while capping every material
+    // at the 4% a dielectric actually has.
+    if (metallic < 0.5) {
+      const factor = specular.map((c) => c / 0.04);
+      const peak = Math.max(factor[0], factor[1], factor[2]);
+      if (peak > 1) for (let i = 0; i < 3; i++) factor[i] /= peak;
+      if (factor.some((c) => c < 0.999)) {
+        out.extensions = { KHR_materials_specular: { specularColorFactor: factor } };
+      }
     }
     return out;
+  }
+
+  /**
+   * Whether a material is drawn blended, and how.
+   *
+   * An opacity factor is not the only place transparency lives: a badge is a
+   * decal whose texture is mostly transparent and whose factor is 1, so asking
+   * the factor alone turns it into a solid rectangle stuck to the car. What
+   * the file declared stands, whichever way it declared it, unless the opacity
+   * has actually been edited here. A file that declared nothing at all — an
+   * FBX, an .obj, a .blend, none of which have the field — is read from its
+   * base colour image instead, since an alpha channel there is the only place
+   * its transparency could be.
+   */
+  function alphaModeOf(entry, opacity, at) {
+    if (opacity < OPAQUE) return 'BLEND';
+    const stated = entry.alphaMode;
+    if (stated === 'BLEND' || stated === 'MASK' || stated === 'OPAQUE') return stated;
+    if (at.baseColorHasAlpha) return 'BLEND';
+    return 'OPAQUE';
   }
 
   /** Whether a matrix is the identity, and so not worth writing. */
@@ -161,13 +217,16 @@ const FbxGltf = (function () {
    *
    * `meshes` are in their own local space; `nodes` is a tree that places them,
    * each naming a mesh by index or none. `images` maps a material name to
-   * {bytes, mimeType} for its base colour texture.
+   * {bytes, mimeType, wrapS, wrapT, hasAlpha} for its base colour texture, and
+   * `textures` maps a material name to the other maps it wears, each an
+   * {slot, bytes, mimeType, wrapS, wrapT} passed through untouched.
    */
   function build(scene) {
     const { name = 'scene', upAxis = 'y', unitScale = 1 } = scene;
     const meshes = scene.meshes || [];
     const roots = scene.nodes || [];
     const images = scene.images instanceof Map ? scene.images : new Map();
+    const extraTextures = scene.textures instanceof Map ? scene.textures : new Map();
     const drawn = meshes.reduce((sum, m) => sum + (m.mesh ? m.mesh.triangleCount : 0), 0);
     if (!drawn) throw new Error('there is no geometry to export');
 
@@ -211,36 +270,82 @@ const FbxGltf = (function () {
      * texture coordinates: glTF will not have a primitive name a texture it
      * has no coordinates for, and the same material can be used both ways. */
     const materialIndex = new Map();
+    const slotIndex = new Map();
+    const samplerIndex = new Map();
+    const imageIndex = new Map();
     const textureIndex = new Map();
 
-    const textureFor = (entry) => {
-      if (textureIndex.has(entry.name)) return textureIndex.get(entry.name);
-      const image = images.get(entry.name);
-      if (!image) {
-        textureIndex.set(entry.name, -1);
-        return -1;
-      }
-      const imageView = store(image.bytes);
-      json.images = json.images || [];
-      json.images.push({ name: entry.name, bufferView: imageView, mimeType: image.mimeType });
-      json.samplers = json.samplers || [{ wrapS: 10497, wrapT: 10497 }];
-      json.textures = json.textures || [];
-      json.textures.push({ sampler: 0, source: json.images.length - 1 });
-      const index = json.textures.length - 1;
-      textureIndex.set(entry.name, index);
+    // A sampler per pair of wrap modes rather than one shared repeat: an
+    // imported sampler carries them, and a tiling tread that comes back
+    // clamped is a visible change on a wheel.
+    const samplerFor = (wrapS, wrapT) => {
+      const s = wrapS || 10497;
+      const t = wrapT || 10497;
+      const key = `${s}|${t}`;
+      if (samplerIndex.has(key)) return samplerIndex.get(key);
+      json.samplers = json.samplers || [];
+      json.samplers.push({ wrapS: s, wrapT: t });
+      const index = json.samplers.length - 1;
+      samplerIndex.set(key, index);
       return index;
     };
+
+    /* One texture from one image, both stored once however many materials or
+     * maps point at them: a car whose panels share a normal map should not
+     * carry it twenty times. Two images are the same image when they are the
+     * same bytes — the caller reads each source file once, so that holds. */
+    const textureFor = (label, image) => {
+      if (!image || !image.bytes || !image.bytes.length) return -1;
+      let source = imageIndex.get(image.bytes);
+      if (source === undefined) {
+        const imageView = store(image.bytes);
+        json.images = json.images || [];
+        json.images.push({ name: label, bufferView: imageView, mimeType: image.mimeType });
+        source = json.images.length - 1;
+        imageIndex.set(image.bytes, source);
+      }
+      const sampler = samplerFor(image.wrapS, image.wrapT);
+      const key = `${source}|${sampler}`;
+      if (textureIndex.has(key)) return textureIndex.get(key);
+      json.textures = json.textures || [];
+      json.textures.push({ sampler, source });
+      const index = json.textures.length - 1;
+      textureIndex.set(key, index);
+      return index;
+    };
+
+    const SLOTS = new Set(['normal', 'occlusion', 'emissive', 'metallicRoughness']);
+
+    /** Every map a material wears, written and named by index. */
+    const slotsFor = (entry) => {
+      if (slotIndex.has(entry.name)) return slotIndex.get(entry.name);
+      const at = {};
+      const base = images.get(entry.name);
+      if (base) {
+        at.baseColor = textureFor(entry.name, base);
+        at.baseColorHasAlpha = !!base.hasAlpha;
+      }
+      for (const map of extraTextures.get(entry.name) || []) {
+        if (!SLOTS.has(map.slot)) continue;
+        at[map.slot] = textureFor(`${entry.name} ${map.slot}`, map);
+      }
+      slotIndex.set(entry.name, at);
+      return at;
+    };
+
+    const wearsTextures = (entry) => images.has(entry.name)
+      || (extraTextures.get(entry.name) || []).length > 0;
 
     const materialFor = (entry, withUv) => {
       // The same material twice only when it is used both with and without
       // coordinates to sample its texture by — glTF will not have a primitive
       // name a texture it cannot sample. With no texture there is nothing to
       // tell the two apart, so there is only ever one.
-      const textured = withUv && images.has(entry.name);
+      const textured = withUv && wearsTextures(entry);
       const key = `${entry.name}|${textured ? 'uv' : 'flat'}`;
       if (materialIndex.has(key)) return materialIndex.get(key);
       const index = json.materials.length;
-      json.materials.push(material(entry, textured ? textureFor(entry) : -1));
+      json.materials.push(material(entry, textured ? slotsFor(entry) : null));
       materialIndex.set(key, index);
       return index;
     };
@@ -338,8 +443,11 @@ const FbxGltf = (function () {
     if (children.length) root.children = children;
 
     if (!json.materials.length) delete json.materials;
-    const usesSpecular = (json.materials || []).some((m) => m.extensions);
-    if (usesSpecular) json.extensionsUsed = ['KHR_materials_specular'];
+    const used = new Set();
+    for (const m of json.materials || []) {
+      for (const key of Object.keys(m.extensions || {})) used.add(key);
+    }
+    if (used.size) json.extensionsUsed = [...used];
     json.buffers.push({ byteLength: offset });
 
     // ---- container: a JSON chunk and a binary chunk, both 4-byte aligned.
@@ -392,10 +500,16 @@ const FbxGltf = (function () {
         nodes: json.nodes.length,
         materials: (json.materials || []).length,
         images: (json.images || []).length,
+        textures: (json.textures || []).length,
         triangles: placed,
         stored: drawn,
         vertices,
         bytes: total,
+        // What actually came out, so the caller can say what did not. Names
+        // are how the game finds a body panel and a wheel, and a name that
+        // goes missing here goes missing there.
+        materialNames: (json.materials || []).map((m) => m.name),
+        nodeNames: json.nodes.slice(1).map((n) => n.name).filter(Boolean),
       },
     };
   }

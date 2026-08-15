@@ -130,6 +130,15 @@ beyond that is read too: `KHR_materials_specular` for a tinted reflectance,
 `KHR_materials_transmission` for glass written over an opaque material, and
 `KHR_materials_pbrSpecularGlossiness` — the older exporters' way of describing
 a surface, where the metallic-roughness block beside it is only a stand-in.
+What a material gives off and how it asked to be blended are read as
+`EmissiveColor`, `AlphaMode` and `AlphaCutoff`: nothing here edits either, but
+a material whose declared blending is not read is a badge that comes back a
+solid rectangle. Every map a material wears becomes its own `Texture` record,
+under the FBX property name for the slot it fills — `DiffuseColor`,
+`NormalMap`, `AmbientOcclusion`, `EmissiveColor`, `MetallicRoughness` — with
+the sampler's wrap modes beside it. Only the base colour is ever drawn; the
+rest are read so that nothing downstream has to pretend the file had no normal
+map.
 
 Attributes may be interleaved behind a `byteStride`, indices may be 8, 16 or
 32 bits, and a *sparse* accessor may overwrite some of what a buffer view
@@ -689,19 +698,53 @@ What is left is where the formats disagree:
   data — the geometry is written exactly as the file holds it.
 
 Materials map onto metallic-roughness directly: base colour and opacity,
-roughness, metalness, `BLEND` when the material is see-through, and
-`KHR_materials_specular` when a dielectric's reflectance is not the 4% glTF
-assumes. A material is written once however many meshes use it.
+roughness, metalness, what the surface gives off, and `KHR_materials_specular`
+when a dielectric's reflectance is not the 4% glTF assumes. A material is
+written once however many meshes use it.
 
-Textures come too. Bytes that are already PNG or JPEG are embedded untouched;
-anything else is drawn once and encoded as a PNG, which is how a texture that
-arrived as KTX2 leaves as a picture — the Pantera's nineteen Basis textures
-export as nineteen PNGs.
+That extension can only ever *lower* a reflectance. It defines F0 as
+`0.04 × specularColorFactor`, so a factor above 1 is a raised one — and a
+dielectric that reflects more than 4% renders as a mirror and cancels its own
+albedo in indirect light, which means a colour written to it does nothing at
+all. A Phong specular colour is not a Fresnel term, and OBJ material libraries
+habitually write `Ks 0.9 0.9 0.9`, so raised factors are what a naive
+conversion produces rather than what any file meant. The whole factor is
+scaled down to its brightest channel, which caps the reflectance and keeps the
+hue: cloth and rubber still come out duller than 4%, and nothing comes out
+above it.
+
+How a material is blended is not decided by the opacity factor alone, which is
+the wrong question to ask — a badge is a decal whose transparency lives in its
+texture's alpha channel and whose factor is 1, and drawn opaque it is a solid
+rectangle stuck to the car. What the file declared stands, whichever way it
+declared it, unless the opacity is actually edited here; a file with no such
+field — an FBX, an `.obj`, a `.blend` — is read from its base colour image
+instead, since an alpha channel there is the only place its transparency could
+be.
+
+Textures come too, and not only the base colour. The maps this tool neither
+shows nor edits — normal, metallic-roughness, occlusion, emissive — are
+carried through as opaque payload and written back where they were found:
+nothing decodes them, and an untouched index beside its image bytes is the
+whole of it. On a body panel that is the difference between a shut line and a
+stripe painted on. Samplers travel with them, so a tiling tread does not come
+back clamped, and an image several materials share is stored once. Bytes that
+are already PNG or JPEG are embedded untouched; anything else is drawn once
+and encoded as a PNG, which is how a texture that arrived as KTX2 leaves as a
+picture — the Pantera's nineteen Basis textures export as nineteen PNGs.
+
+An export says what it left behind. Materials that cover no triangles are
+dropped, and so is any part taken out here — which is a decision worth making
+here rather than at runtime, but not one worth making in silence. So the
+export diffs itself against the file it came from and prints what went:
+*n* materials removed, by name, *n* nodes removed, *n* renamed. Removing a
+number plate then reads as four expected names rather than as nothing at all.
+Names are the keys everything downstream finds a body panel or a wheel by, and
+a merge nobody noticed is a car that can no longer be painted.
 
 What still does not survive: animation, skins and morph targets; cameras and
-lights; tangents, vertex colours and second UV sets; and every material map but
-the base colour. The geometric offset a mesh carries is baked into its
-vertices, since glTF has no such thing.
+lights; tangents, vertex colours and second UV sets. The geometric offset a
+mesh carries is baked into its vertices, since glTF has no such thing.
 
 The export is checked against the **Khronos glTF-Validator**
 (`npm i -g gltf-validator`) on every sample, alongside checks that the model
