@@ -37,6 +37,7 @@ const FbxMax = (function () {
   const TRI_MAP_VERTS = 0x2394;
   const TRI_MAP_FACES = 0x2396;
   const NAME = 0x0962;
+  const PARENT = 0x0960;
   const OFFSET_POS = 0x096a;
   const OFFSET_ROT = 0x096b;
   const OFFSET_SCALE = 0x096c;
@@ -51,7 +52,12 @@ const FbxMax = (function () {
   const MTL_BASE = 0x5431;
   const MTL_PLUGIN_BASE = 0x0fa0;   // the same block, where a plugin keeps it
   const MTL_NAME = 0x4001;
-  const PARAM = 0x100e;
+  // One parameter of a ParamBlock2, under either of the two ids the block is
+  // written with. Which one a file uses is the writer's own business and not
+  // the parameter's: the payload behind both is the same `uint16 id; uint16
+  // type;` record, and a 3ds Max 2012 scene whose materials all come out grey
+  // is one whose every parameter sits under 0x000e.
+  const PARAMS = [0x000e, 0x100e];
   const ASSET_REF = 0x0003;
   const MTL_CLASS = 0xc00;
   // A parameter's type, of the list the SDK publishes. Only these two are
@@ -340,7 +346,14 @@ const FbxMax = (function () {
     return out;
   }
 
-  /** Every file the scene refers to: kind, name, and where it lived. */
+  /**
+   * Every file the scene refers to: kind, name, and where it lived.
+   *
+   * How many strings a record holds is the table's own version: the newer one
+   * writes the kind, the file's name and the path it lived at, the older one
+   * the kind and the path alone. Both are read, since a scene saved by 3ds Max
+   * 2012 keeps the older table and otherwise comes out with no textures at all.
+   */
   function readAssets(bytes) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const out = [];
@@ -354,18 +367,22 @@ const FbxMax = (function () {
         strings.push(text(view, bytes, at + 4, at + 4 + count * 2));
         at += 4 + count * 2 + 2;
       }
-      if (strings.length >= 3) {
+      if (strings.length >= 2) {
+        const path = strings[strings.length - 1];
         // The identifier is the sixteen bytes in front of the record, and it
-        // is how a material's parameter block names this file.
+        // is how a material's parameter block names this file. Where the
+        // record does not name the file apart from its path, the name is the
+        // last step of that path.
         out.push({
           kind: strings[0],
-          name: strings[1],
-          path: strings[2],
+          name: strings.length >= 3 ? strings[1]
+            : path.replace(/\\/g, '/').split('/').pop(),
+          path,
           id: Array.from(bytes.subarray(start, start + 16)).join(','),
         });
         start = at;
         at += 16;
-      } else if (!strings.length) break;
+      } else break;
     }
     return out;
   }
@@ -446,17 +463,29 @@ const FbxMax = (function () {
       let material = 0;
       let smoothing = 0;
       if (flags & 0x01) {
-        // One word, two things: the material id in the low half and the
-        // smoothing groups in the high. The groups say which faces share a
-        // smooth normal and, by their absence, where an edge is hard —
-        // without them a mesh that stores no normals of its own can only be
-        // shaded flat, and every crease on a car body rounds away.
-        const word = view.getUint32(at, true);
-        material = word & 0xffff;
-        smoothing = word >>> 16;
+        // The whole word is the smoothing groups, all thirty-two of them. The
+        // groups say which faces share a smooth normal and, by their absence,
+        // where an edge is hard — without them a mesh that stores no normals
+        // of its own can only be shaded flat, and every crease on a car body
+        // rounds away.
+        smoothing = view.getUint32(at, true);
         at += 4;
       }
-      if (flags & 0x08) at += 2;
+      if (flags & 0x08) {
+        // The material id, in a field of its own, and absent where it is
+        // zero. It is the slot a Multi/Sub-Object hands the face.
+        //
+        // Which field holds which was read off a car whose answer is known:
+        // over its body, the 0x01 word takes sixteen values that are sparse
+        // bit patterns up to bit 24, while the 0x08 field takes exactly 1 to
+        // 15 — the slots of the sixteen-material list that body wears. Its
+        // wheels, on a four-material list, use 1 to 3, and its tyres, which
+        // wear a single material, carry no 0x08 field at all. Read the other
+        // way round the body wore seven materials, two of them past the end
+        // of its own list.
+        material = view.getUint16(at, true);
+        at += 2;
+      }
       if (flags & 0x10) at += 4;
       if (flags & 0x20) at += 8 * (degree - 3);
       materials.push(material);
@@ -606,7 +635,7 @@ const FbxMax = (function () {
     const out = [];
     chunks(view, entity.start, entity.end, (id, body, tail) => {
       const size = tail - body;
-      if (id !== PARAM || size < 19) return true;
+      if (!PARAMS.includes(id) || size < 19) return true;
       const param = view.getUint16(body, true);
       const kind = view.getUint16(body + 2, true);
       if (kind === PARAM_TEXMAP) return true;
@@ -744,9 +773,51 @@ const FbxMax = (function () {
   }
 
   /**
+   * The first file named at or below one entity, and no further.
+   *
+   * A map is rarely a bitmap directly — a Color Correction or an Output sits
+   * between the slot and the picture — so the slot is followed down. The walk
+   * stops at a material, which is somebody else's business.
+   */
+  function assetUnder(view, bytes, entities, index, assets, depth = 0, seen = new Set()) {
+    if (index === undefined || index >= entities.length || seen.has(index) || depth > 5) {
+      return null;
+    }
+    seen.add(index);
+    const entity = entities[index];
+    if (depth && (entity.cls.superId || 0) === MTL_CLASS) return null;
+    const found = assetOf(view, bytes, entity, assets);
+    if (found) return found;
+    for (const ref of entity.refs) {
+      const under = assetUnder(view, bytes, entities, ref, assets, depth + 1, seen);
+      if (under) return under;
+    }
+    return null;
+  }
+
+  /**
+   * Which of a material's references holds the map its *surface colour* comes
+   * from, for the plugin materials whose reference order has been read off the
+   * files.
+   *
+   * Without this the rule is the older one — the first picture anywhere below
+   * the material — and for a V-Ray material that is usually the wrong one. A
+   * VRayMtl keeps six parameter blocks and then its maps, and the first map
+   * most of them carry is not the diffuse: across one car's seventeen,
+   * reference 7 holds the diffuse (a suede's colour, a blinker's lens), 8 the
+   * reflection (a Falloff, which is what a V-Ray glass reflects by) and 10 the
+   * bump — where that car keeps `suade_bump.png`, a Noise, and its tyre's
+   * tread. Taken as the colour, a bump map paints a black tyre pale grey and a
+   * leather seat with its own relief.
+   */
+  const DIFFUSE_MAP = { vraymtl: 7 };
+
+  /**
    * A material, and whatever its references say it is made of. The walk stops
    * at another material, which is where a Multi/Sub-Object's own sub-materials
-   * begin.
+   * begin. Where the class is one whose reference order is known, the picture
+   * is taken from the slot that holds the diffuse rather than from whichever
+   * comes first.
    *
    * A parameter block says nothing about itself, so what is carried down the
    * walk is the class that holds it: a Standard material refers to its shader,
@@ -760,6 +831,12 @@ const FbxMax = (function () {
     let plain = null;                 // the first colour anywhere, as a fallback
     let texture = null;
     const subs = [];
+    const slot = DIFFUSE_MAP[String(entity.cls.name || '').trim().toLowerCase()];
+    if (slot !== undefined) {
+      // The slot decides it, including when the slot is empty: a material with
+      // a bump and no diffuse map wears no picture at all.
+      texture = assetUnder(view, bytes, entities, entity.typed[slot], assets);
+    }
     const queue = entity.refs.map((at) => [at, entity.cls.name]);
     const walked = new Set();
     while (queue.length && walked.size < 64) {
@@ -781,7 +858,7 @@ const FbxMax = (function () {
         const first = params.find((p) => p.colour !== undefined);
         if (first) plain = first.colour;
       }
-      if (!texture) texture = assetOf(view, bytes, part, assets);
+      if (!texture && slot === undefined) texture = assetOf(view, bytes, part, assets);
       for (const ref of part.refs) queue.push([ref, holder]);
     }
     // A plugin's material lays its block out as it pleases, so all that can be
@@ -805,7 +882,7 @@ const FbxMax = (function () {
     for (const ref of entities[index].refs.slice(0, 2)) {
       if (ref >= entities.length) continue;
       chunks(view, entities[ref].start, entities[ref].end, (id, body, tail) => {
-        if (id !== PARAM || tail - body > 27) return true;
+        if (!PARAMS.includes(id) || tail - body > 27) return true;
         const param = view.getUint16(body, true);
         const kind = view.getUint16(body + 2, true);
         if (param === 0 && kind === 1) {
@@ -928,6 +1005,22 @@ const FbxMax = (function () {
     return out;
   }
 
+  /**
+   * The entity a node hangs off, or nothing where it hangs off the scene.
+   *
+   * A child's controller says where it stands *relative to its parent*, so a
+   * scene read without this puts every part at the origin of the world
+   * instead: a car whose wheels are linked to its body comes out with the
+   * wheels somewhere below it and the body in the air. The scene's own root is
+   * a node like any other and is not among the parts, so naming it comes to
+   * the same thing as naming nothing.
+   */
+  function nodeParent(view, nodeEntity) {
+    const found = findChunk(view, nodeEntity.start, nodeEntity.end, PARENT);
+    if (!found || found[1] - found[0] < 4) return -1;
+    return view.getUint32(found[0], true);
+  }
+
   function nodeTransform(view, entities, nodeEntity) {
     const out = { translation: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
     const at = nodeEntity.typed[0];
@@ -960,7 +1053,9 @@ const FbxMax = (function () {
       ? compound.stream('ClassDirectory3') : compound.stream('ClassDirectory');
     const classes = readClasses(classDirectory);
     const dlls = readDlls(compound.stream('DllDirectory'));
-    const assets = readAssets(compound.stream('FileAssetMetaData3'));
+    const assetTable = compound.stream('FileAssetMetaData3').length
+      ? compound.stream('FileAssetMetaData3') : compound.stream('FileAssetMetaData2');
+    const assets = readAssets(assetTable);
     const build = readVersion(compound.stream('Config'), compound.stream('SaveConfigData'));
     const entities = readEntities(view, scene.length, classes);
 
@@ -1037,6 +1132,8 @@ const FbxMax = (function () {
         name,
         mesh,
         wearing,
+        index: nodeEntity.index,
+        parent: nodeParent(view, nodeEntity),
         placement: nodeTransform(view, entities, nodeEntity),
         offset: objectOffset(view, nodeEntity),
       });
@@ -1106,6 +1203,10 @@ const FbxMax = (function () {
           L(materialUids.get(index)), S('DiffuseColor')]));
       }
     }
+    // Every part is numbered before any is written, so a child can name the
+    // parent that places it whichever of the two the scene lists first.
+    const modelUids = new Map(placed.map((entry, at) => [entry.index, uid + 2 * at + 2]));
+
     placed.forEach((entry, index) => {
       const geometryUid = ++uid;
       const modelUid = ++uid;
@@ -1197,7 +1298,10 @@ const FbxMax = (function () {
         node('Version', [I(232)]),
         node('Properties70', [], placementProps),
       ]));
-      connections.push(node('C', [S('OO'), L(modelUid), L(0)]));
+      // A parent that carries no geometry of its own has no record to hang
+      // from, so its children hang from the scene as they did before.
+      const under = modelUids.get(entry.parent) || 0;
+      connections.push(node('C', [S('OO'), L(modelUid), L(under)]));
       connections.push(node('C', [S('OO'), L(geometryUid), L(modelUid)]));
       for (const slot of slots) {
         connections.push(node('C', [S('OO'), L(slot), L(modelUid)]));

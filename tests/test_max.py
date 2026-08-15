@@ -456,9 +456,8 @@ def test_a_scene_modelled_smooth_says_how_smooth():
 
 
 def test_the_smoothing_groups_come_across():
-    """One word holds the material id and the smoothing groups, and masking
-    the groups off is how a mesh with no normals of its own ends up shaded
-    flat — every crease on a car body rounded away."""
+    """Without them a mesh that stores no normals of its own can only be
+    shaded flat — every crease on a car body rounded away."""
     data = fb.build_max(groups=[1, 2, 4, 8, 16, 32])
     doc = parse_max(data)
     geometry = doc.root.path("Objects", "Geometry")
@@ -468,14 +467,174 @@ def test_the_smoothing_groups_come_across():
     assert layer.get("Smoothing").props[0].value == [1, 2, 4, 8, 16, 32]
 
 
+def test_a_group_above_the_sixteenth_is_kept():
+    """A face carries thirty-two of them, and a car body uses the far ones.
+
+    Read as though the low half of the word were a material id, every group
+    below the seventeenth is masked away and the parts wearing them go flat.
+    """
+    far = [1 << 20, 1 << 31, 3, 1 << 16, 1, 1 << 24]
+    doc = parse_max(fb.build_max(groups=far))
+    layer = doc.root.path("Objects", "Geometry").get("LayerElementSmoothing")
+    assert layer.get("Smoothing").props[0].value == far
+
+
 def test_the_material_id_survives_beside_them():
-    """The two share a word, so reading one must not disturb the other."""
-    doc = parse_max(fb.build_max(groups=[7, 7, 7, 7, 7, 7]))
+    """The id and the groups are separate fields of the same face, and reading
+    either must leave the other alone."""
+    doc = parse_max(fb.build_max(slots=3, materials=[0, 1, 2, 2, 1, 0],
+                                 groups=[7, 7, 7, 7, 7, 7]))
     geometry = doc.root.path("Objects", "Geometry")
-    assert geometry.get("LayerElementSmoothing").get("Smoothing").props[0].value         == [7] * 6
+    assert geometry.get("LayerElementSmoothing").get("Smoothing").props[0].value == [7] * 6
+    assert geometry.get("LayerElementMaterial").get("Materials").props[0].value \
+        == [0, 1, 2, 2, 1, 0]
 
 
 def test_a_scene_with_no_groups_says_nothing_about_them():
     """A file that names none gets no layer, rather than one full of zeros."""
     doc = parse_max(fb.build_max())
     assert doc.root.path("Objects", "Geometry").get("LayerElementSmoothing") is None
+
+
+# ------------------------------------------------------------ material slots
+
+
+def test_a_face_wears_the_slot_its_own_field_names():
+    """The id is a field of its own, not the low half of the smoothing word.
+
+    Read out of that word instead, a face's groups pass for a slot: a body of
+    sixteen materials comes out wearing seven, two of them past the end of its
+    own list, and the car is painted from the wrong tins throughout.
+    """
+    doc = parse_max(fb.build_max(slots=4, materials=[0, 1, 2, 3, 1, 0],
+                                 groups=[1 << 20] * 6))
+    layer = doc.root.path("Objects", "Geometry").get("LayerElementMaterial")
+    assert layer.get("MappingInformationType").props[0].value == "ByPolygon"
+    assert layer.get("Materials").props[0].value == [0, 1, 2, 3, 1, 0]
+
+    # And every slot of the list is a material of its own, connected to the
+    # part that picks from it.
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    names = [n.props[1].value.split("\x00")[0] for n in objects.children
+             if n.name == "Material"]
+    assert sorted(names) == ["slot0", "slot1", "slot2", "slot3"]
+
+
+def test_a_part_with_one_material_says_so_once():
+    """Nothing to pick from is not a per-face list of zeros."""
+    doc = parse_max(fb.build_max())
+    layer = doc.root.path("Objects", "Geometry").get("LayerElementMaterial")
+    assert layer.get("MappingInformationType").props[0].value == "AllSame"
+
+
+# ---------------------------------------------------------- the node it hangs
+#                                                             off
+
+
+def _models(doc):
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    return {n.props[1].value.split("\x00")[0]: n.props[0].value
+            for n in objects.children if n.name == "Model"}
+
+
+def _parent_of(doc, uid):
+    connections = next(n for n in doc.root.children if n.name == "Connections")
+    return next(c.props[2].value for c in connections.children
+                if c.props[0].value == "OO" and c.props[1].value == uid)
+
+
+def test_a_child_hangs_off_the_node_that_places_it():
+    """A child's controller says where it stands relative to its parent.
+
+    Hang every node off the scene instead and that local offset is read as a
+    world position: a car whose wheels are linked to its body comes out with
+    the wheels somewhere below it and the body in the air.
+    """
+    doc = parse_max(fb.build_max(name="body", place=(0.0, 0.0, 100.0),
+                                 child=(10.0, 0.0, -20.0)), load_arrays=True)
+    models = _models(doc)
+    assert set(models) == {"body", "body_child"}
+    assert _parent_of(doc, models["body_child"]) == models["body"]
+    # The body itself names the scene's root, which is not a part of its own.
+    assert _parent_of(doc, models["body"]) == 0
+
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    child = next(n for n in objects.children
+                 if n.name == "Model" and n.props[0].value == models["body_child"])
+    placement = {q.props[0].value: [round(x.value, 3) for x in q.props[4:7]]
+                 for q in child.get("Properties70").children}
+    # What is written is the local transform; the parent supplies the rest.
+    assert placement["Lcl Translation"] == [10.0, 0.0, -20.0]
+
+
+def test_the_hierarchy_is_reported_as_the_scene_keeps_it():
+    doc = parse_max(fb.build_max(name="body", child=(1.0, 0.0, 0.0)))
+    lines = render_text(analyze(doc)).splitlines()
+    body = next(i for i, line in enumerate(lines) if "body  [Mesh]" in line)
+    kid = next(i for i, line in enumerate(lines) if "body_child" in line)
+    # The child is drawn below its parent and indented past it.
+    assert kid > body
+    assert lines[kid].index("body_child") > lines[body].index("body")
+
+
+# ------------------------------------------------- which map is the colour one
+
+
+def _vray(**kw):
+    return parse_max(fb.build_max(shader="VRayMtl", material_class="VRayMtl", **kw),
+                     load_arrays=True)
+
+
+def test_a_vray_material_wears_the_map_in_its_diffuse_slot():
+    """Not whichever map the walk happens to reach first.
+
+    A VRayMtl keeps six parameter blocks and then its maps, and the first one
+    most of them carry is not the diffuse: reference 7 holds it and 10 the
+    bump.  Taken in the order they are found, a tyre whose only map is the
+    tread it is bumped by comes out painted with that tread — pale grey where
+    it should be black rubber — and a leather seat wears its own relief.
+    """
+    assert _vray(maps={7: "colour.png", 10: "bump.png"}).extra["textures"] == ["colour.png"]
+    # The order the slots are written in must not decide it either.
+    assert _vray(maps={10: "bump.png", 7: "colour.png"}).extra["textures"] == ["colour.png"]
+
+
+def test_a_vray_material_with_only_a_bump_wears_no_picture():
+    """An empty diffuse slot is an answer, not a reason to keep looking."""
+    assert _vray(maps={10: "bump.png"}).extra["textures"] == []
+
+
+def test_a_shader_whose_slots_are_not_known_keeps_the_older_rule():
+    """The first picture below the material, which is all that can be said of
+    a plugin nobody has read the reference order of."""
+    doc = parse_max(fb.build_max(shader="Blinn"), load_arrays=True)
+    assert doc.extra["textures"] == ["paint.jpg"]
+    assert parse_max(fb.build_max(), load_arrays=True).extra["textures"] == ["paint.jpg"]
+
+
+# ------------------------------------------------- what an older 3ds Max writes
+
+
+@pytest.mark.parametrize("chunk", fb.MAX_PARAM_IDS)
+def test_a_parameter_is_read_under_either_id_its_block_uses(chunk):
+    """3ds Max 2012 keeps them at 0x000E and later versions at 0x100E.
+
+    The record behind both is the same, and a reader that knows only the later
+    id finds no parameters at all in a 2012 scene — so every material in it
+    falls back to grey and the whole car comes out unpainted.
+    """
+    props = _material_props(parse_max(fb.build_max(shader="Blinn", param_chunk=chunk),
+                                      load_arrays=True))
+    assert [round(v, 3) for v in props["DiffuseColor"]] == list(fb.MAX_DIFFUSE)
+    assert [round(v, 3) for v in props["SpecularColor"]] == list(fb.MAX_SPECULAR)
+
+
+def test_the_older_asset_table_names_its_files_by_path_alone():
+    """It holds the kind and the path where the newer one holds a name between
+    them, and a record read as though it had three strings is no record."""
+    doc = parse_max(fb.build_max(assets_version=2), load_arrays=True)
+    assets = doc.extra["assets"]
+    assert [a["path"] for a in assets] == ["C:\\models\\paint.jpg"]
+    # With nothing to call it by, the last step of the path is its name.
+    assert [a["name"] for a in assets] == ["paint.jpg"]
+    assert doc.extra["textures"] == ["paint.jpg"]

@@ -622,6 +622,61 @@ def checker_png(size: int = 64, squares: int = 8) -> bytes:
     return png(size, size, bytes(out))
 
 
+def _pack_bits(row: bytes) -> bytes:
+    """One row as PackBits, the run-length coding a ``.psd`` stores rows in.
+
+    Written the plain way — a run of three or more of the same byte becomes a
+    repeat, everything else is copied literally — which is enough to be a real
+    exercise of the reader without being what Photoshop itself would choose.
+    """
+    out = bytearray()
+    at = 0
+    while at < len(row):
+        run = 1
+        while at + run < len(row) and row[at + run] == row[at] and run < 128:
+            run += 1
+        if run >= 3:
+            out += bytes((257 - run, row[at]))
+            at += run
+            continue
+        start = at
+        while at < len(row) and at - start < 128:
+            ahead = row[at:at + 3]
+            if len(ahead) == 3 and ahead[0] == ahead[1] == ahead[2]:
+                break
+            at += 1
+        out += bytes((at - start - 1,)) + row[start:at]
+    return bytes(out)
+
+
+def psd(width: int, height: int, pixels: bytes, *, compress: bool = True,
+        channels: int = 3) -> bytes:
+    """A Photoshop document holding nothing but its composite.
+
+    Which is all a reader wants of one: the flattened picture at the end, in
+    planar order — the whole of red, then the whole of green, then blue — with
+    the three length-prefixed sections in front of it left empty.  ``compress``
+    chooses between the two codings a ``.psd`` uses for it, raw and PackBits.
+    """
+    planes = [bytes(pixels[i::3]) for i in range(3)][:channels]
+    if channels == 1:
+        planes = [bytes(pixels[0::3])]
+    head = (b"8BPS" + struct.pack(">H", 1) + b"\x00" * 6
+            + struct.pack(">HIIHH", len(planes), height, width, 8,
+                          1 if channels == 1 else 3))
+    sections = struct.pack(">I", 0) * 3
+    if not compress:
+        return head + sections + struct.pack(">H", 0) + b"".join(planes)
+    counts = bytearray()
+    body = bytearray()
+    for plane in planes:
+        for y in range(height):
+            packed = _pack_bits(plane[y * width:(y + 1) * width])
+            counts += struct.pack(">H", len(packed))
+            body += packed
+    return head + sections + struct.pack(">H", 1) + bytes(counts) + bytes(body)
+
+
 def textured_cube_nodes(version: int = 7400, *, embed: bool = True,
                         filename: str = "checker.png") -> list[N]:
     """A cube carrying UVs and a diffuse texture.
@@ -1546,19 +1601,26 @@ def _max_class(name: str, super_id: int, class_id: int, dll: int = -1) -> bytes:
                       container=True)
 
 
-def _max_param_colour(param: int, rgb: "tuple[float, float, float]") -> bytes:
+#: The two chunk ids a ParamBlock2 writes its parameters under.  Which one a
+#: file uses is the writer's own business: 3ds Max 2012 keeps them at 0x000E
+#: and later versions at 0x100E, with the same record behind both.
+MAX_PARAM_IDS = (0x000E, 0x100E)
+
+
+def _max_param_colour(param: int, rgb: "tuple[float, float, float]",
+                      chunk: int = 0x100E) -> bytes:
     """One parameter of a ParamBlock2, valued as a colour.
 
     The id and the type come first, then flags, and a colour is the three
     floats on the end — which is all a reader can go on, since what the id
     *means* lives in the plugin and not in the file.
     """
-    return _max_chunk(0x100E, struct.pack("<HHIIIB3f", param, 2, 0, 0, 0, 0, *rgb))
+    return _max_chunk(chunk, struct.pack("<HHIIIB3f", param, 2, 0, 0, 0, 0, *rgb))
 
 
-def _max_param_float(param: int, value: float) -> bytes:
+def _max_param_float(param: int, value: float, chunk: int = 0x100E) -> bytes:
     """The same, valued as a float — one number on the end instead of three."""
-    return _max_chunk(0x100E, struct.pack("<HHIIIBf", param, 0, 0, 0, 0, 0, value))
+    return _max_chunk(chunk, struct.pack("<HHIIIBf", param, 0, 0, 0, 0, 0, value))
 
 
 #: How much flag a parameter carries between its type and its value is the
@@ -1613,16 +1675,18 @@ def _max_asset_id(seed: int = 1) -> bytes:
 def _max_face(corners: "list[int]", material: int = 0, groups: int = 0) -> bytes:
     """A face: its degree, its corners, then the members its flags select.
 
-    0x01 carries one word holding two things — the material id in its low half
-    and the smoothing groups in its high — and 0x20 the triangulation of an
-    n-gon, which is two ints per triangle past the first and the reason a face
-    is not a fixed size.
+    0x01 carries the smoothing groups, all thirty-two of them; 0x08 the
+    material id, which is written only where there is one; and 0x20 the
+    triangulation of an n-gon, which is two ints per triangle past the first
+    and the reason a face is not a fixed size.
     """
-    flags = 0x01 | (0x20 if len(corners) > 3 else 0)
+    flags = 0x01 | (0x08 if material else 0) | (0x20 if len(corners) > 3 else 0)
     out = struct.pack("<I", len(corners))
     out += struct.pack("<%dI" % len(corners), *corners)
     out += struct.pack("<H", flags)
-    out += struct.pack("<I", (groups << 16) | (material & 0xFFFF))
+    out += struct.pack("<I", groups)
+    if flags & 0x08:
+        out += struct.pack("<H", material & 0xFFFF)
     if flags & 0x20:
         out += struct.pack("<%dI" % (2 * (len(corners) - 3)), *([0] * 2 * (len(corners) - 3)))
     return out
@@ -1655,7 +1719,12 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               place: "tuple[float, float, float] | None" = None,
               offset: "tuple[float, float, float] | None" = None,
               smooth: int = 0, shader: "str | None" = None,
-              groups: "list[int] | None" = None) -> bytes:
+              groups: "list[int] | None" = None,
+              materials: "list[int] | None" = None, slots: int = 0,
+              child: "tuple[float, float, float] | None" = None,
+              maps: "dict[int, str] | None" = None,
+              material_class: "str | None" = None,
+              param_chunk: int = 0x100E, assets_version: int = 3) -> bytes:
     """A .max holding one cube under one node.
 
     The cube is a unit cube, which is enough to exercise every rule the reader
@@ -1677,6 +1746,21 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     ``"Blinn"``, or a plugin's own name — and fills that block the way such a
     shader fills it.  Left out, the material holds a block of one colour, which
     is a plugin's material and all a reader can say about one.
+
+    ``maps`` hangs a picture off the material under each reference key given —
+    ``{7: 'colour.png', 10: 'bump.png'}`` is a V-Ray material's diffuse and its
+    bump — each behind an Output, as a real one is.  ``material_class`` names
+    the class the material itself is, which for a renderer's own material is
+    that renderer's rather than ``Standard``.
+
+    ``slots`` puts a Multi/Sub-Object of that many materials on the node, and
+    ``materials`` gives each face the slot it wears.  ``child`` hangs a second
+    node off the first, placed there, which is how a scene says a wheel belongs
+    to a body.
+
+    ``param_chunk`` and ``assets_version`` write the two things a 3ds Max 2012
+    file writes differently: its parameters under 0x000E rather than 0x100E,
+    and an asset table naming a file by its path alone.
     """
     points = [
         (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
@@ -1713,7 +1797,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         # Each side of the cube in a group of its own, so every edge between
         # them is hard — which is what a cube's edges are.
         faces = struct.pack("<I", len(quads)) + b"".join(
-            _max_face(q, groups=(groups[i] if groups else 0))
+            _max_face(q, material=(materials[i] if materials else 0),
+                      groups=(groups[i] if groups else 0))
             for i, q in enumerate(quads))
         # Edges are counted but not needed; a plausible count keeps the report
         # true.
@@ -1756,13 +1841,13 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                  + _max_param_texmap(141)
                  + _max_param_small_float(180, MAX_GLOSSINESS))
     elif shader:
-        block = (_max_param_colour(0, MAX_AMBIENT)
-                 + _max_param_colour(1, MAX_DIFFUSE)
-                 + _max_param_colour(2, MAX_SPECULAR)
-                 + _max_param_float(5, MAX_GLOSSINESS)
-                 + _max_param_float(6, MAX_SPECULAR_LEVEL))
+        block = (_max_param_colour(0, MAX_AMBIENT, param_chunk)
+                 + _max_param_colour(1, MAX_DIFFUSE, param_chunk)
+                 + _max_param_colour(2, MAX_SPECULAR, param_chunk)
+                 + _max_param_float(5, MAX_GLOSSINESS, param_chunk)
+                 + _max_param_float(6, MAX_SPECULAR_LEVEL, param_chunk))
     else:
-        block = _max_param_colour(1, MAX_DIFFUSE)
+        block = _max_param_colour(1, MAX_DIFFUSE, param_chunk)
     params = _max_chunk(0x0002,
                         block
                         + _max_chunk(0x0003, bytes(8) + _max_asset_id() + bytes(8)),
@@ -1772,8 +1857,9 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     # first, so that the material has something to point at.
     extra = b""
     nxt = 4
-    node_refs = [(3, 3)]
+    node_refs = []
     holds = 0                      # what the node points at for its object
+    wears = 3                      # and what it points at for its material
 
     # What the material refers to for its parameters: the block itself, or the
     # shader that says what the numbers in it are.
@@ -1785,16 +1871,70 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                             container=True)
         nxt += 1
 
+    # The maps a material hangs off its own references, under the key each
+    # slot has: for a V-Ray material 7 is the diffuse and 10 the bump, and
+    # which of them a reader picks is the difference between a tyre's colour
+    # and its tread.  Each is a Bitmap behind an Output, as a real one is, so
+    # the slot has to be followed down rather than matched at its first step.
+    map_refs = []
+    map_assets = []
+    for at, (key, filename) in enumerate(sorted((maps or {}).items())):
+        asset_id = _max_asset_id(64 + at * 32)
+        map_assets.append((asset_id, filename))
+        extra += _max_chunk(0x0002,
+                            _max_chunk(0x0003, bytes(8) + asset_id + bytes(8)),
+                            container=True)
+        extra += _max_chunk(0x000B,                 # an Output, wrapping it
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        extra += _max_chunk(0x000C,                 # the Bitmap that holds it
+                            _max_chunk(0x2034, struct.pack("<I", nxt + 1)),
+                            container=True)
+        map_refs.append((key, nxt + 2))
+        nxt += 3
+
     # Every material keeps its name in the same block; a plugin's material
     # keeps that block under an id of its own, which is Corona's whole reason
     # for coming out unnamed.
     base_id = 0x0FA0 if (shader or "").strip().lower().startswith("corona") else 0x5431
+    words = [0x10, 1, parameters]
+    for key, target in sorted(map_refs):
+        words += [key, target]
     material = _max_chunk(0x0003,
-                          _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, parameters))
+                          _max_chunk(0x2035,
+                                     struct.pack("<%dI" % len(words), *words))
                           + _max_chunk(base_id,
                                        _max_chunk(0x4001, _max_utf16("Body paint")),
                                        container=True),
                           container=True)
+
+    # A Multi/Sub-Object over materials of its own, which is the list a face's
+    # material id picks a slot out of.
+    if slots:
+        first = nxt
+        for at in range(slots):
+            extra += _max_chunk(0x0002,
+                                _max_param_colour(1, (at / 10.0, 0.5, 0.25), param_chunk),
+                                container=True)
+            extra += _max_chunk(0x0003,
+                                _max_chunk(0x2035,
+                                           struct.pack("<3I", 0x10, 1, first + 2 * at))
+                                + _max_chunk(0x5431,
+                                             _max_chunk(0x4001, _max_utf16(f"slot{at}")),
+                                             container=True),
+                                container=True)
+        nxt += 2 * slots
+        wears = nxt
+        extra += _max_chunk(0x0009,
+                            _max_chunk(0x2034,
+                                       struct.pack("<%dI" % slots,
+                                                   *(first + 2 * a + 1 for a in range(slots))))
+                            + _max_chunk(0x5431,
+                                         _max_chunk(0x4001, _max_utf16("Multi")),
+                                         container=True),
+                            container=True)
+        nxt += 1
+    node_refs.append((3, wears))
 
     if smooth:
         extra += _max_chunk(0x0002,
@@ -1827,40 +1967,86 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                        + _max_chunk(0x096B, struct.pack("<4f", 0.0, 0.0, 0.0, 1.0))
                        + _max_chunk(0x096C, struct.pack("<3f", 1.0, 1.0, 1.0)))
 
+    # A second node hung off the first and placed where it says, sharing the
+    # object and the material: a wheel linked to a body, whose controller says
+    # where it stands relative to that body and not to the world.
+    node_parent = b""
+    if child is not None:
+        axes = nxt
+        extra += b"".join(_max_float_controller(v) for v in child)
+        nxt += 3
+        extra += _max_chunk(0x0005,
+                            _max_chunk(0x2034, struct.pack("<3I", axes, axes + 1, axes + 2)),
+                            container=True)
+        extra += _max_chunk(0x0006,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        controller = nxt + 1
+        nxt += 2
+        # The scene's own root is a node like any other; naming it is how a
+        # part says it hangs off nothing.
+        extra += _max_chunk(0x000A,
+                            _max_chunk(0x0962, _max_utf16("Scene Root")),
+                            container=True)
+        node_parent = _max_chunk(0x0960, struct.pack("<2I", nxt, 0x1C00))
+        nxt += 1
+        words = [0x10, 0, controller, 1, holds, 3, wears]
+        extra += _max_chunk(0x0001,
+                            _max_chunk(0x2035, struct.pack("<%dI" % len(words), *words))
+                            + _max_chunk(0x0962, _max_utf16(f"{name}_child"))
+                            + _max_chunk(0x0960, struct.pack("<2I", 1, 0x1000)),
+                            container=True)
+        nxt += 1
+
     words = [0x10]
     for key, target in sorted(node_refs):
         words += [key, target]
     node = _max_chunk(0x0001,
                       _max_chunk(0x2035, struct.pack("<%dI" % len(words), *words))
-                      + _max_chunk(0x0962, _max_utf16(name)) + node_offset,
+                      + _max_chunk(0x0962, _max_utf16(name)) + node_offset + node_parent,
                       container=True)
     scene = _max_wide_chunk(0x2023, poly + node + params + material + extra)
 
     classes = (_max_class(class_name, 0x10, 0x1BF8338D, dll=0)
                + _max_class("Node", 0x01, 0x01)
                + _max_class("ParamBlock2", 0x82, 0x82)
-               + _max_class("Standard", 0xC00, 0x02)
+               # A renderer's own material is its own class, where 3ds Max's
+               # is a Standard with a shader under it.
+               + _max_class(material_class or "Standard", 0xC00, 0x02)
                + _max_class("Bezier Float", 0x9003, 0x2007)
                + _max_class("Position XYZ", 0x900B, 0x118F7E02)
                + _max_class("Position/Rotation/Scale", 0x9008, 0x2005)
                + _max_class("TurboSmooth", 0x810, 0x0D727B3E)
                # Class 8, which is what a shader entity's chunk id names.
-               + _max_class(shader or "Shader", 0xC02, 0x02))
+               + _max_class(shader or "Shader", 0xC02, 0x02)
+               + _max_class("Multi/Sub-Object", 0xC00, 0x0200)
+               + _max_class("RootNode", 0x01, 0x02)
+               + _max_class("Output", 0xC40, 0x0280)
+               + _max_class("Bitmap", 0xC10, 0x0240))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),
                       container=True)
-    assets = (_max_asset_id() + struct.pack("<I", 6) + _max_utf16("Bitmap")
-              + struct.pack("<I", 9) + _max_utf16("paint.jpg")
-              + struct.pack("<I", 19) + _max_utf16("C:\\models\\paint.jpg")
-              + b"\x00" * 16)
+    # The newer table names the file and the path it lived at; the older one,
+    # which is what 3ds Max 2012 writes, keeps the path alone.
+    def asset_record(asset_id: bytes, filename: str) -> bytes:
+        path = f"C:\\models\\{filename}"
+        out = asset_id + struct.pack("<I", 6) + _max_utf16("Bitmap")
+        if assets_version != 2:
+            out += struct.pack("<I", len(filename)) + _max_utf16(filename)
+        return out + struct.pack("<I", len(path)) + _max_utf16(path)
+
+    assets = asset_record(_max_asset_id(), "paint.jpg")
+    for asset_id, filename in map_assets:
+        assets += asset_record(asset_id, filename)
+    assets += b"\x00" * 16
     config = _max_chunk(0x2170, struct.pack("<I", build))
 
     streams = {
         "Scene": scene,
         "ClassDirectory3": classes,
         "DllDirectory": dlls,
-        "FileAssetMetaData3": assets,
+        f"FileAssetMetaData{assets_version}": assets,
         "SaveConfigData": config,
     }
     if compressed:

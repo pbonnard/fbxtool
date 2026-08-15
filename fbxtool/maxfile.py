@@ -17,6 +17,7 @@ The compound file gives named streams; six of them are read:
 ``ClassDirectory3``     the class table — what each chunk id in the scene *is*
 ``DllDirectory``        the plugins those classes came from
 ``FileAssetMetaData3``  every texture the scene refers to, and where it lived
+``FileAssetMetaData2``  the same table, as a 3ds Max before 2013 wrote it
 ``\\x05SummaryInformation``  title, author, comments and the saved thumbnail
 ``Config``, ``SaveConfigData``  the version that wrote it
 ======================  =====================================================
@@ -70,8 +71,8 @@ A face is variable length, and this is the part that takes the explaining::
     uint32 degree
     uint32 vertex[degree]
     uint16 flags
-    if flags & 0x01:  uint32                       (material and smoothing)
-    if flags & 0x08:  uint16
+    if flags & 0x01:  uint32                       (the smoothing groups)
+    if flags & 0x08:  uint16                       (the material id)
     if flags & 0x10:  uint32
     if flags & 0x20:  uint32 [2 * (degree - 3)]    (how the n-gon triangulates)
 
@@ -148,7 +149,12 @@ _CLASS_IDS = 0x2060
 _MTL_BASE = 0x5431          # the block every material carries
 _MTL_PLUGIN_BASE = 0x0FA0   # the same block, where a plugin material keeps it
 _MTL_NAME = 0x4001          # its name, inside that block
-_PARAM = 0x100E             # one parameter of a ParamBlock2
+#: One parameter of a ParamBlock2, under either of the two ids the block is
+#: written with.  Which one a file uses is the writer's own business and not
+#: the parameter's: the payload behind both is the same ``uint16 id; uint16
+#: type;`` record, and a 3ds Max 2012 scene whose materials all come out grey
+#: is one whose every parameter sits under 0x000E.
+_PARAMS = (0x000E, 0x100E)
 _ASSET_REF = 0x0003         # a parameter block's reference to a file asset
 
 #: A parameter's type, of the list the SDK publishes.  Only these two are
@@ -375,6 +381,11 @@ def _read_assets(data: bytes) -> list[dict]:
     length-prefixed strings.  The lengths count characters, and the strings are
     UTF-16 with a terminator, which is what makes the walk self-correcting: a
     record whose length does not land on a terminator is not a record.
+
+    How many strings a record holds is the table's own version: the newer one
+    writes the kind, the file's name and the path it lived at, the older one
+    the kind and the path alone.  Both are read, since a scene saved by 3ds Max
+    2012 keeps the older table and otherwise comes out with no textures at all.
     """
     out: list[dict] = []
     at = 16
@@ -388,15 +399,18 @@ def _read_assets(data: bytes) -> list[dict]:
             text = data[at + 4:at + 4 + count * 2].decode("utf-16-le", "replace")
             at += 4 + count * 2 + 2       # the string, then its terminator
             strings.append(text)
-        if len(strings) >= 3:
+        if len(strings) >= 2:
+            path = strings[-1]
+            # Where the record does not name the file apart from its path, the
+            # name is the last step of that path.
+            name = (strings[1] if len(strings) >= 3
+                    else path.replace("\\", "/").rsplit("/", 1)[-1])
             # The identifier is the sixteen bytes in front of the record, and
             # it is how a material's parameter block names this file.
-            out.append({"kind": strings[0], "name": strings[1], "path": strings[2],
+            out.append({"kind": strings[0], "name": name, "path": path,
                         "id": bytes(data[start:start + 16])})
             start = at
             at += 16          # the identifier of the record that follows
-        elif strings:
-            continue
         else:
             break
     return out
@@ -537,16 +551,28 @@ def _read_faces(data: bytes, start: int, end: int, vertices: int
         if flags & 0x01:
             if at + 4 > end:
                 break
-            # One word, two things: the material id in the low half and the
-            # smoothing groups in the high.  The groups say which faces share
-            # a smooth normal and, by their absence, where an edge is hard —
-            # without them a mesh with no normals of its own can only be shaded
-            # flat, and every crease on a car body rounds away.
-            word = struct.unpack_from("<I", data, at)[0]
-            material = word & 0xFFFF
-            smoothing = word >> 16
+            # The whole word is the smoothing groups, all thirty-two of them.
+            # The groups say which faces share a smooth normal and, by their
+            # absence, where an edge is hard — without them a mesh with no
+            # normals of its own can only be shaded flat, and every crease on a
+            # car body rounds away.
+            smoothing = struct.unpack_from("<I", data, at)[0]
             at += 4
         if flags & 0x08:
+            if at + 2 > end:
+                break
+            # The material id, in a field of its own, and absent where it is
+            # zero.  It is the slot a Multi/Sub-Object hands the face.
+            #
+            # Which field holds which was read off a car whose answer is
+            # known: over its body, the 0x01 word takes sixteen values that are
+            # sparse bit patterns up to bit 24, while the 0x08 field takes
+            # exactly 1 to 15 — the slots of the sixteen-material list that
+            # body wears.  Its wheels, on a four-material list, use 1 to 3, and
+            # its tyres, which wear a single material, carry no 0x08 field at
+            # all.  Read the other way round the body wore seven materials, two
+            # of them past the end of its own list.
+            material = struct.unpack_from("<H", data, at)[0]
             at += 2
         if flags & 0x10:
             at += 4
@@ -718,7 +744,7 @@ def _params_of(scene: bytes, entity):
     out: list[tuple[int, str, object]] = []
     for idn, body, tail, _ in _chunks(scene, entity.start, entity.end):
         size = tail - body
-        if idn != _PARAM or size < 19:
+        if idn not in _PARAMS or size < 19:
             continue
         param, kind = struct.unpack_from("<HH", scene, body)
         if kind == _PARAM_TEXMAP:
@@ -854,13 +880,57 @@ def _asset_of(scene: bytes, entity, assets: dict):
     return None
 
 
+def _asset_under(scene: bytes, entities: list, index, assets: dict,
+                 depth: int = 0, seen: set | None = None):
+    """The first file named at or below one entity, and no further.
+
+    A map is rarely a bitmap directly — a Color Correction or an Output sits
+    between the slot and the picture — so the slot is followed down.  The walk
+    stops at a material, which is somebody else's business.
+    """
+    if seen is None:
+        seen = set()
+    if index is None or index >= len(entities) or index in seen or depth > 5:
+        return None
+    seen.add(index)
+    entity = entities[index]
+    if depth and (entity.cls.get("super_id") or 0) == _MTL_CLASS:
+        return None
+    found = _asset_of(scene, entity, assets)
+    if found:
+        return found
+    for ref in entity.refs:
+        found = _asset_under(scene, entities, ref, assets, depth + 1, seen)
+        if found:
+            return found
+    return None
+
+
+#: Which of a material's references holds the map its *surface colour* comes
+#: from, for the plugin materials whose reference order has been read off the
+#: files.
+#:
+#: Without this the rule is the older one — the first picture anywhere below
+#: the material — and for a V-Ray material that is usually the wrong one.  A
+#: VRayMtl keeps six parameter blocks and then its maps, and the first map most
+#: of them carry is not the diffuse: across one car's seventeen, reference 7
+#: holds the diffuse (a suede's colour, a blinker's lens), 8 the reflection (a
+#: Falloff, which is what a V-Ray glass reflects by) and 10 the bump — where
+#: that car keeps `suade_bump.png`, a Noise, and its tyre's tread.  Taken as
+#: the colour, a bump map paints a black tyre pale grey and a leather seat
+#: with its own relief.
+_DIFFUSE_MAP = {"vraymtl": 7}
+
+
 def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     """A material, and whatever its references say it is made of.
 
     A material keeps its colours in parameter blocks and its maps behind more
     of them, so the walk goes down its references until it finds a picture —
     but not past another material, which is where a Multi/Sub-Object's own
-    sub-materials begin.
+    sub-materials begin.  Where the class is one whose reference order is
+    known, the picture is taken from the slot that holds the diffuse rather
+    than from whichever comes first.
 
     A parameter block says nothing about itself, so what is carried down the
     walk is the class that holds it: a Standard material refers to its shader,
@@ -874,6 +944,12 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     plain = None                    # the first colour anywhere, as a fallback
     texture = None
     subs: list[int] = []
+
+    slot = _DIFFUSE_MAP.get((entity.cls.get("name") or "").strip().lower())
+    if slot is not None:
+        # The slot decides it, including when the slot is empty: a material
+        # with a bump and no diffuse map wears no picture at all.
+        texture = _asset_under(scene, entities, entity.typed.get(slot), assets)
 
     queue = [(at, entity.cls.get("name") or "") for at in entity.refs]
     walked = set()
@@ -899,7 +975,7 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
             look = _appearance_of(params, layout)
         if plain is None:
             plain = next((v for _, kind, v in params if kind == "colour"), None)
-        if texture is None:
+        if texture is None and slot is None:
             texture = _asset_of(scene, part, assets)
         queue.extend((ref, holder) for ref in part.refs)
     # A plugin's material lays its block out as it pleases, so all that can be
@@ -933,7 +1009,7 @@ def _smoothing_of(scene: bytes, entities: list, index: int) -> int:
         if ref >= len(entities):
             continue
         for idn, body, tail, _ in _chunks(scene, entities[ref].start, entities[ref].end):
-            if idn != _PARAM or tail - body > 27:
+            if idn not in _PARAMS or tail - body > 27:
                 continue
             param, kind = struct.unpack_from("<HH", scene, body)
             if param == 0 and kind == 1:
@@ -1046,6 +1122,22 @@ def _object_offset(scene: bytes, node: _Entity) -> dict:
     return out
 
 
+def _node_parent(scene: bytes, node: _Entity) -> int | None:
+    """The entity a node hangs off, or nothing where it hangs off the scene.
+
+    A child's controller says where it stands *relative to its parent*, so a
+    scene read without this puts every part at the origin of the world instead:
+    a car whose wheels are linked to its body comes out with the wheels
+    somewhere below it and the body in the air.  The scene's own root is a node
+    like any other and is not among the parts, so naming it comes to the same
+    thing as naming nothing.
+    """
+    found = _find(scene, node.start, node.end, _PARENT)
+    if found is None or found[1] - found[0] < 4:
+        return None
+    return struct.unpack_from("<I", scene, found[0])[0]
+
+
 def _node_transform(scene: bytes, entities: list[_Entity], node: _Entity) -> dict:
     """Where a node stands: what its controller says, or nothing at all.
 
@@ -1143,7 +1235,8 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
     classes = _read_classes(compound.stream("ClassDirectory3")
                             or compound.stream("ClassDirectory"))
     dlls = _read_dlls(compound.stream("DllDirectory"))
-    assets = _read_assets(compound.stream("FileAssetMetaData3"))
+    assets = _read_assets(compound.stream("FileAssetMetaData3")
+                          or compound.stream("FileAssetMetaData2"))
     summary = _read_summary(compound.stream("\x05SummaryInformation"))
     build = _read_version(compound.stream("Config"), compound.stream("SaveConfigData"))
 
@@ -1288,6 +1381,11 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
             connections.append(_node("C", [_s("OP"), _l(texture_uids[material.texture]),
                                            _l(material_uids[index]), _s("DiffuseColor")]))
 
+    # Every part is numbered before any is written, so a child can name the
+    # parent that places it whichever of the two the scene lists first.
+    model_uids = {entity.index: uid + 2 * at + 2
+                  for at, (entity, *_) in enumerate(placed)}
+
     for at, (entity, name, mesh, placement, wearing, offset) in enumerate(placed):
         geometry_uid, model_uid = uid + 1, uid + 2
         uid += 2
@@ -1374,7 +1472,10 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
             _node("Model", [_l(model_uid), _s(f"{label}\x00\x01Model"), _s("Mesh")],
                   [_node("Version", [_i(232)]),
                    _node("Properties70", [], model_props)]))
-        connections.append(_node("C", [_s("OO"), _l(model_uid), _l(0)]))
+        # A parent that carries no geometry of its own has no record to hang
+        # from, so its children hang from the scene as they did before.
+        under = model_uids.get(_node_parent(scene, entity), 0)
+        connections.append(_node("C", [_s("OO"), _l(model_uid), _l(under)]))
         connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
         for slot in slots:
             connections.append(_node("C", [_s("OO"), _l(slot), _l(model_uid)]))

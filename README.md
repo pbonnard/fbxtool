@@ -248,8 +248,8 @@ The face record of an Editable Poly is where the work was:
 uint32 degree
 uint32 vertex[degree]
 uint16 flags
-if flags & 0x01:  uint32                    material and smoothing
-if flags & 0x08:  uint16
+if flags & 0x01:  uint32                    the smoothing groups
+if flags & 0x08:  uint16                    the material id
 if flags & 0x10:  uint32
 if flags & 0x20:  uint32 [2 * (degree - 3)] how the n-gon triangulates
 ```
@@ -268,6 +268,14 @@ chunks finds nothing and leaves the part at the origin. Separate from that is
 the offset between a node and its mesh, which is what an FBX writes as the
 geometric transform. Read both, and all 164 parts of the Smart land exactly
 where its FBX export puts them — translation, rotation, scale and offset alike.
+
+Separate again is what a node hangs off, in `0x0960`. A controller says where
+a part stands *relative to its parent*, so a scene read as though every node
+hung off the root puts each child at the world origin of its own local offset:
+a Hummer whose wheels are linked to its body comes out with the wheels below
+the ground and the body in the air. Read the link and the nine parts of that
+car land where its own `.obj` export puts them, to within the decimal the
+`.obj` rounds to.
 
 A scene is usually modelled smooth and stored as its cage: 157 of the Smart's
 164 parts carry a TurboSmooth, ×2, so what the file holds is a fraction of what
@@ -343,7 +351,18 @@ CoronaLightMtl, an Arnold surface — is not in that table and is not read as
 though it were: it keeps the older rule, **the first colour-valued parameter is
 the diffuse**, and nothing is claimed about its finish. What a VRay material
 *reflects* sits two parameters further on with another between them, and
-reading it by a shader's layout would put the reflection where the colour goes. A **Multi/Sub-Object** becomes one material
+reading it by a shader's layout would put the reflection where the colour goes.
+
+The same care applies to which *map* a material wears. A material's pictures
+hang off its references, and taking the first one found is right only until a
+material has more than one: a VRayMtl keeps its diffuse at reference 7, its
+reflection at 8 and its bump at 10, and across one car's seventeen the first
+map most of them carry is the bump. Taken as the colour it paints a black tyre
+pale grey with its own tread and a leather seat with its own relief, so the
+slot is read rather than the order. A class whose reference order has not been
+read off the files keeps the older rule.
+
+A **Multi/Sub-Object** becomes one material
 per slot, and a face's material id picks between them. The Materials tab is
 where a surface the file does not describe gets its finish, and an assignment
 saved there is remembered for the file.
@@ -352,16 +371,19 @@ Textures are stranger: the file name is not in the scene at all. A parameter
 block carries a sixteen-byte identifier, and `FileAssetMetaData3` maps that to
 a name and the path it had on the machine that made it — `F:\rcartton\Smart 1
 Brabus\specular.jpg`. The reader ties the two together and names the file, so
-the image loads the way an `.obj`'s does: drop it in beside the model.
+the image loads the way an `.obj`'s does: drop it in beside the model. A 3ds
+Max before 2013 writes the same table as `FileAssetMetaData2`, with the path
+alone where the newer one keeps a name in front of it, and both are read.
 
 A `.max` stores no normals — only the cage — so what it is shaded by comes from
 its **smoothing groups**: a bitmask per face saying which groups that face is
 in. Two faces meeting along an edge share a normal where they share a group and
 keep their own where they do not, which is how a car body has both a smooth
-flank and a crisp shut line. They live in the same word as the material id, the
-groups in its high half and the id in its low, and reading only the id is how a
-subdivided cage comes out shaded flat: the shape is right and every crease has
-gone soft. Measured against the same scene's `.obj` — 3ds Max's own bake of the
+flank and a crisp shut line. They are the whole of the `0x01` word, all
+thirty-two of them, and the material id is a field of its own behind `0x08` —
+read as one word holding both, a body of sixteen materials comes out wearing
+seven, two of them past the end of its own list, and every group below the
+seventeenth is masked away besides. Measured against the same scene's `.obj` — 3ds Max's own bake of the
 same modifier, with the normals it wrote — reading them recovers 84% of the
 detail that masking them away had cost.
 
@@ -1018,6 +1040,22 @@ with transparency carry a second, greyscale slice for the alpha channel.
 It is held to Binomial's own transcoder: every fixture in `samples/ktx2`
 decodes byte for byte, and so do all 36 textures of the compressed car —
 including its alpha slices, its 1024x1024 and its non-square images.
+
+### Photoshop documents
+
+The same problem, from the other direction: a `.psd` is a document rather than
+a picture, `createImageBitmap` refuses one, and 3ds Max reads them happily — so
+car scenes name them for their textures and the surfaces wearing them come out
+flat. What is read is the *composite*, the flattened picture Photoshop stores
+at the end for anything that cannot open the layer stack, in `web/app/psd.js`.
+It is stored planar, the whole of one channel before the next, and coded either
+raw or with PackBits; both are read, and 16-bit, CMYK and PSB documents are
+declined rather than guessed at. A Hummer's `tire .psd` — 1024x1024, RLE, three
+channels — decodes to the same bytes as an independent reader in 15 ms.
+
+Something the tool has been given and cannot read is not something it is
+missing, and the two are said differently: one asks for the folder, the other
+asks for a PNG.
 
 ### Importing glTF
 

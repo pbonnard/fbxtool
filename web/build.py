@@ -35,6 +35,7 @@ SCRIPTS = [
     "blend.js",
     "gltfin.js",
     "max.js",
+    "psd.js",
     "transform.js",
     "analyze.js",
     "palette.js",

@@ -151,6 +151,41 @@ async function main() {
     without.textures === 0 && without.missing.length === 1,
     `missing: ${without.missing.join(', ') || 'none'}`);
 
+  /* An image that is there and will not decode is not a missing one. Telling
+   * someone to drop in what they have already dropped in reads as the tool not
+   * knowing what it has been given, so the two are counted apart and answered
+   * differently. */
+  console.log('\nan image that is there but is not a picture');
+  await page.reload();
+  await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
+  const junk = {
+    name: 'pyramid',
+    files: [
+      read(model),
+      read(library),
+      { name: path.basename(image), data: Array.from(Buffer.from('not a picture')) },
+    ],
+    dirs: [],
+  };
+  const before2 = await page.evaluate(() => window.fbxtool.loadCount);
+  await dropFolder(page, junk);
+  await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, before2,
+    { timeout: 60000 });
+  await page.waitForTimeout(600);
+  const broken = await page.evaluate(() => ({
+    missing: window.fbxtool.missingTextures,
+    unreadable: window.fbxtool.unreadableTextures,
+    info: document.getElementById('mesh-info').textContent,
+  }));
+  check('it is not called missing',
+    broken.missing.length === 0, broken.missing.join(', ') || 'none');
+  check('it is called unreadable instead',
+    broken.unreadable.length === 1, broken.unreadable.join(', ') || 'none');
+  check('and the advice is to convert it, not to supply it',
+    broken.info.includes('supplied but unreadable')
+    && !broken.info.includes('drop the folder in'),
+    broken.info.slice(-120));
+
   /* The same folder through the picker rather than a drop. A file picker
    * cannot reach into a subfolder, so this is a directory picker: the one way
    * a downloaded model opens with its images from the button rather than by

@@ -113,6 +113,88 @@ def test_node_can_instantiate_the_module(built):
         assert name in exports
 
 
+# --------------------------------------------------- the Photoshop decoder
+
+
+def _decode_psd(tmp_path, data: bytes) -> dict:
+    """Run the page's own ``psd.js`` over some bytes, under Node."""
+    source = tmp_path / "image.psd"
+    source.write_bytes(data)
+    script = (
+        "const fs=require('fs');"
+        f"const P=require({str(WEB / 'app' / 'psd.js')!r});"
+        f"const b=new Uint8Array(fs.readFileSync({str(source)!r}));"
+        "const image=P.decode(b);"
+        "console.log(JSON.stringify(image ? "
+        "{width:image.width,height:image.height,rgba:Array.from(image.rgba)} : null));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@needs_node
+@pytest.mark.parametrize("compress", [True, False], ids=["packbits", "raw"])
+def test_a_photoshop_document_is_decoded_to_its_pixels(tmp_path, compress):
+    """No browser will make an image of a ``.psd``, and 3ds Max scenes name
+    them freely — a tyre whose tread lives in one is a plain black ring
+    without this.
+
+    The composite is stored planar, the whole of one channel before the next,
+    so a reader that takes it for RGB triples gets three bands of nonsense
+    rather than nothing at all.
+    """
+    import fbxbuild as fb
+
+    width, height = 19, 5
+    pixels = bytearray()
+    for y in range(height):
+        for x in range(width):
+            # A run long enough to be coded as one, then bytes that cannot be.
+            if x < 6:
+                pixels += bytes((200, 30, 40))
+            else:
+                pixels += bytes((x * 7 % 256, y * 40 % 256, (x + y) * 11 % 256))
+
+    image = _decode_psd(tmp_path, fb.psd(width, height, bytes(pixels), compress=compress))
+    assert image is not None, "the decoder would not claim it"
+    assert (image["width"], image["height"]) == (width, height)
+    got = bytes(v for i, v in enumerate(image["rgba"]) if i % 4 != 3)
+    assert got == bytes(pixels)
+    assert set(image["rgba"][3::4]) == {255}, "no alpha channel means opaque"
+
+
+@needs_node
+def test_a_greyscale_document_comes_out_grey_rather_than_red(tmp_path):
+    """One channel is the picture, not the red of a picture missing two."""
+    import fbxbuild as fb
+
+    pixels = bytes(bytearray(sum(([v, 0, 0] for v in (10, 90, 200, 255)), [])))
+    image = _decode_psd(tmp_path, fb.psd(4, 1, pixels, channels=1))
+    assert image is not None
+    assert image["rgba"][0:4] == [10, 10, 10, 255]
+    assert image["rgba"][8:12] == [200, 200, 200, 255]
+
+
+@needs_node
+@pytest.mark.parametrize("mangle,why", [
+    (lambda d: b"8BPS" + b"\x00\x02" + d[6:], "a PSB, whose sizes are wider"),
+    (lambda d: d[:22] + b"\x00\x10" + d[24:], "sixteen bits a channel"),
+    (lambda d: d[:24] + b"\x00\x04" + d[26:], "CMYK, which needs a profile"),
+    (lambda d: d[:40], "cut off before the picture"),
+], ids=["psb", "16bit", "cmyk", "truncated"])
+def test_a_document_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, why):
+    """Returning nothing has it reported as an image that would not decode.
+
+    Returning a guess would have it drawn wrongly, which is worse: a texture
+    nobody can tell is wrong is one nobody fixes.
+    """
+    import fbxbuild as fb
+
+    good = fb.psd(4, 1, bytes(12))
+    assert _decode_psd(tmp_path, mangle(good)) is None, why
+
+
 def _wasm_dump(path: str) -> dict:
     result = _run(["node", str(WEB / "test" / "dump.js"), path], env=_node_env())
     assert result.returncode == 0, result.stderr
@@ -208,6 +290,40 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
 
     path = tmp_path / "scene.max"
     path.write_bytes(fb.build_max(shader=shader))
+
+    js = _wasm_dump(str(path))
+    python = _python_dump(str(path))
+    assert js["warnings"] == []
+    assert len(js["nodes"]) == len(python), (
+        f"record count differs: js={len(js['nodes'])} python={len(python)}"
+    )
+    for index, (a, b) in enumerate(zip(python, js["nodes"])):
+        assert a == b, f"record {index} differs:\n  python={a}\n  js    ={b}"
+
+
+@needs_clang
+@needs_node
+@pytest.mark.parametrize("scene", [
+    # A wheel linked to a body, whose controller is read relative to it.
+    {"name": "body", "place": (0.0, 0.0, 100.0), "child": (10.0, 0.0, -20.0)},
+    # A Multi/Sub-Object, and the slot each face of the cube picks out of it.
+    {"slots": 4, "materials": [0, 1, 2, 3, 1, 0], "groups": [1 << 20] * 6},
+    # What a 3ds Max 2012 writes: its parameters and its asset table both.
+    {"shader": "Blinn", "param_chunk": 0x000E, "assets_version": 2},
+    # A V-Ray material's diffuse and its bump, which must not be swapped.
+    {"shader": "VRayMtl", "material_class": "VRayMtl",
+     "maps": {7: "colour.png", 10: "bump.png"}},
+], ids=["hierarchy", "slots", "max2012", "vray-maps"])
+def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
+    """The same cross-check over the shapes a real car scene turns out to use.
+
+    Each of these was a way the two readers could have drifted apart while
+    still agreeing about a cube with one material on it.
+    """
+    import fbxbuild as fb
+
+    path = tmp_path / "scene.max"
+    path.write_bytes(fb.build_max(**scene))
 
     js = _wasm_dump(str(path))
     python = _python_dump(str(path))

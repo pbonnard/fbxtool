@@ -76,6 +76,8 @@
   /** Binary payloads a .gltf points at, keyed the same way. */
   const suppliedBuffers = new Map();
   let missingTextures = [];
+  /** Named, supplied, and still not an image this can draw. */
+  let unreadableTextures = [];
   /** The palette on screen, its materials grouped, and the user's edits. */
   let currentPalette = [];
   let materialGroups = [];
@@ -185,7 +187,7 @@
   }
 
   //: What counts as something a model needs rather than something beside it.
-  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|mtl|bin|json)$/i;
+  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|mtl|bin|json)$/i;
 
   /**
    * As much of a folder as is worth reading, models and their companions first.
@@ -316,10 +318,12 @@
       setStatus(`That is ${(list.length + left).toLocaleString()} files — reading the `
         + `first ${DROP_LIMIT.toLocaleString()}, models and their images first.`, 'warn');
     }
-    // KTX2 is a texture rather than a picture, and no browser makes an image
-    // of one — but it is still an image this tool decodes, so it arrives the
-    // same way as the rest rather than being taken for the model.
-    const images = list.filter((f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2)$/i.test(f.name));
+    // KTX2 is a texture rather than a picture, and a .psd is a document rather
+    // than either; no browser makes an image of one — but both are images this
+    // tool decodes, so they arrive the same way as the rest rather than being
+    // taken for the model.
+    const images = list.filter(
+      (f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd)$/i.test(f.name));
     const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
     // A .gltf keeps its vertices in a .bin beside it, the way an .obj keeps its
     // colours in an .mtl.
@@ -493,6 +497,7 @@
   async function refreshTextures() {
     const textures = await resolveTextures(currentPalette);
     missingTextures = textures.missing;
+    unreadableTextures = textures.unreadable;
     viewer.setTextures(textures.images);
     viewer.setFinishTextures(textures.finish);
     viewer.setPalette(currentPalette);
@@ -580,6 +585,7 @@
     flips = [false, false, false];
     objectIndex = emptyIndex();
     missingTextures = [];
+    unreadableTextures = [];
 
     dom.panel.innerHTML = placeholders.report;
     dom.tree.innerHTML = placeholders.records;
@@ -1689,6 +1695,27 @@
       + (unsmoothedParts ? ` · ${unsmoothedParts} too large to smooth` : '');
   }
 
+  /**
+   * What became of the maps that did not arrive, in the words that fit.
+   *
+   * A file nobody supplied is answered by supplying it, and saying so is
+   * useful.  A file that is sitting in the folder and will not decode is a
+   * different thing, and telling someone to drop in what they have already
+   * dropped in reads as the tool not knowing what it has been given.
+   */
+  function textureNote(textures) {
+    let text = '';
+    if (textures.missing.length) {
+      text += ` · missing: ${textures.missing.join(', ')}`
+        + ' — drop the folder in, or use Open folder';
+    }
+    if ((textures.unreadable || []).length) {
+      text += ` · supplied but unreadable: ${textures.unreadable.join(', ')}`
+        + ' — save as PNG or JPEG';
+    }
+    return text;
+  }
+
   /** How many of a palette's materials the file marks as see-through. */
   function seeThrough(palette) {
     const count = palette.filter((m) => m.opacity < 0.996).length;
@@ -2662,9 +2689,28 @@
     }
   }
 
+  /**
+   * The flattened picture inside a Photoshop document.
+   *
+   * Same case as a KTX2: no browser will make an image of one, and 3ds Max
+   * scenes name them freely — a tyre whose tread lives in a `.psd` is a plain
+   * black ring without this.
+   */
+  async function decodePsd(bytes) {
+    try {
+      const image = FbxPsd.decode(bytes);
+      if (!image) return null;
+      return await createImageBitmap(new ImageData(image.rgba, image.width, image.height));
+    } catch (error) {
+      console.warn('PSD:', error.message);
+      return null;
+    }
+  }
+
   async function decodeTexture(request, supplied) {
     if (request.embedded) {
       if (looksLikeKtx2(request.embedded)) return decodeKtx2(request.embedded);
+      if (FbxPsd.looksLikePsd(request.embedded)) return decodePsd(request.embedded);
       const blob = new Blob([request.embedded]);
       try {
         return await createImageBitmap(blob);
@@ -2676,6 +2722,9 @@
     if (!file) return null;
     if (/\.ktx2$/i.test(file.name)) {
       return decodeKtx2(new Uint8Array(await file.arrayBuffer()));
+    }
+    if (/\.psd$/i.test(file.name)) {
+      return decodePsd(new Uint8Array(await file.arrayBuffer()));
     }
     try {
       return await createImageBitmap(file);
@@ -2704,7 +2753,7 @@
       }
       material[field] = layerOf.get(key);
     }
-    if (!requests.length) return { images: [], missing: [], requested: 0 };
+    if (!requests.length) return { images: [], missing: [], unreadable: [], requested: 0 };
 
     const decoded = await Promise.all(requests.map((r) => decodeTexture(r, suppliedImages)));
 
@@ -2717,10 +2766,20 @@
     for (const material of palette) {
       material[field] = remap.has(material[field]) ? remap.get(material[field]) : -1;
     }
-    const missing = requests
-      .filter((_, index) => !decoded[index])
-      .map((request) => baseName(request.path) || request.name);
-    return { images, missing, requested: requests.length };
+    // Two different things go wrong here and they need different words. A file
+    // nobody supplied is answered by supplying it; a file that is sitting in
+    // the folder and will not decode is not, and telling someone to drop in
+    // what they have already dropped in is the tool being wrong about its own
+    // state rather than about theirs.
+    const failed = requests.filter((_, index) => !decoded[index]);
+    const named = (request) => baseName(request.path) || request.name;
+    const absent = (request) => !request.embedded && !suppliedImages.has(named(request));
+    return {
+      images,
+      missing: failed.filter(absent).map(named),
+      unreadable: failed.filter((r) => !absent(r)).map(named),
+      requested: requests.length,
+    };
   }
 
   /**
@@ -2744,9 +2803,10 @@
     return {
       images: base.images,
       requested: base.requested,
-      // A map that was named and not supplied is worth saying so about,
+      // A map that was named and did not arrive is worth saying so about,
       // whichever of the two it was.
       missing: [...new Set([...base.missing, ...finish.missing])],
+      unreadable: [...new Set([...base.unreadable, ...finish.unreadable])],
       finish: finish.images,
     };
   }
@@ -2922,6 +2982,7 @@
 
       const textures = await resolveTextures(built.palette);
       missingTextures = textures.missing;
+      unreadableTextures = textures.unreadable;
       installPalette(built.palette, built.mesh);
       viewer.setTextures(textures.images);
       viewer.setFinishTextures(textures.finish);
@@ -2943,10 +3004,7 @@
       if (textures.requested) {
         text += ` · ${textures.images.length}/${textures.requested} textures`;
       }
-      if (textures.missing.length) {
-        text += ` · missing: ${textures.missing.join(', ')}`
-          + ' — drop the folder in, or use Open folder';
-      }
+      text += textureNote(textures);
       text += drawNote();
       dom.meshInfo.textContent = text;
       // The scene is whole now, so the parts are there to be dressed. This
@@ -3131,6 +3189,7 @@
 
       const textures = await resolveTextures(palette);
       missingTextures = textures.missing;
+      unreadableTextures = textures.unreadable;
       // The assembled palette, not the geometry's own: an assignment can add
       // materials to it, and the mesh was put together against that one.
       installPalette(built.palette, mesh);
@@ -3155,10 +3214,7 @@
         text += ` · ${textures.images.length}/${textures.requested} textures`;
         if (!mesh.hasUv) text += ' (no UVs in this mesh)';
       }
-      if (textures.missing.length) {
-        text += ` · missing: ${textures.missing.join(', ')}`
-          + ' — drop the folder in, or use Open folder';
-      }
+      text += textureNote(textures);
       if (chosen.fromGeometry) {
         text += ` · ${chosen.axis.toUpperCase()} up from the geometry`;
         if (currentAnalysis.globalSettings.upAxis) {
@@ -3350,6 +3406,7 @@
       get analysis() { return currentAnalysis; },
       get viewer() { return viewer; },
       get missingTextures() { return missingTextures; },
+      get unreadableTextures() { return unreadableTextures; },
       get loadCount() { return loadCount; },
       get palette() { return currentPalette; },
       get parts() { return sceneParts.length; },
