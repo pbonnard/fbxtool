@@ -264,6 +264,51 @@ def test_the_material_a_part_wears_comes_with_it():
     assert any(c.props[1].value == material_uid for c in connections.children)
 
 
+def _material_props(doc):
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    material = next(n for n in objects.children if n.name == "Material")
+    return {p.props[0].value: [q.value for q in p.props[4:]]
+            for p in material.get("Properties70").children}
+
+
+def test_a_shader_says_which_parameter_of_its_block_is_which():
+    """The block a shader fills starts with ambient, not diffuse.
+
+    Reading it by position takes the ambient for the colour of the surface,
+    which is what the first-colour rule does to a material it was not written
+    for.  The class table names the shader, and each shader's own layout says
+    where the rest of the surface is: what it reflects, and how glossy.
+    """
+    props = _material_props(parse_max(fb.build_max(shader="Blinn"), load_arrays=True))
+    assert props["DiffuseColor"] == pytest.approx(fb.MAX_DIFFUSE, abs=1e-6)
+    assert props["SpecularColor"] == pytest.approx(fb.MAX_SPECULAR, abs=1e-6)
+    assert props["SpecularFactor"] == pytest.approx([fb.MAX_SPECULAR_LEVEL], abs=1e-6)
+    # Glossiness is 0 to 1 in the file and a percentage as an exponent, which
+    # is the conversion 3ds Max's own exporter makes.
+    assert props["ShininessExponent"] == pytest.approx([fb.MAX_GLOSSINESS * 100], abs=1e-4)
+
+
+def test_each_shader_reads_its_own_layout():
+    """Anisotropic keeps its specular level where Blinn keeps its glossiness,
+    so the two cannot be read the same way round."""
+    props = _material_props(parse_max(fb.build_max(shader="Anisotropic"), load_arrays=True))
+    assert props["SpecularFactor"] == pytest.approx([fb.MAX_GLOSSINESS], abs=1e-6)
+    # Its glossiness is two parameters further on, and this block has none.
+    assert "ShininessExponent" not in props
+
+
+def test_a_plugins_own_material_is_read_no_further_than_its_colour():
+    """VRay, Corona and the rest lay their blocks out as they please.
+
+    Reading one by a shader's layout would put its reflection where its colour
+    goes, so an unknown class keeps the older rule — the first colour is the
+    diffuse — and states nothing about the finish.
+    """
+    props = _material_props(parse_max(fb.build_max(shader="VRayMtl"), load_arrays=True))
+    assert list(props) == ["DiffuseColor"]
+    assert props["DiffuseColor"] == pytest.approx(fb.MAX_AMBIENT, abs=1e-6)
+
+
 def test_the_picture_a_material_wears_is_named():
     """The map is not in the scene: a parameter block carries the identifier of
     an asset, and the asset table turns that into a file name."""

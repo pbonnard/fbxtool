@@ -124,7 +124,12 @@ index list becomes an FBX polygon run with every third index complemented;
 `TEXCOORD_0` becomes a UV layer with V flipped, glTF measuring it downwards
 from the top. Metallic-roughness becomes the material properties the rest of
 the tool already reads — `DiffuseColor` and `SpecularColor` split by
-metalness, and roughness back to a shininess exponent.
+metalness, and roughness back to a shininess exponent. What a file states
+beyond that is read too: `KHR_materials_specular` for a tinted reflectance,
+`KHR_materials_ior` for a dielectric that is not the assumed 4%,
+`KHR_materials_transmission` for glass written over an opaque material, and
+`KHR_materials_pbrSpecularGlossiness` — the older exporters' way of describing
+a surface, where the metallic-roughness block beside it is only a stand-in.
 
 Attributes may be interleaved behind a `byteStride`, indices may be 8, 16 or
 32 bits, and a *sparse* accessor may overwrite some of what a buffer view
@@ -257,15 +262,26 @@ float  r, g, b         on the end
 ```
 
 Which id means *diffuse* is the plugin's own business — the names live in the
-DLL and not in the file — so the reader takes **the first colour-valued
-parameter**, which is a rule that can be read off the files rather than assumed
-about a plugin, and holds for every class met so far (VRayMtl, VRayLightMtl,
-CoronaMtl, Standard). A **Multi/Sub-Object** becomes one material per slot, and
-a face's material id picks between them. What a VRay material *reflects* — the
-parameter that makes its chrome chrome — sits two parameters further on with
-another between them, so it is left alone rather than guessed at; the Materials
-tab is where a surface gets its finish, and an assignment saved there is
-remembered for the file.
+DLL and not in the file — but the file does say *which plugin*, and that is
+enough. A material refers to its shader, the shader to the block, and the class
+table names the shader; the shaders 3ds Max itself ships agree on the front of
+the block (0 ambient, 1 diffuse, 2 specular, 3 self-illumination) and publish
+where their floats fall. So a **Standard** material is read for its colour,
+what it reflects, its specular level and its glossiness — the last as the
+shininess exponent 3ds Max's own exporter would write, glossiness × 100.
+Oren-Nayar-Blinn is Blinn with two parameters added on the end, so the Blinn
+family reads alike; Anisotropic keeps its specular level where Blinn keeps its
+glossiness, and is read its own way round.
+
+A plugin's own material — VRayMtl, VRayLightMtl, CoronaMtl — is not in that
+table and is not read as though it were: it keeps the older rule, **the first
+colour-valued parameter is the diffuse**, and nothing is claimed about its
+finish. What a VRay material *reflects* sits two parameters further on with
+another between them, and reading it by a shader's layout would put the
+reflection where the colour goes. A **Multi/Sub-Object** becomes one material
+per slot, and a face's material id picks between them. The Materials tab is
+where a surface the file does not describe gets its finish, and an assignment
+saved there is remembered for the file.
 
 Textures are stranger: the file name is not in the scene at all. A parameter
 block carries a sixteen-byte identifier, and `FileAssetMetaData3` maps that to
@@ -619,12 +635,28 @@ that:
 | `Shininess` / `ShininessExponent` | roughness, `sqrt(2 / (exponent + 2))` |
 | `Opacity`, `TransparencyFactor` | how much the surface hides |
 
+That mapping is the fallback, not the first choice. A material carries its own
+renderer's parameters beside the Phong ones, under the same vendor prefix the
+texture connections go by — `3dsMax|main|base_color`, `3dsMax|main|roughness`,
+`3dsMax|main|metalness`, `Maya|baseColor`, `Maya|specularRoughness`,
+`Maya|metalness` — and those are the numbers the artist set, where the Phong
+values next to them are the exporter's approximation of the same surface. So
+the prefix is dropped and a stated base colour, roughness, metalness or opacity
+is read instead of being reconstructed:
+
+| Stated by the file | Used as |
+| --- | --- |
+| `base_color` / `baseColor` | albedo, with no diffuse factor in front of it |
+| `roughness` / `specularRoughness` | roughness directly |
+| `metalness` / `metallic` | folded in: a metal reflects its own colour and keeps no diffuse, a dielectric reflects 4% |
+| `opacity`, `transparency` | how much the surface hides |
+
 A Phong specular colour scales a highlight — it is not a Fresnel reflectance,
 and taken literally it makes a mirror of everything, since OBJ libraries
 habitually write `Ks 0.9 0.9 0.9`. It is capped at 0.16, the brightest a
 dielectric reaches, unless the file states a metalness outright. A `.blend`
-does: its materials carry `metallic`, `roughness` and `specular`, so those are
-read and converted rather than guessed at.
+does, and so do glTF and an FBX written from a Physical Material or a
+standardSurface, so those are read and converted rather than guessed at.
 
 Colour is managed end to end: images upload as `SRGB8_ALPHA8` so the sampler
 returns linear values, material colours are linear as written, shading happens

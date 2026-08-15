@@ -1503,6 +1503,11 @@ def _max_param_colour(param: int, rgb: "tuple[float, float, float]") -> bytes:
     return _max_chunk(0x100E, struct.pack("<HHIIIB3f", param, 2, 0, 0, 0, 0, *rgb))
 
 
+def _max_param_float(param: int, value: float) -> bytes:
+    """The same, valued as a float — one number on the end instead of three."""
+    return _max_chunk(0x100E, struct.pack("<HHIIIBf", param, 0, 0, 0, 0, 0, value))
+
+
 def _max_float_controller(value: float) -> bytes:
     """A Bezier Float, which keeps its one value wrapped in a block of its own.
 
@@ -1538,12 +1543,22 @@ def _max_face(corners: "list[int]", material: int = 0) -> bytes:
     return out
 
 
+#: What a ``build_max(shader=...)`` scene says its one surface is. The order
+#: is the one every shader 3ds Max ships lays its block out in: ambient,
+#: diffuse and specular first, the floats behind them.
+MAX_AMBIENT = (0.2, 0.2, 0.2)
+MAX_DIFFUSE = (0.8, 0.1, 0.05)
+MAX_SPECULAR = (1.0, 0.9, 0.8)
+MAX_GLOSSINESS = 0.25
+MAX_SPECULAR_LEVEL = 0.6
+
+
 def build_max(*, name: str = "cube001", with_uvs: bool = True,
               build: int = (20 * 1000) << 16 | 966,
               kind: str = "poly", compressed: bool = False,
               place: "tuple[float, float, float] | None" = None,
               offset: "tuple[float, float, float] | None" = None,
-              smooth: int = 0) -> bytes:
+              smooth: int = 0, shader: "str | None" = None) -> bytes:
     """A .max holding one cube under one node.
 
     The cube is a unit cube, which is enough to exercise every rule the reader
@@ -1560,6 +1575,11 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     the node and its mesh, which is a separate thing again; and ``smooth`` puts
     a subdividing modifier over the mesh, which is how a scene comes to store a
     cage rather than what was modelled.
+
+    ``shader`` names a shader between the material and its parameter block —
+    ``"Blinn"``, or a plugin's own name — and fills that block the way such a
+    shader fills it.  Left out, the material holds a block of one colour, which
+    is a plugin's material and all a reader can say about one.
     """
     points = [
         (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
@@ -1610,23 +1630,43 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
 
     poly = _max_chunk(0x0000, _max_chunk(0x08FE, mesh, container=True), container=True)
     # A material, the parameter block holding its colour and the identifier of
-    # the picture it wears, and the node that says the mesh wears it.
+    # the picture it wears, and the node that says the mesh wears it. A shader
+    # fills that block out; without one it holds the single colour a plugin's
+    # own material is read for.
+    block = (_max_param_colour(0, MAX_AMBIENT)
+             + _max_param_colour(1, MAX_DIFFUSE)
+             + _max_param_colour(2, MAX_SPECULAR)
+             + _max_param_float(5, MAX_GLOSSINESS)
+             + _max_param_float(6, MAX_SPECULAR_LEVEL)) if shader \
+        else _max_param_colour(1, MAX_DIFFUSE)
     params = _max_chunk(0x0002,
-                        _max_param_colour(1, (0.8, 0.1, 0.05))
+                        block
                         + _max_chunk(0x0003, bytes(8) + _max_asset_id() + bytes(8)),
                         container=True)
-    material = _max_chunk(0x0003,
-                          _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, 2))
-                          + _max_chunk(0x5431,
-                                       _max_chunk(0x4001, _max_utf16("Body paint")),
-                                       container=True),
-                          container=True)
     # The mesh is entity 0, the node 1, its material's parameters 2 and the
-    # material itself 3; anything else is numbered from there.
+    # material itself 3; anything else is numbered from there — the shader
+    # first, so that the material has something to point at.
     extra = b""
     nxt = 4
     node_refs = [(3, 3)]
     holds = 0                      # what the node points at for its object
+
+    # What the material refers to for its parameters: the block itself, or the
+    # shader that says what the numbers in it are.
+    parameters = 2
+    if shader:
+        parameters = nxt
+        extra += _max_chunk(0x0008,
+                            _max_chunk(0x2034, struct.pack("<I", 2)),
+                            container=True)
+        nxt += 1
+
+    material = _max_chunk(0x0003,
+                          _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, parameters))
+                          + _max_chunk(0x5431,
+                                       _max_chunk(0x4001, _max_utf16("Body paint")),
+                                       container=True),
+                          container=True)
 
     if smooth:
         extra += _max_chunk(0x0002,
@@ -1675,7 +1715,9 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                + _max_class("Bezier Float", 0x9003, 0x2007)
                + _max_class("Position XYZ", 0x900B, 0x118F7E02)
                + _max_class("Position/Rotation/Scale", 0x9008, 0x2005)
-               + _max_class("TurboSmooth", 0x810, 0x0D727B3E))
+               + _max_class("TurboSmooth", 0x810, 0x0D727B3E)
+               # Class 8, which is what a shader entity's chunk id names.
+               + _max_class(shader or "Shader", 0xC02, 0x02))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),

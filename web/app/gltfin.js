@@ -12,6 +12,7 @@
  *   normals and UVs per vertex        layer elements mapped ByVertice
  *   a node's matrix or its TRS        Lcl Translation / Rotation / Scaling
  *   metallic-roughness               DiffuseColor, SpecularColor, Metallic
+ *   specular-glossiness              the same, read from the extension
  *   Y up, metres                      declared as such in GlobalSettings
  *
  * Buffers may be inside the .glb, spelled out in a data: URI, or in a .bin
@@ -303,19 +304,51 @@ const FbxGltfIn = (function () {
     /* ---- materials */
     const materialUids = (json.materials || []).map((material, index) => {
       const id = uid();
+      const extensions = material.extensions || {};
       const pbr = material.pbrMetallicRoughness || {};
-      const base = pbr.baseColorFactor || [0.8, 0.8, 0.8, 1];
-      const metallic = pbr.metallicFactor === undefined ? 1 : pbr.metallicFactor;
-      const roughness = pbr.roughnessFactor === undefined ? 1 : pbr.roughnessFactor;
-      // Metal takes its reflectance from the base colour, a dielectric 4% —
-      // unless KHR_materials_specular says otherwise, which is the one place
-      // glTF records a reflectance of its own.
-      const extension = (material.extensions || {}).KHR_materials_specular || {};
+      // The spec's own defaults, which are what a file leaving a factor out
+      // is asking for: a white base, fully metallic, fully rough.
+      const base = pbr.baseColorFactor || [1, 1, 1, 1];
+      let metallic = pbr.metallicFactor === undefined ? 1 : pbr.metallicFactor;
+      let roughness = pbr.roughnessFactor === undefined ? 1 : pbr.roughnessFactor;
+      // A dielectric reflects 4% at normal incidence, which is an index of
+      // refraction of 1.5. KHR_materials_ior states another, and the same
+      // formula turns it back into a reflectance.
+      const ior = (extensions.KHR_materials_ior || {}).ior;
+      const dielectric = typeof ior === 'number' && ior > 0
+        ? ((ior - 1) / (ior + 1)) ** 2 : 0.04;
+      // Metal takes its reflectance from the base colour, a dielectric that
+      // 4% — unless KHR_materials_specular says otherwise, which is the one
+      // place metallic-roughness glTF records a reflectance of its own.
+      const extension = extensions.KHR_materials_specular || {};
       const tint = extension.specularColorFactor || [1, 1, 1];
       const strength = extension.specularFactor === undefined ? 1 : extension.specularFactor;
-      const specular = [0, 1, 2].map((k) =>
-        0.04 * tint[k] * strength * (1 - metallic) + base[k] * metallic);
-      const diffuse = [0, 1, 2].map((k) => base[k] * (1 - metallic));
+      let specular = [0, 1, 2].map((k) =>
+        dielectric * tint[k] * strength * (1 - metallic) + base[k] * metallic);
+      let diffuse = [0, 1, 2].map((k) => base[k] * (1 - metallic));
+
+      /* An older exporter writes specular-glossiness instead, and then the
+       * metallic-roughness block beside it is a stand-in the extension is
+       * meant to override. Its three values are the surface itself: a diffuse
+       * colour, a reflectance and a glossiness, which is roughness the other
+       * way round. */
+      const sg = extensions.KHR_materials_pbrSpecularGlossiness;
+      if (sg) {
+        const tinted = sg.diffuseFactor || [1, 1, 1, 1];
+        diffuse = [0, 1, 2].map((k) => tinted[k]);
+        specular = (sg.specularFactor || [1, 1, 1]).slice(0, 3);
+        roughness = 1 - (sg.glossinessFactor === undefined ? 1 : sg.glossinessFactor);
+        metallic = 0;
+        if (tinted[3] !== undefined) base[3] = tinted[3];
+      }
+
+      // Glass is written as transmission over an opaque material, so what the
+      // file lets through counts against its opacity as much as its alpha.
+      const transmission = (extensions.KHR_materials_transmission || {}).transmissionFactor;
+      const alpha = material.alphaMode === 'BLEND' && base[3] !== undefined ? base[3] : 1;
+      const opacity = Math.min(alpha,
+        typeof transmission === 'number' ? 1 - transmission : 1);
+
       const props = [
         p70('DiffuseColor', 'Color', ...diffuse.map(D)),
         p70('SpecularColor', 'Color', ...specular.map(D)),
@@ -323,8 +356,7 @@ const FbxGltfIn = (function () {
         p70('ShininessExponent', 'Number',
           D(2 / Math.max(roughness * roughness, 1e-4) - 2)),
         p70('Metallic', 'Number', D(metallic)),
-        p70('Opacity', 'Number',
-          D(material.alphaMode === 'BLEND' && base[3] !== undefined ? base[3] : 1)),
+        p70('Opacity', 'Number', D(opacity)),
       ];
       objects.push(node('Material',
         [L(id), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
@@ -333,8 +365,10 @@ const FbxGltfIn = (function () {
           node('Properties70', [], props),
         ]));
 
-      // The base colour image, wherever it lives.
-      const textureIndex = pbr.baseColorTexture && pbr.baseColorTexture.index;
+      // The base colour image, wherever it lives — under the extension's own
+      // name for it when the extension is what states the surface.
+      const baseColour = (sg && sg.diffuseTexture) || pbr.baseColorTexture;
+      const textureIndex = baseColour && baseColour.index;
       const texture = textureIndex !== undefined && json.textures
         ? json.textures[textureIndex] : null;
       // A texture names its image directly, or through the extension that

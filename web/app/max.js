@@ -53,6 +53,10 @@ const FbxMax = (function () {
   const PARAM = 0x100e;
   const ASSET_REF = 0x0003;
   const MTL_CLASS = 0xc00;
+  // A parameter's type, of the list the SDK publishes. Only these two are
+  // whole numbers; the rest of what a shader keeps is float-valued.
+  const PARAM_INT = 1;
+  const PARAM_BOOL = 4;
 
   const node = (name, props = [], children = []) => ({ name, props, children });
   const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
@@ -553,25 +557,85 @@ const FbxMax = (function () {
   }
 
   /**
-   * The first colour-valued parameter of a parameter block.
+   * Every parameter of a parameter block, under the id the file gives it.
    *
-   * Which parameter id means *diffuse* is the plugin's own business and
-   * nothing in the file says — but every material class met so far writes its
-   * diffuse first, which is a rule that can be read off a file rather than
-   * assumed about a plugin. What a VRay material reflects is two parameters
-   * further on with another between them, so it is left alone rather than
-   * guessed at; the Materials tab is where a surface gets its finish.
+   * A parameter is `uint16 id; uint16 type;` then flags and its value, and the
+   * value is the last four bytes or, for a colour, the last twelve. What an id
+   * *means* is the plugin's business — but the class table says which plugin,
+   * and for the shaders 3ds Max itself ships the layout is published.
    */
-  function coloursOf(view, entity) {
+  function paramsOf(view, entity) {
     const out = [];
     chunks(view, entity.start, entity.end, (id, body, tail) => {
-      if (id !== PARAM || tail - body < 27) return true;
-      const rgb = [view.getFloat32(tail - 12, true), view.getFloat32(tail - 8, true),
-        view.getFloat32(tail - 4, true)];
-      if (rgb.every((v) => v >= 0 && v <= 1)) out.push(rgb);
-      return false;
+      const size = tail - body;
+      if (id !== PARAM || size < 21) return true;
+      const param = view.getUint16(body, true);
+      const kind = view.getUint16(body + 2, true);
+      if (size >= 27) {
+        const rgb = [view.getFloat32(tail - 12, true), view.getFloat32(tail - 8, true),
+          view.getFloat32(tail - 4, true)];
+        if (rgb.every((v) => v >= 0 && v <= 1)) out.push({ id: param, colour: rgb });
+      } else if (kind !== PARAM_INT && kind !== PARAM_BOOL) {
+        // A count or a checkbox read as a float is not a small number, it is
+        // a denormal or a NaN, so the types that are not float-valued are
+        // left where they are. Glossiness is one of several that are — the
+        // shaders declare it a percentage rather than a plain float.
+        const value = view.getFloat32(tail - 4, true);
+        if (Number.isFinite(value)) out.push({ id: param, value });
+      }
+      return true;
     });
     return out;
+  }
+
+  /**
+   * Where each shader 3ds Max ships keeps the numbers that describe a surface.
+   *
+   * They agree on the front of the block — 0 ambient, 1 diffuse, 2 specular,
+   * 3 the self-illumination colour — and part ways over the floats behind it,
+   * so the class the file names is what picks the reading. Oren-Nayar-Blinn is
+   * Blinn with a diffuse level and a roughness added on the end, which is why
+   * the Blinn family reads at the same two places; Strauss is a shader of one
+   * colour and keeps nothing where the others do.
+   *
+   * A plugin's own material — VRay, Corona, Arnold — is not in this table and
+   * is not read as though it were: it keeps today's rule, that the first
+   * colour in the block is the diffuse, and its finish is left to the
+   * Materials tab.
+   */
+  const SHADERS = new Map([
+    ['blinn', { diffuse: 1, specular: 2, glossiness: 5, level: 6 }],
+    ['phong', { diffuse: 1, specular: 2, glossiness: 5, level: 6 }],
+    ['metal', { diffuse: 1, glossiness: 5, level: 6 }],
+    ['oren-nayar-blinn', { diffuse: 1, specular: 2, glossiness: 5, level: 6 }],
+    ['anisotropic', { diffuse: 1, specular: 2, glossiness: 7, level: 5 }],
+    ['strauss', { diffuse: 0, glossiness: 1 }],
+  ]);
+
+  /** A shader's own name for itself, or nothing when the plugin is its own. */
+  const shaderLayout = (name) => SHADERS.get(String(name || '').trim().toLowerCase()) || null;
+
+  /**
+   * What a block of parameters says the surface is, read by a shader's layout.
+   *
+   * Each value comes from the id that holds it, and nothing is returned for a
+   * block that has no diffuse where the layout says one is — that block
+   * belongs to something else the material keeps, not to its surface.
+   */
+  function appearanceOf(params, layout) {
+    const at = (which, key) => {
+      if (layout[which] === undefined) return null;
+      const found = params.find((p) => p.id === layout[which] && p[key] !== undefined);
+      return found ? found[key] : null;
+    };
+    const colour = at('diffuse', 'colour');
+    if (!colour) return null;
+    return {
+      colour,
+      specular: at('specular', 'colour'),
+      glossiness: at('glossiness', 'value'),
+      level: at('level', 'value'),
+    };
   }
 
   /** The file a parameter block points at, by the identifier they share. */
@@ -592,26 +656,47 @@ const FbxMax = (function () {
    * A material, and whatever its references say it is made of. The walk stops
    * at another material, which is where a Multi/Sub-Object's own sub-materials
    * begin.
+   *
+   * A parameter block says nothing about itself, so what is carried down the
+   * walk is the class that holds it: a Standard material refers to its shader,
+   * the shader to the block, and it is the shader — Blinn, Phong, Anisotropic
+   * — that says what the numbers in that block are.
    */
   function readMaterial(view, bytes, entities, index, assets) {
     if (index >= entities.length) return null;
     const entity = entities[index];
-    let colours = [];
+    let look = null;
+    let plain = null;                 // the first colour anywhere, as a fallback
     let texture = null;
     const subs = [];
-    const queue = entity.refs.slice();
+    const queue = entity.refs.map((at) => [at, entity.cls.name]);
     const walked = new Set();
     while (queue.length && walked.size < 64) {
-      const at = queue.shift();
+      const [at, owner] = queue.shift();
       if (walked.has(at) || at >= entities.length) continue;
       walked.add(at);
       const part = entities[at];
       if ((part.cls.superId || 0) === MTL_CLASS) { subs.push(at); continue; }
-      if (!colours.length) colours = coloursOf(view, part);
+      // A block belongs to whatever holds it, however many blocks deep.
+      const name = String(part.cls.name || '');
+      const holder = /^parambloc/i.test(name) ? owner : name;
+      const params = paramsOf(view, part);
+      const layout = shaderLayout(holder);
+      // A shader's block wins wherever the walk finds it: a Standard material
+      // keeps three more blocks of its own, and one of them holds a filter
+      // colour that would otherwise pass for the colour of the surface.
+      if (layout && !look) look = appearanceOf(params, layout);
+      if (!plain) {
+        const first = params.find((p) => p.colour !== undefined);
+        if (first) plain = first.colour;
+      }
       if (!texture) texture = assetOf(view, bytes, part, assets);
-      queue.push(...part.refs);
+      for (const ref of part.refs) queue.push([ref, holder]);
     }
-    return { name: materialName(view, bytes, entity), colours, texture, subs };
+    // A plugin's material lays its block out as it pleases, so all that can be
+    // said of one is that the first colour in it is the diffuse.
+    if (!look) look = { colour: plain, specular: null, glossiness: null, level: null };
+    return { name: materialName(view, bytes, entity), look, texture, subs };
   }
 
   /* ---------------------------------------------------------------- scene */
@@ -882,8 +967,17 @@ const FbxMax = (function () {
       if (material.subs.length) continue;      // a Multi/Sub-Object is a list
       uid += 1;
       materialUids.set(index, uid);
-      const colour = material.colours[0] || [0.6, 0.6, 0.6];
-      const props = [p70('DiffuseColor', 'Color', ...colour.map(D))];
+      const look = material.look;
+      const props = [p70('DiffuseColor', 'Color',
+        ...(look.colour || [0.6, 0.6, 0.6]).map(D))];
+      if (look.specular) props.push(p70('SpecularColor', 'Color', ...look.specular.map(D)));
+      // Specular level is a percentage in the file and a factor here.
+      if (look.level !== null) props.push(p70('SpecularFactor', 'Number', D(look.level)));
+      // Glossiness is 0 to 1; the exponent an FBX material carries is that as
+      // a percentage, which is the conversion 3ds Max's own exporter makes.
+      if (look.glossiness !== null) {
+        props.push(p70('ShininessExponent', 'Number', D(look.glossiness * 100)));
+      }
       objects.push(node('Material',
         [L(uid), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),

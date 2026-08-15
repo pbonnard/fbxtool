@@ -17,6 +17,7 @@ one primitive                  one ``Geometry`` and one ``Model``
 ``TEXCOORD_0``                 ``LayerElementUV`` (V flipped)
 ``indices``                    ``PolygonVertexIndex``
 ``pbrMetallicRoughness``       ``DiffuseColor``, ``SpecularColor``, ``Metallic``
+specular-glossiness            the same, read from the extension
 ``images``                     ``Texture`` + ``Video``
 a node's matrix or its TRS     ``Lcl Translation`` / ``Rotation`` / ``Scaling``
 =============================  ====================================
@@ -354,22 +355,51 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
     for index, material in enumerate(json_doc.get("materials") or []):
         uid = build.uid()
         uids.append(uid)
+        extensions = material.get("extensions") or {}
         pbr = material.get("pbrMetallicRoughness") or {}
         base = [float(v) for v in pbr.get("baseColorFactor", (1.0, 1.0, 1.0, 1.0))]
         while len(base) < 4:
             base.append(1.0)
         metallic = float(pbr.get("metallicFactor", 1.0))
         roughness = float(pbr.get("roughnessFactor", 1.0))
-        # Metal takes its reflectance from the base colour, a dielectric 4% —
-        # unless KHR_materials_specular says otherwise, which is the one place
-        # glTF records a reflectance of its own.
-        extension = (material.get("extensions") or {}).get("KHR_materials_specular") or {}
+        # A dielectric reflects 4% at normal incidence, which is an index of
+        # refraction of 1.5.  KHR_materials_ior states another, and the same
+        # formula turns it back into a reflectance.
+        ior = (extensions.get("KHR_materials_ior") or {}).get("ior")
+        dielectric = ((ior - 1) / (ior + 1)) ** 2 if isinstance(ior, (int, float)) \
+            and ior > 0 else 0.04
+        # Metal takes its reflectance from the base colour, a dielectric that
+        # 4% — unless KHR_materials_specular says otherwise, which is the one
+        # place metallic-roughness glTF records a reflectance of its own.
+        extension = extensions.get("KHR_materials_specular") or {}
         tint = extension.get("specularColorFactor", (1.0, 1.0, 1.0))
         strength = float(extension.get("specularFactor", 1.0))
-        specular = [0.04 * float(tint[k]) * strength * (1 - metallic) + base[k] * metallic
-                    for k in range(3)]
+        specular = [dielectric * float(tint[k]) * strength * (1 - metallic)
+                    + base[k] * metallic for k in range(3)]
         diffuse = [base[k] * (1 - metallic) for k in range(3)]
-        opacity = base[3] if material.get("alphaMode") == "BLEND" else 1.0
+
+        # An older exporter writes specular-glossiness instead, and then the
+        # metallic-roughness block beside it is a stand-in the extension is
+        # meant to override.  Its three values are the surface itself: a
+        # diffuse colour, a reflectance, and a glossiness — roughness the
+        # other way round.
+        gloss = extensions.get("KHR_materials_pbrSpecularGlossiness")
+        if gloss:
+            tinted = [float(v) for v in gloss.get("diffuseFactor", (1.0, 1.0, 1.0, 1.0))]
+            while len(tinted) < 4:
+                tinted.append(1.0)
+            diffuse = tinted[:3]
+            specular = [float(v) for v in gloss.get("specularFactor", (1.0, 1.0, 1.0))][:3]
+            roughness = 1.0 - float(gloss.get("glossinessFactor", 1.0))
+            metallic = 0.0
+            base[3] = tinted[3]
+
+        # Glass is written as transmission over an opaque material, so what
+        # the file lets through counts against its opacity as much as its
+        # alpha does.
+        through = (extensions.get("KHR_materials_transmission") or {}).get("transmissionFactor")
+        alpha = base[3] if material.get("alphaMode") == "BLEND" else 1.0
+        opacity = min(alpha, 1.0 - float(through) if isinstance(through, (int, float)) else 1.0)
 
         props = [
             _p70("DiffuseColor", "Color", *(_d(c) for c in diffuse)),
@@ -387,15 +417,17 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
                 _node("Properties70", [], props),
             ])
         )
-        _texture_for(json_doc, pbr, build, buffers, uid, doc)
+        # Under the extension's own name for it when the extension is what
+        # states the surface.
+        _texture_for(json_doc, (gloss or {}).get("diffuseTexture")
+                     or pbr.get("baseColorTexture"), build, buffers, uid, doc)
     return uids
 
 
-def _texture_for(json_doc: dict, pbr: dict, build: _Builder,
+def _texture_for(json_doc: dict, entry: dict | None, build: _Builder,
                  buffers: Sequence[bytes | None], material_uid: int,
                  doc: Document) -> None:
     """The base colour image, wherever it lives."""
-    entry = pbr.get("baseColorTexture")
     if not entry:
         return
     textures = json_doc.get("textures") or []

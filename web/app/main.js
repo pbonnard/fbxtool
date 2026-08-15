@@ -1833,9 +1833,11 @@
       specular: look.specular,
       roughness: look.roughness,
       opacity: look.opacity,
-      // A .blend states metalness; FBX and OBJ leave it to be inferred, and
-      // nothing infers it, so those export as dielectrics.
-      metallic: typeof props.Metallic === 'number' ? props.Metallic : 0,
+      // Whatever the file says it is: a .blend and a glTF state a metalness
+      // outright, and so does an FBX written from a Physical Material or a
+      // standardSurface. A plain Phong material states none, and is a
+      // dielectric.
+      metallic: look.metallic,
       // Kept so an assignment can always be undone back to the file itself —
       // the name included, since a material can be renamed and its settings
       // still have to be found under what the file called it.
@@ -1845,7 +1847,7 @@
         specular: look.specular.slice(),
         roughness: look.roughness,
         opacity: look.opacity,
-        metallic: typeof props.Metallic === 'number' ? props.Metallic : 0,
+        metallic: look.metallic,
       },
       texture: diffuseTexture(material, objectIndex.resolve, currentAnalysis.connections),
       layer: -1,

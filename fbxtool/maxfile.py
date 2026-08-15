@@ -147,6 +147,11 @@ _MTL_NAME = 0x4001          # its name, inside that block
 _PARAM = 0x100E             # one parameter of a ParamBlock2
 _ASSET_REF = 0x0003         # a parameter block's reference to a file asset
 
+#: A parameter's type, of the list the SDK publishes.  Only these two are
+#: whole numbers; the rest of what a shader keeps is float-valued.
+_PARAM_INT = 1
+_PARAM_BOOL = 4
+
 #: Superclasses, as 3ds Max numbers them.
 _GEOM_CLASS = 0x10
 _MTL_CLASS = 0xC00
@@ -645,13 +650,13 @@ def _read_mesh(data: bytes, start: int, end: int) -> _Mesh | None:
 
 
 class _Material:
-    """One material as the viewer needs it: a name, a colour and a picture."""
+    """One material as the viewer needs it: a name, a surface and a picture."""
 
-    __slots__ = ("name", "colours", "texture", "subs")
+    __slots__ = ("name", "look", "texture", "subs")
 
-    def __init__(self, name: str, colours, texture, subs):
+    def __init__(self, name: str, look, texture, subs):
         self.name = name
-        self.colours = colours
+        self.look = look
         self.texture = texture
         self.subs = subs
 
@@ -664,24 +669,79 @@ def _material_name(scene: bytes, entity) -> str:
     return _text(scene[found[0]:found[1]]) if found else ""
 
 
-def _first_colour(scene: bytes, entity):
-    """The first colour-valued parameter of a parameter block.
+def _params_of(scene: bytes, entity):
+    """Every parameter of a parameter block, under the id the file gives it.
 
-    A parameter is ``uint16 id; uint16 type;`` then flags and its value, and a
-    colour is the three floats on the end.  Which id means *diffuse* is the
-    plugin's own business and nothing in the file says — but every material
-    class met so far writes its diffuse first, which is a rule that can be
-    read off a file rather than assumed about a plugin.
+    A parameter is ``uint16 id; uint16 type;`` then flags and its value, and
+    the value is the last four bytes or, for a colour, the last twelve.  What
+    an id *means* is the plugin's business — but the class table says which
+    plugin, and for the shaders 3ds Max itself ships the layout is published.
     """
-    out = []
+    out: list[tuple[int, str, object]] = []
     for idn, body, tail, _ in _chunks(scene, entity.start, entity.end):
-        if idn != _PARAM or tail - body < 27:
+        size = tail - body
+        if idn != _PARAM or size < 21:
             continue
-        red, green, blue = struct.unpack_from("<3f", scene, tail - 12)
-        if all(0.0 <= v <= 1.0 for v in (red, green, blue)):
-            out.append((red, green, blue))
-            break
+        param, kind = struct.unpack_from("<HH", scene, body)
+        if size >= 27:
+            rgb = struct.unpack_from("<3f", scene, tail - 12)
+            if all(0.0 <= v <= 1.0 for v in rgb):
+                out.append((param, "colour", rgb))
+        elif kind not in (_PARAM_INT, _PARAM_BOOL):
+            # A count or a checkbox read as a float is not a small number, it
+            # is a denormal or a NaN, so the types that are not float-valued
+            # are left where they are.  Glossiness is one of several that are
+            # — the shaders declare it a percentage rather than a plain float.
+            out.append((param, "value", struct.unpack_from("<f", scene, tail - 4)[0]))
     return out
+
+
+#: Where each shader 3ds Max ships keeps the numbers that describe a surface.
+#:
+#: They agree on the front of the block — 0 ambient, 1 diffuse, 2 specular, 3
+#: the self-illumination colour — and part ways over the floats behind it, so
+#: the class the file names is what picks the reading.  Oren-Nayar-Blinn is
+#: Blinn with a diffuse level and a roughness added on the end, which is why
+#: the Blinn family reads at the same two places; Strauss is a shader of one
+#: colour and keeps nothing where the others do.
+#:
+#: A plugin's own material — VRay, Corona, Arnold — is not in this table and
+#: is not read as though it were: it keeps the older rule, that the first
+#: colour in the block is the diffuse, and its finish is left alone.
+_SHADERS = {
+    "blinn": {"diffuse": 1, "specular": 2, "glossiness": 5, "level": 6},
+    "phong": {"diffuse": 1, "specular": 2, "glossiness": 5, "level": 6},
+    "metal": {"diffuse": 1, "glossiness": 5, "level": 6},
+    "oren-nayar-blinn": {"diffuse": 1, "specular": 2, "glossiness": 5, "level": 6},
+    "anisotropic": {"diffuse": 1, "specular": 2, "glossiness": 7, "level": 5},
+    "strauss": {"diffuse": 0, "glossiness": 1},
+}
+
+
+def _appearance_of(params, layout):
+    """What a block of parameters says the surface is, by a shader's layout.
+
+    Each value comes from the id that holds it, and nothing is returned for a
+    block that has no diffuse where the layout says one is — that block
+    belongs to something else the material keeps, not to its surface.
+    """
+    def at(which: str, kind: str):
+        if which not in layout:
+            return None
+        for param, got, value in params:
+            if param == layout[which] and got == kind:
+                return value
+        return None
+
+    colour = at("diffuse", "colour")
+    if colour is None:
+        return None
+    return {
+        "colour": colour,
+        "specular": at("specular", "colour"),
+        "glossiness": at("glossiness", "value"),
+        "level": at("level", "value"),
+    }
 
 
 def _asset_of(scene: bytes, entity, assets: dict):
@@ -704,18 +764,24 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     of them, so the walk goes down its references until it finds a picture —
     but not past another material, which is where a Multi/Sub-Object's own
     sub-materials begin.
+
+    A parameter block says nothing about itself, so what is carried down the
+    walk is the class that holds it: a Standard material refers to its shader,
+    the shader to the block, and it is the shader — Blinn, Phong, Anisotropic
+    — that says what the numbers in that block are.
     """
     if index >= len(entities):
         return None
     entity = entities[index]
-    colours: list = []
+    look = None
+    plain = None                    # the first colour anywhere, as a fallback
     texture = None
     subs: list[int] = []
 
-    queue = list(entity.refs)
+    queue = [(at, entity.cls.get("name") or "") for at in entity.refs]
     walked = set()
     while queue and len(walked) < 64:
-        at = queue.pop(0)
+        at, owner = queue.pop(0)
         if at in walked or at >= len(entities):
             continue
         walked.add(at)
@@ -723,12 +789,27 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
         if (part.cls.get("super_id") or 0) == _MTL_CLASS:
             subs.append(at)                     # a sub-material, not our own
             continue
-        if not colours:
-            colours = _first_colour(scene, part)
+        # A block belongs to whatever holds it, however many blocks deep.
+        name = part.cls.get("name") or ""
+        holder = owner if name.lower().startswith("parambloc") else name
+        params = _params_of(scene, part)
+        layout = _SHADERS.get(holder.strip().lower())
+        # A shader's block wins wherever the walk finds it: a Standard
+        # material keeps three more blocks of its own, and one of them holds a
+        # filter colour that would otherwise pass for the colour of the
+        # surface.
+        if layout and look is None:
+            look = _appearance_of(params, layout)
+        if plain is None:
+            plain = next((v for _, kind, v in params if kind == "colour"), None)
         if texture is None:
             texture = _asset_of(scene, part, assets)
-        queue.extend(part.refs)
-    return _Material(_material_name(scene, entity), colours, texture, subs)
+        queue.extend((ref, holder) for ref in part.refs)
+    # A plugin's material lays its block out as it pleases, so all that can be
+    # said of one is that the first colour in it is the diffuse.
+    if look is None:
+        look = {"colour": plain, "specular": None, "glossiness": None, "level": None}
+    return _Material(_material_name(scene, entity), look, texture, subs)
 
 
 class _Entity:
@@ -1061,8 +1142,21 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
             continue                    # a Multi/Sub-Object is its parts' list
         uid += 1
         material_uids[index] = uid
-        colour = material.colours[0] if material.colours else (0.6, 0.6, 0.6)
+        look = material.look
+        colour = look["colour"] or (0.6, 0.6, 0.6)
         props = [_p70("DiffuseColor", "Color", *(_d(c) for c in colour))]
+        if look["specular"] is not None:
+            props.append(_p70("SpecularColor", "Color",
+                              *(_d(c) for c in look["specular"])))
+        # Specular level is a percentage in the file and a factor here.
+        if look["level"] is not None:
+            props.append(_p70("SpecularFactor", "Number", _d(look["level"])))
+        # Glossiness is 0 to 1; the exponent an FBX material carries is that
+        # as a percentage, which is the conversion 3ds Max's own exporter
+        # makes.
+        if look["glossiness"] is not None:
+            props.append(_p70("ShininessExponent", "Number",
+                              _d(look["glossiness"] * 100)))
         objects_node.children.append(
             _node("Material",
                   [_l(uid), _s(f"{material.name or f'material{index}'}\x00\x01Material"),

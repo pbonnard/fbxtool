@@ -259,8 +259,47 @@ const FbxAnalyze = (function () {
    */
   const BASE_COLOUR = /^(diffuse|diffusecolor|basecolor|base_color|texmapdiffuse|color)$/i;
 
+  const plainName = (name) => String(name).split('|').pop().trim().toLowerCase();
+
   function drivesBaseColour(prop) {
-    return typeof prop === 'string' && BASE_COLOUR.test(prop.split('|').pop().trim());
+    return typeof prop === 'string' && BASE_COLOUR.test(plainName(prop));
+  }
+
+  /**
+   * The physically based parameters, under the names exporters spell them.
+   *
+   * A material carries its renderer's own parameter block beside the Phong
+   * one: a 3ds Max Physical Material writes `3dsMax|main|base_color`,
+   * `3dsMax|main|roughness` and `3dsMax|main|metalness`, Maya's standardSurface
+   * and Arnold write `Maya|baseColor`, `Maya|specularRoughness`,
+   * `Maya|metalness`, and Stingray `Maya|base_color`, `Maya|roughness`,
+   * `Maya|metallic`. Those are the numbers the artist set. The Phong values
+   * next to them are the exporter's approximation of the same surface, so
+   * where the file states the parameter itself, that is what is read.
+   */
+  const PBR_NAMES = new Map([
+    ['base_color', 'colour'], ['basecolor', 'colour'],
+    ['roughness', 'roughness'],
+    ['specularroughness', 'roughness'], ['specular_roughness', 'roughness'],
+    ['metalness', 'metalness'], ['metallic', 'metalness'],
+    ['opacity', 'opacity'],
+    ['transparency', 'transparency'],
+  ]);
+
+  /**
+   * What an exporter's own block says, by what each value means.
+   *
+   * Only prefixed names are read here: a bare `Opacity` or `Metallic` is the
+   * standard FBX property, which is read on its own terms further down.
+   */
+  function pbrValues(source) {
+    const out = {};
+    for (const key of Object.keys(source)) {
+      if (key.indexOf('|') < 0) continue;
+      const slot = PBR_NAMES.get(plainName(key));
+      if (slot && out[slot] === undefined) out[slot] = source[key];
+    }
+    return out;
   }
 
   /**
@@ -270,7 +309,9 @@ const FbxAnalyze = (function () {
    * each with a factor, plus a shininess exponent. Physically based shading
    * wants a roughness instead, and the standard mapping from a Blinn-Phong
    * exponent is `roughness = sqrt(2 / (exponent + 2))` — so the Mercedes'
-   * shininess of 25 becomes 0.27, about right for car paint.
+   * shininess of 25 becomes 0.27, about right for car paint. That conversion
+   * is the fallback, not the first choice: a file that states its roughness,
+   * metalness and base colour is read for those instead.
    *
    * Colours are linear; that is what exporters write and what the shader wants.
    */
@@ -282,33 +323,70 @@ const FbxAnalyze = (function () {
       return fallback.slice();
     };
     const number = (value, fallback) => (typeof value === 'number' ? value : fallback);
+    const scalar = (value) => {
+      const v = Array.isArray(value) ? Number(value[0]) : Number(value);
+      return Number.isFinite(v) ? v : null;
+    };
     const scale = (rgb, by) => rgb.map((v) => Math.max(0, v * by));
+    const clamp = (v, low, high) => Math.min(high, Math.max(low, v));
 
+    const pbr = pbrValues(source);
     const diffuse = source.DiffuseColor !== undefined ? source.DiffuseColor : source.Diffuse;
     const specular = source.SpecularColor !== undefined ? source.SpecularColor : source.Specular;
-    // A Lambert material has no specular at all; 0.04 is the usual reflectance
-    // of a dielectric at normal incidence.
-    let specularRgb = scale(vector(specular, [0.04, 0.04, 0.04]),
-      number(source.SpecularFactor, 1));
-    // A Phong specular colour scales a highlight; it is not a Fresnel
-    // reflectance, and taken literally it turns every surface into a mirror —
-    // OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at the
-    // brightest a dielectric reaches, unless the file states a metalness, in
-    // which case the value was computed rather than inferred.
-    const peak = Math.max(specularRgb[0], specularRgb[1], specularRgb[2]);
-    if (source.Metallic === undefined && peak > 0.16) {
-      specularRgb = specularRgb.map((v) => v * (0.16 / peak));
+    // A base colour is the surface itself, so no diffuse factor stands in
+    // front of it; a Phong diffuse is a colour times its factor.
+    let albedo = pbr.colour !== undefined
+      ? vector(pbr.colour, [0.72, 0.73, 0.76])
+      : scale(vector(diffuse, [0.72, 0.73, 0.76]), number(source.DiffuseFactor, 1));
+
+    // A metalness the file states is folded in here, the way every renderer
+    // folds it: a metal reflects its own colour and keeps no diffuse, a
+    // dielectric reflects 4%. A bare `Metallic` is left alone — that is what
+    // this project's own importers write, after folding it themselves.
+    const metalness = pbr.metalness !== undefined ? scalar(pbr.metalness) : null;
+    let specularRgb;
+    if (metalness !== null) {
+      const m = clamp(metalness, 0, 1);
+      specularRgb = albedo.map((c) => 0.04 * (1 - m) + c * m);
+      albedo = albedo.map((c) => c * (1 - m));
+    } else {
+      // A Lambert material has no specular at all; 0.04 is the usual
+      // reflectance of a dielectric at normal incidence.
+      specularRgb = scale(vector(specular, [0.04, 0.04, 0.04]),
+        number(source.SpecularFactor, 1));
+      // A Phong specular colour scales a highlight; it is not a Fresnel
+      // reflectance, and taken literally it turns every surface into a mirror —
+      // OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at the
+      // brightest a dielectric reaches, unless the file states a metalness, in
+      // which case the value was computed rather than inferred.
+      const peak = Math.max(specularRgb[0], specularRgb[1], specularRgb[2]);
+      if (source.Metallic === undefined && peak > 0.16) {
+        specularRgb = specularRgb.map((v) => v * (0.16 / peak));
+      }
     }
+
     const shininess = number(source.ShininessExponent, number(source.Shininess, 20));
-    const transparency = number(source.TransparencyFactor,
-      1 - number(source.Opacity, 1));
+    const stated = pbr.roughness !== undefined ? scalar(pbr.roughness) : null;
+    // Clamped away from a perfect mirror, which no shading model handles well.
+    const roughness = clamp(stated !== null ? stated
+      : Math.sqrt(2 / (Math.max(shininess, 0) + 2)), 0.05, 1);
+
+    let opacity;
+    if (pbr.opacity !== undefined && scalar(pbr.opacity) !== null) {
+      opacity = scalar(pbr.opacity);
+    } else if (pbr.transparency !== undefined && scalar(pbr.transparency) !== null) {
+      opacity = 1 - scalar(pbr.transparency);
+    } else {
+      opacity = 1 - number(source.TransparencyFactor, 1 - number(source.Opacity, 1));
+    }
 
     return {
-      colour: scale(vector(diffuse, [0.72, 0.73, 0.76]), number(source.DiffuseFactor, 1)),
-      specular: specularRgb.map((v) => Math.min(v, 1)),
-      // Clamped away from a perfect mirror, which no shading model handles well.
-      roughness: Math.min(1, Math.max(0.05, Math.sqrt(2 / (Math.max(shininess, 0) + 2)))),
-      opacity: Math.min(1, Math.max(0, 1 - transparency)),
+      colour: albedo.map((v) => Math.max(0, v)),
+      specular: specularRgb.map((v) => clamp(v, 0, 1)),
+      roughness,
+      opacity: clamp(opacity, 0, 1),
+      metallic: metalness !== null ? clamp(metalness, 0, 1)
+        : clamp(number(source.Metallic, 0), 0, 1),
     };
   }
 

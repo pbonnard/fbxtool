@@ -290,6 +290,64 @@ def test_the_specular_strength_scales_it():
     assert specular == pytest.approx([0.02, 0.02, 0.02])
 
 
+def _material_props(doc):
+    return {p.props[0].value: [q.value for q in p.props[4:]]
+            for p in child(objects_of(doc, "Material")[0], "Properties70").children}
+
+
+def test_specular_glossiness_is_read_where_a_file_states_it():
+    """An older exporter writes KHR_materials_pbrSpecularGlossiness, and the
+    metallic-roughness block beside it is the stand-in the extension is meant
+    to override — so it is the extension that says what the surface is."""
+    document = json.loads(fb.build_gltf()[0])
+    document["materials"][0]["extensions"] = {
+        "KHR_materials_pbrSpecularGlossiness": {
+            "diffuseFactor": [0.1, 0.2, 0.3, 1.0],
+            "specularFactor": [0.5, 0.4, 0.3],
+            "glossinessFactor": 0.75,
+        },
+    }
+    props = _material_props(parse_gltf(json.dumps(document).encode()))
+    assert props["DiffuseColor"] == pytest.approx([0.1, 0.2, 0.3])
+    assert props["SpecularColor"] == pytest.approx([0.5, 0.4, 0.3])
+    assert props["Metallic"] == pytest.approx([0.0])
+    # Glossiness is roughness the other way round.
+    assert props["ShininessExponent"] == pytest.approx([2 / 0.25 ** 2 - 2])
+
+
+def test_an_index_of_refraction_sets_what_a_dielectric_reflects():
+    """4% is an index of refraction of 1.5; KHR_materials_ior states another,
+    and the same formula turns it back into a reflectance."""
+    document = json.loads(fb.build_gltf()[0])
+    document["materials"][0]["pbrMetallicRoughness"]["metallicFactor"] = 0.0
+    document["materials"][0]["extensions"] = {"KHR_materials_ior": {"ior": 1.8}}
+    props = _material_props(parse_gltf(json.dumps(document).encode()))
+    assert props["SpecularColor"] == pytest.approx([(0.8 / 2.8) ** 2] * 3)
+
+
+def test_what_a_material_lets_through_counts_against_its_opacity():
+    """Glass is written as transmission over a material that is not blended at
+    all, so a reader that looks only at alpha draws it solid."""
+    document = json.loads(fb.build_gltf()[0])
+    document["materials"][0]["alphaMode"] = "OPAQUE"
+    document["materials"][0]["extensions"] = {
+        "KHR_materials_transmission": {"transmissionFactor": 0.9},
+    }
+    props = _material_props(parse_gltf(json.dumps(document).encode()))
+    assert props["Opacity"] == pytest.approx([0.1])
+
+
+def test_a_factor_a_file_leaves_out_is_the_one_the_spec_names():
+    """A material with no factors at all is a white, fully metallic, fully
+    rough surface — not a grey one."""
+    document = json.loads(fb.build_gltf()[0])
+    document["materials"][0] = {"name": "bare"}
+    props = _material_props(parse_gltf(json.dumps(document).encode()))
+    assert props["Metallic"] == pytest.approx([1.0])
+    assert props["SpecularColor"] == pytest.approx([1.0, 1.0, 1.0])
+    assert props["DiffuseColor"] == pytest.approx([0.0, 0.0, 0.0])
+
+
 def test_an_embedded_image_travels_as_raw_content(glb):
     doc = parse_bytes(glb)
     video = objects_of(doc, "Video")[0]
