@@ -549,7 +549,9 @@ ${SHADOW_LOOKUP}
     return len ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
   }
 
-  /** Upper-left 3x3 of a matrix; adequate while the model matrix is a rotation. */
+  /** Upper-left 3x3 of a matrix; adequate while the model matrix is a rotation,
+   *  or a rotation with an axis mirrored — both are their own inverse
+   *  transpose, which is what a normal is properly carried by. */
   function normalMatrix(m) {
     return new Float32Array([m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]);
   }
@@ -614,6 +616,8 @@ ${SHADOW_LOOKUP}
 
       this.mode = 0;
       this.upAxis = 'y';
+      /** Which of the mesh's own axes are mirrored, as ±1 per axis. */
+      this.flips = [1, 1, 1];
       this.hasUv = false;
       this.showTextures = true;
       this.triangleCount = 0;
@@ -1148,6 +1152,26 @@ ${SHADOW_LOOKUP}
       this.shadowStale = true;
       this.dirty = true;
     }
+
+    /**
+     * Mirror the mesh on any of its own axes — `[x, y, z]`, each true to flip.
+     *
+     * A mirror reverses which way round a triangle is wound, so what was the
+     * front face is now the back and the model would be drawn inside out. One
+     * mirror does that, and so does three; two cancel. `frontFace` says which
+     * winding counts as the front, and switching it there leaves every pass
+     * that culls — the shadow map, the see-through pass — asking for the same
+     * side it always asked for.
+     */
+    setFlips(flips) {
+      const next = [0, 1, 2].map((i) => ((flips || [])[i] ? -1 : 1));
+      if (next.every((v, i) => v === this.flips[i])) return;
+      this.flips = next;
+      const mirrored = next[0] * next[1] * next[2] < 0;
+      this.gl.frontFace(mirrored ? this.gl.CW : this.gl.CCW);
+      this.shadowStale = true;
+      this.dirty = true;
+    }
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
     setShowGround(on) { this.showGround = on !== false; this.dirty = true; }
 
@@ -1235,17 +1259,22 @@ ${SHADOW_LOOKUP}
       const axis = this.upAxis === 'z' ? 2 : 1;
       // The model matrix centres the mesh, so its lowest point ends up here.
       let lowest = this.meshMin[axis];
+      // Mirrored on the axis that points up, what hangs lowest is what stood
+      // highest — otherwise the floor cuts through the model it stands under.
+      let highest = this.meshMax[axis];
       // Pulled apart, the lowest part is not the one it was: the floor drops
       // to meet whichever piece now hangs the furthest down.
       if (this.explode > 0) {
         const centre = this.modelCentre || [0, 0, 0];
         for (const part of this.parts) {
           if (!part.min || !part.centre) continue;
-          const moved = part.min[axis] + (part.centre[axis] - centre[axis]) * this.explode;
-          if (moved < lowest) lowest = moved;
+          const shift = (part.centre[axis] - centre[axis]) * this.explode;
+          if (part.min[axis] + shift < lowest) lowest = part.min[axis] + shift;
+          if (part.max && part.max[axis] + shift > highest) highest = part.max[axis] + shift;
         }
       }
-      return lowest - (this.meshMin[axis] + this.meshMax[axis]) / 2;
+      const middle = (this.meshMin[axis] + this.meshMax[axis]) / 2;
+      return this.flips[axis] < 0 ? middle - highest : lowest - middle;
     }
 
     /** Draw the model into the depth buffer, seen from the sun. */
@@ -1291,6 +1320,15 @@ ${SHADOW_LOOKUP}
 
       let model = identity();
       if (this.upAxis === 'z') model = zUpToYUp();
+      // A mirrored axis is negated after the centring below, so the model
+      // turns over about its own middle and stays where it was on screen.
+      if (this.flips.some((f) => f < 0)) {
+        const mirror = identity();
+        mirror[0] = this.flips[0];
+        mirror[5] = this.flips[1];
+        mirror[10] = this.flips[2];
+        model = multiply(model, mirror);
+      }
       // Centre the model at the origin before the up-axis rotation.
       const translate = identity();
       translate[12] = -centre[0];

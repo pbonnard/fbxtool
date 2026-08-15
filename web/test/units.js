@@ -745,6 +745,28 @@ const applied = (m, p) => [0, 1, 2].map((r) => m[r] * p[0] + m[4 + r] * p[1] + m
 check('a Z-up scene is turned upright', nearAll(applied(zUp, [0, 0, 1]), [0, 1, 0])
   && nearAll(applied(zUp, [0, 1, 0]), [0, 0, -1]), show(applied(zUp, [0, 0, 1])));
 
+// A mirrored axis rides on the same matrix, so what leaves is what was shown.
+const flippedX = FbxGltf.rootMatrix('y', 1, [true, false, false]);
+check('a mirrored axis comes out negated, and only that axis',
+  nearAll(applied(flippedX, [1, 2, 3]), [-1, 2, 3]), show(applied(flippedX, [1, 2, 3])));
+check('and it mirrors after the up axis is put right, not before', (() => {
+  const m = FbxGltf.rootMatrix('z', 1, [false, false, true]);
+  // Mesh +Z is up and mirrored, so it comes out pointing down.
+  return nearAll(applied(m, [0, 0, 1]), [0, -1, 0]) && nearAll(applied(m, [1, 0, 0]), [1, 0, 0]);
+})(), show(applied(FbxGltf.rootMatrix('z', 1, [false, false, true]), [0, 0, 1])));
+check('two mirrors leave the handedness alone', (() => {
+  const det = (m) => m[0] * (m[5] * m[10] - m[6] * m[9])
+    - m[4] * (m[1] * m[10] - m[2] * m[9]) + m[8] * (m[1] * m[6] - m[2] * m[5]);
+  return det(FbxGltf.rootMatrix('y', 1, [true, false, false])) < 0
+    && det(FbxGltf.rootMatrix('y', 1, [true, true, false])) > 0
+    && det(FbxGltf.rootMatrix('y', 1, [true, true, true])) < 0;
+})());
+check('the scale still applies with a mirror on',
+  nearAll(applied(FbxGltf.rootMatrix('y', 0.01, [false, true, false]), [0, 100, 0]), [0, -1, 0]));
+check('and no mirror at all is the matrix it always was',
+  nearAll(FbxGltf.rootMatrix('y', 0.01, [false, false, false]),
+    FbxGltf.rootMatrix('y', 0.01)));
+
 console.log('\ngltf: materials');
 const asGltf = (entry) => FbxGltf.material(Object.assign({
   name: 'm', colour: [0.5, 0.25, 0.1], specular: [0.04, 0.04, 0.04], roughness: 0.4, opacity: 1,

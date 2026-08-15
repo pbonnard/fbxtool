@@ -20,6 +20,7 @@
     modeSelect: $('mode-select'),
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
+    flipButtons: [$('flip-x'), $('flip-y'), $('flip-z')],
     explodeSlider: $('explode-slider'),
     partInfo: $('part-info'),
     partName: $('part-name'),
@@ -576,6 +577,7 @@
     partTable = [];
     modeChosen = false;
     upAxisChosen = false;
+    flips = [false, false, false];
     objectIndex = emptyIndex();
     missingTextures = [];
 
@@ -594,6 +596,7 @@
     if (viewer) {
       viewer.clear();
       viewer.setHighlight(-1);
+      applyFlips();
     }
   }
 
@@ -659,6 +662,8 @@
         dom.upSelect.value = savedAxis;
         upAxisChosen = true;
       }
+      flips = recallFlips(doc.fileName);
+      applyFlips();
       objectIndex = buildObjectIndex(currentAnalysis.objects);
 
       renderReport();
@@ -1546,6 +1551,46 @@
     }
   }
 
+  /* Which axes are mirrored, remembered the same way and for the same reason:
+   * a model that arrives handed the wrong way round arrives that way every
+   * time, and the fix should not have to be found again.
+   *
+   * A mirror is not a view setting. It is written into the export, on the root
+   * node's matrix beside the up axis and the units � so what leaves is what is
+   * on screen, and nothing downstream has to be told about it. */
+  const AXES = ['x', 'y', 'z'];
+  let flips = [false, false, false];
+
+  const flipKey = (name) => `fbxtool:flip:${name || 'unnamed'}`;
+
+  function rememberFlips() {
+    if (!currentDoc) return;
+    try {
+      const on = AXES.filter((_, i) => flips[i]).join('');
+      if (on) window.localStorage.setItem(flipKey(currentDoc.fileName), on);
+      else window.localStorage.removeItem(flipKey(currentDoc.fileName));
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallFlips(fileName) {
+    try {
+      const saved = window.localStorage.getItem(flipKey(fileName)) || '';
+      return AXES.map((axis) => saved.includes(axis));
+    } catch (error) {
+      return [false, false, false];
+    }
+  }
+
+  /** Put the mirrors on the model and on the buttons that say so. */
+  function applyFlips() {
+    viewer.setFlips(flips);
+    dom.flipButtons.forEach((button, axis) => {
+      if (button) button.setAttribute('aria-pressed', flips[axis] ? 'true' : 'false');
+    });
+  }
+
   /**
    * Choose the up axis for a freshly built mesh and put the viewer on it —
    * unless the axis on screen was picked by hand, which outranks both the
@@ -2278,6 +2323,7 @@
         images,
         textures,
         upAxis: dom.upSelect.value,
+        flips: flips.slice(),
         unitScale: centimetres / 100,
       });
       download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
@@ -3189,6 +3235,14 @@
       viewer.setUpAxis(dom.upSelect.value);
       rememberUpAxis(dom.upSelect.value);
     });
+    dom.flipButtons.forEach((button, axis) => {
+      if (!button) return;
+      button.addEventListener('click', () => {
+        flips[axis] = !flips[axis];
+        applyFlips();
+        rememberFlips();
+      });
+    });
     dom.explodeSlider.addEventListener('input',
       () => viewer.setExplode(Number(dom.explodeSlider.value) / 100));
 
@@ -3312,6 +3366,7 @@
       undo: undoEdit,
       redo: redoEdit,
       restoreAll,
+      get flips() { return flips.slice(); },
       get lastExport() { return lastExport; },
       get lastSurvey() { return lastSurvey; },
       exportMesh: () => currentMesh,

@@ -47,6 +47,12 @@
         <option value="y">Y up</option>
         <option value="z">Z up</option>
       </select>
+      <span class="flips" title="Mirror the model on one of its own axes — the export is written mirrored too">
+        flip
+        <button id="flip-x" type="button" data-axis="0" aria-pressed="false">X</button>
+        <button id="flip-y" type="button" data-axis="1" aria-pressed="false">Y</button>
+        <button id="flip-z" type="button" data-axis="2" aria-pressed="false">Z</button>
+      </span>
       <label class="slider" title="Pull the parts away from each other">
         explode
         <input id="explode-slider" type="range" min="0" max="150" value="0" step="1" disabled>

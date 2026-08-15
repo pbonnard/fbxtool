@@ -545,6 +545,23 @@ declaration and the guess from then on. It is remembered per file, so a model
 the viewer reads the wrong way up is corrected once rather than on every open,
 and nothing that rebuilds the mesh takes the correction back.
 
+Beside it, **flip X / Y / Z** mirrors the model on any of its own axes, singly
+or together, and is remembered per file the same way. Models come handed the
+wrong way round — a right-hand-drive car out of a left-handed exporter, a part
+modelled once and meant for both sides — and this is the correction for it. A
+mirror is not a view setting: it rides out on the root node's matrix beside the
+up axis and the units, so what is exported is what is on screen.
+
+Mirroring reverses which way round a triangle is wound, and a renderer that
+goes on culling by the old rule draws the *inside* of the model — the same
+silhouette, so the picture alone does not give it away. The viewer switches
+which winding counts as front-facing whenever an odd number of axes is
+mirrored, which leaves every pass that culls asking for the same side it always
+asked for; glTF states the same rule for a node whose transform has a negative
+determinant, so the exported file needs nothing else said about it. And the
+normals need no correction at all: a rotation with an axis mirrored is its own
+inverse transpose, which is what carries a normal properly.
+
 ### Legacy 6.x files
 
 FBX 6.x — anything the SDK still writes as version 6100, and plenty of models
@@ -1314,6 +1331,7 @@ node web/test/smoothing.js samples/cube_binary.fbx samples/scene_parts.fbx
 node web/test/gltfin.js samples/cube_textured.fbx     # export, then read it back
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
+node web/test/flip.js samples/scene_parts.fbx        # mirroring, and its winding
 node web/test/drop.js samples/pyramid.obj samples/pyramid.mtl samples/checker.png
 node web/test/edits.js samples/Shelby.fbx            # deleting and splitting
 ```

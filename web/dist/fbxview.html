@@ -156,6 +156,39 @@ body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
   padding: 4px 9px;
 }
 
+/* Mirroring the model, one axis at a time. Three buttons that stay pressed:
+   what is flipped has to be readable at a glance, since a mirrored model is
+   not always obviously mirrored. */
+.flips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(20, 23, 29, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 6px 3px 9px;
+}
+
+.flips button {
+  font-size: 12px;
+  font-family: var(--mono);
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+}
+.flips button:hover { color: var(--text); border-color: var(--line); }
+.flips button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: transparent;
+  color: #08101d;
+  font-weight: 600;
+}
+
 .slider input[type="range"] {
   width: 92px;
   accent-color: var(--accent, #2f81f7);
@@ -592,6 +625,12 @@ ul.record-tree .count { color: var(--muted); }
         <option value="y">Y up</option>
         <option value="z">Z up</option>
       </select>
+      <span class="flips" title="Mirror the model on one of its own axes — the export is written mirrored too">
+        flip
+        <button id="flip-x" type="button" data-axis="0" aria-pressed="false">X</button>
+        <button id="flip-y" type="button" data-axis="1" aria-pressed="false">Y</button>
+        <button id="flip-z" type="button" data-axis="2" aria-pressed="false">Z</button>
+      </span>
       <label class="slider" title="Pull the parts away from each other">
         explode
         <input id="explode-slider" type="range" min="0" max="150" value="0" step="1" disabled>
@@ -5990,15 +6029,28 @@ const FbxGltf = (function () {
     };
   }
 
-  /** The root node's matrix: the up axis put right, and units turned into metres. */
-  function rootMatrix(upAxis, scale) {
+  /**
+   * The root node's matrix: the up axis put right, units turned into metres,
+   * and any axis the viewer mirrored mirrored here too.
+   *
+   * A column is where one of the mesh's own axes ends up, so mirroring an axis
+   * is negating its column. glTF allows that and says what it means: where the
+   * determinant of a node's transform is negative, a renderer reverses the
+   * winding it treats as front-facing, which is the same rule the viewer
+   * follows.
+   */
+  function rootMatrix(upAxis, scale, flips) {
     const s = scale || 1;
     // Column-major, as glTF and WebGL both are.
-    if (upAxis === 'z') {
+    const m = upAxis === 'z'
       // Mesh +Z becomes world +Y, mesh +Y becomes world -Z.
-      return [s, 0, 0, 0, 0, 0, -s, 0, 0, s, 0, 0, 0, 0, 0, 1];
+      ? [s, 0, 0, 0, 0, 0, -s, 0, 0, s, 0, 0, 0, 0, 0, 1]
+      : [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1];
+    for (let axis = 0; axis < 3; axis++) {
+      if (!(flips || [])[axis]) continue;
+      for (let row = 0; row < 3; row++) m[axis * 4 + row] = -m[axis * 4 + row];
     }
-    return [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1];
+    return m;
   }
 
   /**
@@ -6113,7 +6165,7 @@ const FbxGltf = (function () {
    * {slot, bytes, mimeType, wrapS, wrapT} passed through untouched.
    */
   function build(scene) {
-    const { name = 'scene', upAxis = 'y', unitScale = 1 } = scene;
+    const { name = 'scene', upAxis = 'y', unitScale = 1, flips = null } = scene;
     const meshes = scene.meshes || [];
     const roots = scene.nodes || [];
     const images = scene.images instanceof Map ? scene.images : new Map();
@@ -6312,7 +6364,7 @@ const FbxGltf = (function () {
     };
 
     /* ---- nodes: the tree, as it was */
-    const root = { name, matrix: rootMatrix(upAxis, unitScale) };
+    const root = { name, matrix: rootMatrix(upAxis, unitScale, flips) };
     json.nodes.push(root);
 
     const emit = (node) => {
@@ -7571,7 +7623,9 @@ ${SHADOW_LOOKUP}
     return len ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
   }
 
-  /** Upper-left 3x3 of a matrix; adequate while the model matrix is a rotation. */
+  /** Upper-left 3x3 of a matrix; adequate while the model matrix is a rotation,
+   *  or a rotation with an axis mirrored — both are their own inverse
+   *  transpose, which is what a normal is properly carried by. */
   function normalMatrix(m) {
     return new Float32Array([m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]);
   }
@@ -7636,6 +7690,8 @@ ${SHADOW_LOOKUP}
 
       this.mode = 0;
       this.upAxis = 'y';
+      /** Which of the mesh's own axes are mirrored, as ±1 per axis. */
+      this.flips = [1, 1, 1];
       this.hasUv = false;
       this.showTextures = true;
       this.triangleCount = 0;
@@ -8170,6 +8226,26 @@ ${SHADOW_LOOKUP}
       this.shadowStale = true;
       this.dirty = true;
     }
+
+    /**
+     * Mirror the mesh on any of its own axes — `[x, y, z]`, each true to flip.
+     *
+     * A mirror reverses which way round a triangle is wound, so what was the
+     * front face is now the back and the model would be drawn inside out. One
+     * mirror does that, and so does three; two cancel. `frontFace` says which
+     * winding counts as the front, and switching it there leaves every pass
+     * that culls — the shadow map, the see-through pass — asking for the same
+     * side it always asked for.
+     */
+    setFlips(flips) {
+      const next = [0, 1, 2].map((i) => ((flips || [])[i] ? -1 : 1));
+      if (next.every((v, i) => v === this.flips[i])) return;
+      this.flips = next;
+      const mirrored = next[0] * next[1] * next[2] < 0;
+      this.gl.frontFace(mirrored ? this.gl.CW : this.gl.CCW);
+      this.shadowStale = true;
+      this.dirty = true;
+    }
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
     setShowGround(on) { this.showGround = on !== false; this.dirty = true; }
 
@@ -8257,17 +8333,22 @@ ${SHADOW_LOOKUP}
       const axis = this.upAxis === 'z' ? 2 : 1;
       // The model matrix centres the mesh, so its lowest point ends up here.
       let lowest = this.meshMin[axis];
+      // Mirrored on the axis that points up, what hangs lowest is what stood
+      // highest — otherwise the floor cuts through the model it stands under.
+      let highest = this.meshMax[axis];
       // Pulled apart, the lowest part is not the one it was: the floor drops
       // to meet whichever piece now hangs the furthest down.
       if (this.explode > 0) {
         const centre = this.modelCentre || [0, 0, 0];
         for (const part of this.parts) {
           if (!part.min || !part.centre) continue;
-          const moved = part.min[axis] + (part.centre[axis] - centre[axis]) * this.explode;
-          if (moved < lowest) lowest = moved;
+          const shift = (part.centre[axis] - centre[axis]) * this.explode;
+          if (part.min[axis] + shift < lowest) lowest = part.min[axis] + shift;
+          if (part.max && part.max[axis] + shift > highest) highest = part.max[axis] + shift;
         }
       }
-      return lowest - (this.meshMin[axis] + this.meshMax[axis]) / 2;
+      const middle = (this.meshMin[axis] + this.meshMax[axis]) / 2;
+      return this.flips[axis] < 0 ? middle - highest : lowest - middle;
     }
 
     /** Draw the model into the depth buffer, seen from the sun. */
@@ -8313,6 +8394,15 @@ ${SHADOW_LOOKUP}
 
       let model = identity();
       if (this.upAxis === 'z') model = zUpToYUp();
+      // A mirrored axis is negated after the centring below, so the model
+      // turns over about its own middle and stays where it was on screen.
+      if (this.flips.some((f) => f < 0)) {
+        const mirror = identity();
+        mirror[0] = this.flips[0];
+        mirror[5] = this.flips[1];
+        mirror[10] = this.flips[2];
+        model = multiply(model, mirror);
+      }
       // Centre the model at the origin before the up-axis rotation.
       const translate = identity();
       translate[12] = -centre[0];
@@ -8542,6 +8632,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     modeSelect: $('mode-select'),
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
+    flipButtons: [$('flip-x'), $('flip-y'), $('flip-z')],
     explodeSlider: $('explode-slider'),
     partInfo: $('part-info'),
     partName: $('part-name'),
@@ -9098,6 +9189,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     partTable = [];
     modeChosen = false;
     upAxisChosen = false;
+    flips = [false, false, false];
     objectIndex = emptyIndex();
     missingTextures = [];
 
@@ -9116,6 +9208,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     if (viewer) {
       viewer.clear();
       viewer.setHighlight(-1);
+      applyFlips();
     }
   }
 
@@ -9181,6 +9274,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         dom.upSelect.value = savedAxis;
         upAxisChosen = true;
       }
+      flips = recallFlips(doc.fileName);
+      applyFlips();
       objectIndex = buildObjectIndex(currentAnalysis.objects);
 
       renderReport();
@@ -10068,6 +10163,46 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     }
   }
 
+  /* Which axes are mirrored, remembered the same way and for the same reason:
+   * a model that arrives handed the wrong way round arrives that way every
+   * time, and the fix should not have to be found again.
+   *
+   * A mirror is not a view setting. It is written into the export, on the root
+   * node's matrix beside the up axis and the units � so what leaves is what is
+   * on screen, and nothing downstream has to be told about it. */
+  const AXES = ['x', 'y', 'z'];
+  let flips = [false, false, false];
+
+  const flipKey = (name) => `fbxtool:flip:${name || 'unnamed'}`;
+
+  function rememberFlips() {
+    if (!currentDoc) return;
+    try {
+      const on = AXES.filter((_, i) => flips[i]).join('');
+      if (on) window.localStorage.setItem(flipKey(currentDoc.fileName), on);
+      else window.localStorage.removeItem(flipKey(currentDoc.fileName));
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallFlips(fileName) {
+    try {
+      const saved = window.localStorage.getItem(flipKey(fileName)) || '';
+      return AXES.map((axis) => saved.includes(axis));
+    } catch (error) {
+      return [false, false, false];
+    }
+  }
+
+  /** Put the mirrors on the model and on the buttons that say so. */
+  function applyFlips() {
+    viewer.setFlips(flips);
+    dom.flipButtons.forEach((button, axis) => {
+      if (button) button.setAttribute('aria-pressed', flips[axis] ? 'true' : 'false');
+    });
+  }
+
   /**
    * Choose the up axis for a freshly built mesh and put the viewer on it —
    * unless the axis on screen was picked by hand, which outranks both the
@@ -10800,6 +10935,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         images,
         textures,
         upAxis: dom.upSelect.value,
+        flips: flips.slice(),
         unitScale: centimetres / 100,
       });
       download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
@@ -11711,6 +11847,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       viewer.setUpAxis(dom.upSelect.value);
       rememberUpAxis(dom.upSelect.value);
     });
+    dom.flipButtons.forEach((button, axis) => {
+      if (!button) return;
+      button.addEventListener('click', () => {
+        flips[axis] = !flips[axis];
+        applyFlips();
+        rememberFlips();
+      });
+    });
     dom.explodeSlider.addEventListener('input',
       () => viewer.setExplode(Number(dom.explodeSlider.value) / 100));
 
@@ -11834,6 +11978,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       undo: undoEdit,
       redo: redoEdit,
       restoreAll,
+      get flips() { return flips.slice(); },
       get lastExport() { return lastExport; },
       get lastSurvey() { return lastSurvey; },
       exportMesh: () => currentMesh,

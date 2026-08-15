@@ -99,15 +99,28 @@ const FbxGltf = (function () {
     };
   }
 
-  /** The root node's matrix: the up axis put right, and units turned into metres. */
-  function rootMatrix(upAxis, scale) {
+  /**
+   * The root node's matrix: the up axis put right, units turned into metres,
+   * and any axis the viewer mirrored mirrored here too.
+   *
+   * A column is where one of the mesh's own axes ends up, so mirroring an axis
+   * is negating its column. glTF allows that and says what it means: where the
+   * determinant of a node's transform is negative, a renderer reverses the
+   * winding it treats as front-facing, which is the same rule the viewer
+   * follows.
+   */
+  function rootMatrix(upAxis, scale, flips) {
     const s = scale || 1;
     // Column-major, as glTF and WebGL both are.
-    if (upAxis === 'z') {
+    const m = upAxis === 'z'
       // Mesh +Z becomes world +Y, mesh +Y becomes world -Z.
-      return [s, 0, 0, 0, 0, 0, -s, 0, 0, s, 0, 0, 0, 0, 0, 1];
+      ? [s, 0, 0, 0, 0, 0, -s, 0, 0, s, 0, 0, 0, 0, 0, 1]
+      : [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1];
+    for (let axis = 0; axis < 3; axis++) {
+      if (!(flips || [])[axis]) continue;
+      for (let row = 0; row < 3; row++) m[axis * 4 + row] = -m[axis * 4 + row];
     }
-    return [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1];
+    return m;
   }
 
   /**
@@ -222,7 +235,7 @@ const FbxGltf = (function () {
    * {slot, bytes, mimeType, wrapS, wrapT} passed through untouched.
    */
   function build(scene) {
-    const { name = 'scene', upAxis = 'y', unitScale = 1 } = scene;
+    const { name = 'scene', upAxis = 'y', unitScale = 1, flips = null } = scene;
     const meshes = scene.meshes || [];
     const roots = scene.nodes || [];
     const images = scene.images instanceof Map ? scene.images : new Map();
@@ -421,7 +434,7 @@ const FbxGltf = (function () {
     };
 
     /* ---- nodes: the tree, as it was */
-    const root = { name, matrix: rootMatrix(upAxis, unitScale) };
+    const root = { name, matrix: rootMatrix(upAxis, unitScale, flips) };
     json.nodes.push(root);
 
     const emit = (node) => {
