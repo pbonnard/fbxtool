@@ -45,19 +45,54 @@ const FbxGltfIn = (function () {
   const p70 = (name, kind, ...values) =>
     node('P', [S(name), S(kind), S(''), S('A'), ...values]);
 
-  /** A .glb starts with its magic; a .gltf is JSON, whitespace aside. */
+  /** Where a run of bytes next occurs, or -1. Searched without decoding. */
+  function findBytes(bytes, pattern, from) {
+    const last = bytes.length - pattern.length;
+    for (let at = from; at <= last; at++) {
+      let k = 0;
+      while (k < pattern.length && bytes[at + k] === pattern[k]) k++;
+      if (k === pattern.length) return at;
+    }
+    return -1;
+  }
+
+  const ASSET = [0x22, 0x61, 0x73, 0x73, 0x65, 0x74, 0x22];   // "asset"
+
+  /**
+   * A .glb starts with its magic; a .gltf is JSON, whitespace aside.
+   *
+   * Only a document that says what it is, so a stray JSON file is not claimed
+   * — and the thing that says so is the `asset` block the specification
+   * requires. It is looked for in the whole file rather than in a head: JSON
+   * has no key order, and an exporter that sorts its keys writes `accessors`
+   * first. Pretty-printed one number to a line, that array runs to 132 KB in a
+   * Sketchfab export of an E-Type, which is a long way past any window worth
+   * reading. The search is over the bytes, so a fifty-megabyte document is not
+   * decoded into a string to answer a yes or no.
+   */
   function looksLikeGltf(bytes) {
     if (!bytes || bytes.length < 12) return false;
     const view = new DataView(bytes.buffer, bytes.byteOffset, Math.min(bytes.length, 12));
     if (view.getUint32(0, true) === MAGIC) return true;
+    // The opening brace is what keeps this cheap: every file the page opens is
+    // offered here, and a binary FBX is turned away on its first byte rather
+    // than scanned.
+    let opens = false;
     for (let i = 0; i < Math.min(bytes.length, 64); i++) {
       const c = bytes[i];
       if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d || c === 0xef
         || c === 0xbb || c === 0xbf) continue;
-      if (c !== 0x7b) return false;              // "{"
-      // Only a document that says so, so a stray JSON file is not claimed.
-      const head = new TextDecoder('utf-8').decode(bytes.subarray(0, 4096));
-      return /"asset"\s*:/.test(head) && /"version"\s*:\s*"2/.test(head);
+      opens = c === 0x7b;                        // "{"
+      break;
+    }
+    if (!opens) return false;
+    const decoder = new TextDecoder('utf-8');
+    // `version` is a member of `asset`, so it follows the key it belongs to;
+    // the window is wide enough for a `generator` and a `copyright` beside it.
+    for (let at = findBytes(bytes, ASSET, 0); at >= 0;
+      at = findBytes(bytes, ASSET, at + 1)) {
+      const near = decoder.decode(bytes.subarray(at, Math.min(at + 4096, bytes.length)));
+      if (/"version"\s*:\s*"2/.test(near)) return true;
     }
     return false;
   }

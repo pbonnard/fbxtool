@@ -270,6 +270,25 @@ check('a declared alpha mode is read',
 check('and a file that declares none says nothing',
   FbxAnalyze.materialAppearance({}).alphaMode === null);
 
+console.log('\ngltf in: recognising the file at all');
+/* JSON has no prescribed key order, and an exporter that sorts its keys writes
+ * `accessors` first. Pretty-printed one number to a line that array runs to
+ * 132 KB in a Sketchfab export of an E-Type, which puts the one block naming
+ * the file a glTF far past any head worth sniffing. */
+const farOff = new TextEncoder().encode(`{\n  "accessors": [${' '.repeat(200000)}],\n`
+  + '  "asset": {\n    "generator": "Sketchfab-16.99.0",\n    "version": "2.0"\n  }\n}\n');
+check('a .gltf is recognised however far in its asset block sits',
+  FbxGltfIn.looksLikeGltf(farOff), `"asset" at byte ${farOff.indexOf(0x61, 6)}`);
+check('a .glb is still known from its magic',
+  FbxGltfIn.looksLikeGltf(new TextEncoder().encode('glTF\0\0\0\0\0\0\0')));
+check('a stray JSON file is still not claimed',
+  !FbxGltfIn.looksLikeGltf(new TextEncoder().encode(
+    `{"fbxtoolMaterials":1,"materials":{"asset":{"opacity":1}}${' '.repeat(9000)}}`)));
+check('nor is a binary file that never opens a brace',
+  !FbxGltfIn.looksLikeGltf(new TextEncoder().encode('Kaydara FBX Binary  \0\0')));
+check('nor a glTF 1 document',
+  !FbxGltfIn.looksLikeGltf(new TextEncoder().encode('{"asset":{"version":"1.0"}}')));
+
 console.log('\ngltf in: what a material brings with it');
 /* A document whose one material wears four maps, declares blending it does not
  * spend on its base colour factor, glows, and samples one of its images

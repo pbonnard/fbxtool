@@ -40,13 +40,14 @@ import binascii
 import json
 import math
 import os
+import re
 import struct
 import urllib.parse
 from typing import Sequence
 
 from .model import ArrayInfo, Document, Node, ParseError, Property
 
-__all__ = ["MAGIC", "is_gltf", "parse_gltf", "read_container"]
+__all__ = ["MAGIC", "is_gltf", "parse_gltf", "read_container", "starts_json_object"]
 
 MAGIC = b"glTF"
 _JSON_CHUNK = 0x4E4F534A
@@ -64,19 +65,39 @@ _COMPONENT_NAMES = {
 _WIDTH = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT2": 4, "MAT3": 9, "MAT4": 16}
 
 
+def starts_json_object(data: bytes) -> bool:
+    """True when *data* begins a JSON object, whitespace and a BOM aside."""
+    return data.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] == b"{"
+
+
 def is_gltf(data: bytes) -> bool:
-    """True when *data* starts a glTF file, either container."""
+    """True when *data* is a glTF file, either container.
+
+    A ``.glb`` says so in its first four bytes.  A ``.gltf`` is JSON, and the
+    only thing that tells it apart from any other JSON is the ``asset`` block
+    the specification requires — so that is what is looked for, rather than a
+    stray document being claimed.
+
+    It is looked for in the whole of *data*, not in a head: JSON has no
+    prescribed key order, and an exporter that sorts its keys puts ``accessors``
+    before ``asset``.  Pretty-printed one number to a line, that array is
+    132 KB in a Sketchfab export of an E-Type, which is a long way past any
+    sniffing window worth reading.  A caller that has only the head of a file
+    will get ``False`` here and should ask again with the rest of it.
+    """
     if data[:4] == MAGIC:
         return True
-    head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
-    if not head.startswith(b"{"):
+    if not starts_json_object(data):
         return False
-    # Only a document that says what it is, so a stray JSON file is not claimed.
-    try:
-        text = head.decode("utf-8", "replace")
-    except UnicodeDecodeError:  # pragma: no cover - "replace" does not raise
-        return False
-    return '"asset"' in text and '"version"' in text
+    at = data.find(b'"asset"')
+    while at >= 0:
+        # `version` is a member of `asset`, so it follows the key it belongs to.
+        # A generous window covers a `generator` and a `copyright` beside it.
+        window = data[at:at + 4096].decode("utf-8", "replace")
+        if re.search(r'"version"\s*:\s*"2', window):
+            return True
+        at = data.find(b'"asset"', at + 1)
+    return False
 
 
 def read_container(data: bytes) -> tuple[dict, bytes | None, list[str]]:

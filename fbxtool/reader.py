@@ -9,7 +9,7 @@ from typing import BinaryIO
 from .ascii import is_ascii_fbx, parse_ascii
 from .binary import MAGIC, is_binary_fbx, parse_binary
 from .blend import is_blend, parse_blend
-from .gltf import is_gltf, parse_gltf
+from .gltf import is_gltf, parse_gltf, starts_json_object
 from .maxfile import is_compound, parse_max
 from .model import Document, UnsupportedFormatError
 from .obj import is_obj, parse_obj
@@ -31,6 +31,11 @@ def detect_format(data: bytes) -> str:
     A ``.max`` is answered from its container alone, since what distinguishes
     it from another compound file is a stream too deep in to sniff; reading it
     is where that is settled.
+
+    A ``.gltf`` is answered from whatever it is given. The block that names it
+    one may sit far past any head worth reading, so a caller holding only a
+    head can get ``"unknown"`` for a file that is a glTF; both readers here ask
+    again with the whole document before refusing it.
     """
     if is_binary_fbx(data[: len(MAGIC)]):
         return "binary"
@@ -75,6 +80,16 @@ def read_model(
     with open(path, "rb") as handle:
         head = handle.read(_SNIFF_SIZE)
         kind = detect_format(head)
+        # A .gltf can put the one block that names it a long way past any head
+        # worth sniffing: JSON has no key order, and an exporter that sorts its
+        # keys writes `accessors` first — 132 KB of it, one number to a line, in
+        # a Sketchfab export of an E-Type. A file that begins a JSON object and
+        # says nothing else deserves to be read in full before it is refused.
+        if kind == "unknown" and starts_json_object(head):
+            handle.seek(0)
+            whole = handle.read()
+            if is_gltf(whole):
+                return parse_gltf(whole, path=path, load_arrays=load_arrays)
         if kind == "max":
             handle.seek(0)
             return parse_max(handle.read(), path=path, load_arrays=load_arrays)
@@ -181,6 +196,10 @@ def parse_bytes(
 ) -> Document:
     """Parse an in-memory model file, in any format read from disk."""
     kind = detect_format(data[:_SNIFF_SIZE])
+    # The whole document is here, so a .gltf that carries its asset block past
+    # the sniffing window costs nothing to recognise.
+    if kind == "unknown" and starts_json_object(data) and is_gltf(data):
+        kind = "gltf"
     if kind == "max":
         return parse_max(data, path=path, load_arrays=load_arrays)
     if kind == "gltf":

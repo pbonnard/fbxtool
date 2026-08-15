@@ -116,6 +116,15 @@ reports the container, the generator, and what the file holds: meshes,
 primitives and triangles, nodes, materials, images, buffer views and accessors,
 the component types in use, and the extensions the file names.
 
+A `.glb` says what it is in its first four bytes. A `.gltf` is JSON, and the
+only thing telling it from any other JSON is the `asset` block the
+specification requires — which is looked for in the whole document rather than
+in a head. JSON has no prescribed key order, and an exporter that sorts its
+keys writes `accessors` first: pretty-printed one number to a line, that array
+is 132 KB in a Sketchfab export of an E-Type, so the block that names the file
+sits a long way past any sniffing window. Recognising it from a head alone is
+how such a file gets refused for being what it is.
+
 The mapping is the awkward part, since glTF stores what a graphics API wants
 rather than what a scene description wants. Each primitive becomes one
 `Geometry` and one `Model`, since a primitive has exactly one material; the

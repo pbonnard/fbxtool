@@ -61,6 +61,47 @@ def test_a_gltf_document_is_recognised_from_its_asset_block():
     assert detect_format(document[:8192]) == "gltf"
 
 
+def _asset_pushed_past_the_sniffing_window() -> bytes:
+    """A .gltf written the way a real exporter writes one.
+
+    JSON has no prescribed key order, and an exporter that sorts its keys puts
+    `accessors` before `asset`.  Pretty-printed one number to a line that array
+    is 132 KB in a Sketchfab export of an E-Type, so the one block that names
+    the file a glTF sits a long way past anything worth sniffing.
+    """
+    document = json.loads(fb.build_gltf()[0])
+    ordered = {"accessors": document["accessors"]}
+    ordered.update({k: v for k, v in document.items() if k != "accessors"})
+    text = json.dumps(ordered, indent=4)
+    padding = " " * max(0, 200_000 - text.index('"asset"'))
+    # Pretty-printing a fixture this small is not enough on its own, so the
+    # accessors are padded out to the distance a real one puts between them.
+    return text.replace('"accessors": [', f'"accessors": [{padding}', 1).encode()
+
+
+def test_a_gltf_is_recognised_however_far_in_its_asset_block_sits():
+    data = _asset_pushed_past_the_sniffing_window()
+    assert data.index(b'"asset"') > 8192
+    assert is_gltf(data)
+    assert detect_format(data) == "gltf"
+
+
+def test_such_a_document_reads_from_disk_and_from_memory(tmp_path):
+    data = _asset_pushed_past_the_sniffing_window()
+    (tmp_path / "scene.gltf").write_bytes(data)
+    (tmp_path / "scene.bin").write_bytes(fb.build_gltf()[1])
+    assert read_model(tmp_path / "scene.gltf").format == "gltf"
+    assert parse_bytes(data).format == "gltf"
+
+
+def test_a_stray_json_file_is_still_not_claimed():
+    """The asset block is what tells a glTF from any other JSON, so a document
+    without one stays unrecognised however long it is."""
+    other = json.dumps({"materials": {f"m{n}": {"opacity": 1} for n in range(5000)}})
+    assert not is_gltf(other.encode())
+    assert detect_format(other.encode()) == "unknown"
+
+
 def test_a_leading_byte_order_mark_or_whitespace_does_not_hide_it():
     document, _ = fb.build_gltf()
     assert is_gltf(b"\xef\xbb\xbf" + document)
