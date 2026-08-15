@@ -633,6 +633,35 @@ check('the row says how many images and how many are waiting',
 check('and names each file against its slot',
   /Base colour/.test(markup) && /tire_metallicRoughness\.png/.test(markup)
   && /not supplied/.test(markup));
+
+console.log('\npalette: leaving an image out');
+const leftOut = FbxPalette.maps(
+  Object.assign({ droppedMaps: ['normal'] }, namedMaps), new Set());
+check('the slot left out is marked and the others are not',
+  leftOut.map((m) => `${m.slot}:${m.dropped ? 1 : 0}`).join(' ')
+  === 'baseColor:0 metallicRoughness:0 normal:1',
+  leftOut.map((m) => `${m.slot}:${m.dropped ? 1 : 0}`).join(' '));
+const droppedPalette = FbxPalette.apply(
+  [Object.assign(entry('tire', 20), namedMaps)], { tire: { dropped: ['normal'] } });
+check('an assignment is what marks the slot',
+  droppedPalette[0].droppedMaps.join(',') === 'normal',
+  JSON.stringify(droppedPalette[0].droppedMaps));
+const droppedMarkup = FbxPalette.render(
+  FbxPalette.groups(droppedPalette, [10]),
+  { tire: { dropped: ['normal'] } }, { supplied: new Set() });
+check('the row says the image was left out, and goes on naming it',
+  /left out/.test(droppedMarkup) && /tire_normal\.png/.test(droppedMarkup),
+  droppedMarkup);
+check('and offers to take that back',
+  /data-action="drop"/.test(droppedMarkup) && /data-slot="normal"/.test(droppedMarkup));
+check('an assignment carries which images were left out',
+  FbxPalette.parse(FbxPalette.serialise({ tire: { dropped: ['normal', 'normal'] } }))
+    .materials.tire.dropped.join(',') === 'normal',
+  JSON.stringify(FbxPalette.parse(
+    FbxPalette.serialise({ tire: { dropped: ['normal', 'normal'] } })).materials.tire));
+check('and a slot no version of this tool ever wrote is not one of them',
+  !FbxPalette.parse(FbxPalette.serialise({ tire: { dropped: ['nonsense'] } }))
+    .materials.tire);
 check('the file name is escaped like everything else',
   !/<script>/.test(FbxPalette.render(
     FbxPalette.groups([Object.assign(entry('x', 21), {

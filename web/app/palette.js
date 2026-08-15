@@ -149,6 +149,11 @@ const FbxPalette = (function () {
       entry.alphaCutoff = file.alphaCutoff === undefined ? null : file.alphaCutoff;
       // Nothing here edits what a surface gives off, so it is the file's.
       entry.emissive = file.emissive ? file.emissive.slice() : null;
+      /* Images the file names and this assignment does not want: not removed
+       * from the entry, only marked, so the row can still say what the file
+       * names and the choice can be taken back. Whatever draws or writes them
+       * asks this first. */
+      entry.droppedMaps = set && Array.isArray(set.dropped) ? set.dropped.slice() : [];
 
       /* Colour and metalness are one setting in two halves — each is part of
        * how the other splits — so neither is recomputed until one of them is
@@ -260,6 +265,12 @@ const FbxPalette = (function () {
       // Nothing in the file to fall back on: this one was made here, and has
       // to be built again before anything can wear it.
       if (value.added === true) set.added = true;
+      // Images the file names that this assignment leaves out.
+      if (Array.isArray(value.dropped)) {
+        const slots = value.dropped
+          .filter((slot) => SLOTS.some(([name]) => name === slot));
+        if (slots.length) set.dropped = [...new Set(slots)];
+      }
       if (Object.keys(set).length) out[name] = set;
     }
 
@@ -327,6 +338,7 @@ const FbxPalette = (function () {
         name,
         embedded,
         here: embedded || !supplied || supplied.has(name.toLowerCase()),
+        dropped: (entry.droppedMaps || []).includes(slot),
       };
     });
   }
@@ -335,13 +347,20 @@ const FbxPalette = (function () {
   function mapsMarkup(entry, supplied) {
     const images = maps(entry, supplied);
     if (!images.length) return '';
+    const key = escape(originOf(entry));
     const rows = images.map((image) => {
-      const note = image.embedded ? 'in the file' : (image.here ? '' : 'not supplied');
-      return `<span class="material-map${image.here ? '' : ' absent'}">`
+      const note = image.dropped ? 'left out'
+        : (image.embedded ? 'in the file' : (image.here ? '' : 'not supplied'));
+      const mark = image.dropped ? ' dropped' : (image.here ? '' : ' absent');
+      return `<span class="material-map${mark}">`
         + `<span class="material-map-slot">${escape(image.label)}</span>`
         + `<span class="material-map-file" title="${escape(image.name)}">`
         + `${escape(image.name)}</span>`
         + (note ? `<span class="material-map-note">${escape(note)}</span>` : '')
+        + `<button type="button" class="material-map-drop" data-key="${key}"`
+        + ` data-slot="${escape(image.slot)}" data-action="drop"`
+        + ` title="${image.dropped ? 'use this image again' : 'leave this image out'}">`
+        + `${image.dropped ? '+' : '×'}</button>`
         + '</span>';
     }).join('');
     return `<div class="material-maps"><span class="material-maps-title">Images</span>${rows}</div>`;

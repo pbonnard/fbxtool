@@ -78,6 +78,8 @@
   /** The palette on screen, its materials grouped, and the user's edits. */
   let currentPalette = [];
   let materialGroups = [];
+  /** The list the material rows on screen were drawn from. */
+  let renderedGroups = null;
   /** Triangles per palette slot, counted once per mesh: grouping the list
    *  again after a rename must not walk half a million triangles to do it. */
   let slotTriangles = [];
@@ -1693,8 +1695,23 @@
   }
 
   function renderMaterials() {
+    // Whichever rows were open stay open, as long as this is the same list
+    // being drawn again: the markup is rebuilt from scratch for anything a
+    // patch in place cannot cover, and a row folding itself away under the
+    // hand that was working in it is its own small betrayal. A new file gets a
+    // new list of groups, and that one opens closed.
+    const open = materialGroups === renderedGroups
+      ? new Set([...dom.materials.querySelectorAll('.material[open]')]
+        .map((row) => row.dataset.key))
+      : new Set();
+    renderedGroups = materialGroups;
     dom.materials.innerHTML = FbxPalette.render(materialGroups, materialOverrides,
       { supplied: new Set(suppliedImages.keys()) });
+    if (open.size) {
+      dom.materials.querySelectorAll('.material').forEach((row) => {
+        if (open.has(row.dataset.key)) row.open = true;
+      });
+    }
     const edited = Object.keys(materialOverrides).length;
     dom.materialsSave.disabled = !edited;
     dom.materialsClear.disabled = !edited;
@@ -1946,13 +1963,16 @@
     });
 
     for (const entry of palette) {
-      if (entry.texture && !images.has(entry.name)) {
+      // An image left out of the palette is left out of the file: that is what
+      // dropping it was for.
+      if (entry.texture && wanted(entry, 'baseColor') && !images.has(entry.name)) {
         const image = await bytesFor(entry.texture);
         if (image) images.set(entry.name, withWrap(image, entry.texture));
       }
       if (entry.textures && !textures.has(entry.name)) {
         const maps = [];
         for (const [slot, request] of Object.entries(entry.textures)) {
+          if (!wanted(entry, slot)) continue;
           const image = await bytesFor(request);
           if (image) maps.push({ slot, ...withWrap(image, request) });
         }
@@ -2171,7 +2191,7 @@
       const declared = [
         ...(entry.texture ? ['baseColor'] : []),
         ...Object.keys(entry.textures || {}),
-      ];
+      ].filter((slot) => wanted(entry, slot));
       for (const slot of declared) {
         if (!written.has(slot)) out.push(`${entry.name} ${slot}`);
       }
@@ -2360,6 +2380,35 @@
       const { id, label, ...values } = chosen;
       editMaterial(name, values);
       event.target.value = '';
+    });
+
+    /* Leaving an image out, or taking that back.
+     *
+     * A model arrives with whatever its folder held, and not all of it is
+     * wanted: a normal map that fights the geometry, a lightmap baked for
+     * another renderer. Dropping one here keeps it out of the viewport and out
+     * of the export, and the row goes on saying which file the material names
+     * so the choice can be undone. */
+    dom.materials.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-action="drop"]');
+      if (!button) return;
+      const name = button.dataset.key;
+      const slot = button.dataset.slot;
+      if (!name || !slot) return;
+      const set = materialOverrides[name] || {};
+      const dropped = new Set(set.dropped || []);
+      if (dropped.has(slot)) dropped.delete(slot);
+      else dropped.add(slot);
+      const next = Object.assign({}, set);
+      if (dropped.size) next.dropped = [...dropped];
+      else delete next.dropped;
+      // A material with nothing set on it at all is not an assignment.
+      if (Object.keys(next).length) materialOverrides[name] = next;
+      else delete materialOverrides[name];
+      refreshPalette();
+      persist();
+      renderMaterials();
+      refreshTextures();
     });
 
     dom.materials.addEventListener('click', (event) => {
@@ -2638,10 +2687,14 @@
    * `metallicFactor` out takes glTF's default of 1, and drawn at that it is a
    * white mirror with its tread cancelled.
    */
+  const wanted = (entry, slot) => !(entry.droppedMaps || []).includes(slot);
+
   async function resolveTextures(palette) {
-    const base = await resolveLayer(palette, (m) => m.texture, 'layer');
+    const base = await resolveLayer(palette,
+      (m) => (wanted(m, 'baseColor') ? m.texture : null), 'layer');
     const finish = await resolveLayer(palette,
-      (m) => m.textures && m.textures.metallicRoughness, 'finishLayer');
+      (m) => (wanted(m, 'metallicRoughness') && m.textures
+        ? m.textures.metallicRoughness : null), 'finishLayer');
     return {
       images: base.images,
       requested: base.requested,

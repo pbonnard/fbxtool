@@ -48,6 +48,22 @@ function samples(page) {
   }, ON_MODEL);
 }
 
+/** What a written .glb says about itself: its JSON chunk, decoded. */
+function readGlbJson(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let at = 12;
+  while (at + 8 <= bytes.length) {
+    const length = view.getUint32(at, true);
+    const kind = view.getUint32(at + 4, true);
+    if (kind === 0x4e4f534a) {
+      return JSON.parse(Buffer.from(bytes.buffer, bytes.byteOffset + at + 8, length)
+        .toString('utf8'));
+    }
+    at += 8 + length + ((4 - (length % 4)) % 4);
+  }
+  throw new Error('no JSON chunk in the exported .glb');
+}
+
 const allRedder = (list) => list.every(([r, , b]) => r > b + 25);
 const allBluer = (list) => list.every(([r, , b]) => b > r + 25);
 const show = (list) => list.map((c) => `rgb(${c.join(',')})`).join(' ');
@@ -631,6 +647,50 @@ ${path.basename(second)}`);
     check('counts them without being opened', /2 images/.test(listed.count), listed.count);
     check('and calls none of them missing, since the file carries them both',
       listed.absent === 0, `${listed.absent} absent`);
+
+    /* Leaving one of them out.
+     *
+     * Not every image a file names is one anybody wants kept. Dropping the
+     * finish map here has to reach both ends: the viewer stops sampling it,
+     * and the export stops carrying it � while the row goes on naming the file
+     * so the choice can be undone. */
+    console.log('\nleaving an image out');
+    const drop = '.material-map-drop[data-slot="metallicRoughness"]';
+    await page.click(drop);
+    await page.waitForTimeout(400);
+    const without = await page.evaluate(() => ({
+      slot: window.fbxtool.palette[0].finishLayer,
+      layers: window.fbxtool.viewer.finishLayers,
+      marked: !!document.querySelector('.material-map.dropped'),
+      named: [...document.querySelectorAll('.material-map-file')].map((e) => e.textContent),
+    }));
+    check('the viewer stops sampling it', without.slot === -1 && without.layers === 0,
+      `material on ${without.slot}, ${without.layers} layer(s)`);
+    check('the row still names the file, marked as left out',
+      without.marked && without.named.length === 2, without.named.join(', '));
+
+    const [dropped] = await Promise.all([
+      page.waitForEvent('download', { timeout: 180000 }),
+      page.click('#export-gltf'),
+    ]);
+    const cut = path.join(path.dirname(await dropped.path()), 'without-finish.glb');
+    await dropped.saveAs(cut);
+    const written = readGlbJson(new Uint8Array(fs.readFileSync(cut)));
+    const material = (written.materials || [])[0] || {};
+    check('and the export is written without it',
+      (written.images || []).length === 1
+      && !material.pbrMetallicRoughness.metallicRoughnessTexture
+      && !!material.pbrMetallicRoughness.baseColorTexture,
+      `${(written.images || []).length} image(s)`);
+
+    await page.click(drop);
+    await page.waitForTimeout(400);
+    const back2 = await page.evaluate(() => ({
+      slot: window.fbxtool.palette[0].finishLayer,
+      marked: !!document.querySelector('.material-map.dropped'),
+    }));
+    check('taking it back puts it on again', back2.slot === 0 && !back2.marked,
+      `material on ${back2.slot}`);
   }
 
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');

@@ -522,6 +522,28 @@ ul.record-tree .count { color: var(--muted); }
   text-align: left;
 }
 .material-map-note { color: var(--muted); flex: none; font-style: italic; }
+
+/* Leaving an image out, and taking that back. */
+.material-map-drop {
+  flex: none;
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0;
+}
+.material-map:hover .material-map-drop,
+.material-map.dropped .material-map-drop { opacity: 1; }
+.material-map-drop:hover { color: var(--accent); border-color: var(--line); }
+.material-map.dropped .material-map-file {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.material-map.dropped .material-map-note { color: var(--muted); }
 .material-map.absent .material-map-file,
 .material-map.absent .material-map-note { color: var(--warn); }
 
@@ -5512,6 +5534,11 @@ const FbxPalette = (function () {
       entry.alphaCutoff = file.alphaCutoff === undefined ? null : file.alphaCutoff;
       // Nothing here edits what a surface gives off, so it is the file's.
       entry.emissive = file.emissive ? file.emissive.slice() : null;
+      /* Images the file names and this assignment does not want: not removed
+       * from the entry, only marked, so the row can still say what the file
+       * names and the choice can be taken back. Whatever draws or writes them
+       * asks this first. */
+      entry.droppedMaps = set && Array.isArray(set.dropped) ? set.dropped.slice() : [];
 
       /* Colour and metalness are one setting in two halves — each is part of
        * how the other splits — so neither is recomputed until one of them is
@@ -5623,6 +5650,12 @@ const FbxPalette = (function () {
       // Nothing in the file to fall back on: this one was made here, and has
       // to be built again before anything can wear it.
       if (value.added === true) set.added = true;
+      // Images the file names that this assignment leaves out.
+      if (Array.isArray(value.dropped)) {
+        const slots = value.dropped
+          .filter((slot) => SLOTS.some(([name]) => name === slot));
+        if (slots.length) set.dropped = [...new Set(slots)];
+      }
       if (Object.keys(set).length) out[name] = set;
     }
 
@@ -5690,6 +5723,7 @@ const FbxPalette = (function () {
         name,
         embedded,
         here: embedded || !supplied || supplied.has(name.toLowerCase()),
+        dropped: (entry.droppedMaps || []).includes(slot),
       };
     });
   }
@@ -5698,13 +5732,20 @@ const FbxPalette = (function () {
   function mapsMarkup(entry, supplied) {
     const images = maps(entry, supplied);
     if (!images.length) return '';
+    const key = escape(originOf(entry));
     const rows = images.map((image) => {
-      const note = image.embedded ? 'in the file' : (image.here ? '' : 'not supplied');
-      return `<span class="material-map${image.here ? '' : ' absent'}">`
+      const note = image.dropped ? 'left out'
+        : (image.embedded ? 'in the file' : (image.here ? '' : 'not supplied'));
+      const mark = image.dropped ? ' dropped' : (image.here ? '' : ' absent');
+      return `<span class="material-map${mark}">`
         + `<span class="material-map-slot">${escape(image.label)}</span>`
         + `<span class="material-map-file" title="${escape(image.name)}">`
         + `${escape(image.name)}</span>`
         + (note ? `<span class="material-map-note">${escape(note)}</span>` : '')
+        + `<button type="button" class="material-map-drop" data-key="${key}"`
+        + ` data-slot="${escape(image.slot)}" data-action="drop"`
+        + ` title="${image.dropped ? 'use this image again' : 'leave this image out'}">`
+        + `${image.dropped ? '+' : '×'}</button>`
         + '</span>';
     }).join('');
     return `<div class="material-maps"><span class="material-maps-title">Images</span>${rows}</div>`;
@@ -8504,6 +8545,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   /** The palette on screen, its materials grouped, and the user's edits. */
   let currentPalette = [];
   let materialGroups = [];
+  /** The list the material rows on screen were drawn from. */
+  let renderedGroups = null;
   /** Triangles per palette slot, counted once per mesh: grouping the list
    *  again after a rename must not walk half a million triangles to do it. */
   let slotTriangles = [];
@@ -10119,8 +10162,23 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
   function renderMaterials() {
+    // Whichever rows were open stay open, as long as this is the same list
+    // being drawn again: the markup is rebuilt from scratch for anything a
+    // patch in place cannot cover, and a row folding itself away under the
+    // hand that was working in it is its own small betrayal. A new file gets a
+    // new list of groups, and that one opens closed.
+    const open = materialGroups === renderedGroups
+      ? new Set([...dom.materials.querySelectorAll('.material[open]')]
+        .map((row) => row.dataset.key))
+      : new Set();
+    renderedGroups = materialGroups;
     dom.materials.innerHTML = FbxPalette.render(materialGroups, materialOverrides,
       { supplied: new Set(suppliedImages.keys()) });
+    if (open.size) {
+      dom.materials.querySelectorAll('.material').forEach((row) => {
+        if (open.has(row.dataset.key)) row.open = true;
+      });
+    }
     const edited = Object.keys(materialOverrides).length;
     dom.materialsSave.disabled = !edited;
     dom.materialsClear.disabled = !edited;
@@ -10372,13 +10430,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     });
 
     for (const entry of palette) {
-      if (entry.texture && !images.has(entry.name)) {
+      // An image left out of the palette is left out of the file: that is what
+      // dropping it was for.
+      if (entry.texture && wanted(entry, 'baseColor') && !images.has(entry.name)) {
         const image = await bytesFor(entry.texture);
         if (image) images.set(entry.name, withWrap(image, entry.texture));
       }
       if (entry.textures && !textures.has(entry.name)) {
         const maps = [];
         for (const [slot, request] of Object.entries(entry.textures)) {
+          if (!wanted(entry, slot)) continue;
           const image = await bytesFor(request);
           if (image) maps.push({ slot, ...withWrap(image, request) });
         }
@@ -10597,7 +10658,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const declared = [
         ...(entry.texture ? ['baseColor'] : []),
         ...Object.keys(entry.textures || {}),
-      ];
+      ].filter((slot) => wanted(entry, slot));
       for (const slot of declared) {
         if (!written.has(slot)) out.push(`${entry.name} ${slot}`);
       }
@@ -10786,6 +10847,35 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const { id, label, ...values } = chosen;
       editMaterial(name, values);
       event.target.value = '';
+    });
+
+    /* Leaving an image out, or taking that back.
+     *
+     * A model arrives with whatever its folder held, and not all of it is
+     * wanted: a normal map that fights the geometry, a lightmap baked for
+     * another renderer. Dropping one here keeps it out of the viewport and out
+     * of the export, and the row goes on saying which file the material names
+     * so the choice can be undone. */
+    dom.materials.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-action="drop"]');
+      if (!button) return;
+      const name = button.dataset.key;
+      const slot = button.dataset.slot;
+      if (!name || !slot) return;
+      const set = materialOverrides[name] || {};
+      const dropped = new Set(set.dropped || []);
+      if (dropped.has(slot)) dropped.delete(slot);
+      else dropped.add(slot);
+      const next = Object.assign({}, set);
+      if (dropped.size) next.dropped = [...dropped];
+      else delete next.dropped;
+      // A material with nothing set on it at all is not an assignment.
+      if (Object.keys(next).length) materialOverrides[name] = next;
+      else delete materialOverrides[name];
+      refreshPalette();
+      persist();
+      renderMaterials();
+      refreshTextures();
     });
 
     dom.materials.addEventListener('click', (event) => {
@@ -11064,10 +11154,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    * `metallicFactor` out takes glTF's default of 1, and drawn at that it is a
    * white mirror with its tread cancelled.
    */
+  const wanted = (entry, slot) => !(entry.droppedMaps || []).includes(slot);
+
   async function resolveTextures(palette) {
-    const base = await resolveLayer(palette, (m) => m.texture, 'layer');
+    const base = await resolveLayer(palette,
+      (m) => (wanted(m, 'baseColor') ? m.texture : null), 'layer');
     const finish = await resolveLayer(palette,
-      (m) => m.textures && m.textures.metallicRoughness, 'finishLayer');
+      (m) => (wanted(m, 'metallicRoughness') && m.textures
+        ? m.textures.metallicRoughness : null), 'finishLayer');
     return {
       images: base.images,
       requested: base.requested,

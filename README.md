@@ -742,6 +742,15 @@ metalness slider says 1.00 because the file left the factor out, and the row
 beside it says the map that qualifies it is `tire_metallicRoughness.png` and
 that it never arrived.
 
+An image can also be left out. The `×` beside a row's file drops that one map:
+the viewer stops sampling it, the export is written without it, and the row goes
+on naming the file with a `+` to take the choice back. Nothing is destroyed —
+the file still says what it says, and the decision is stored with the rest of
+the assignment, so it survives a save and a reload. That is for the map that
+fights the model rather than helps it: a normal map baked against different
+geometry, a lightmap from another renderer, an ambient occlusion pass already
+in the base colour.
+
 Two things make that less simple than it sounds. Exporters name the property
 after their own renderer — `3dsMax|CoronaMtlPb|texmapDiffuse`, `Maya|baseColor`
 — so the vendor prefix and every separator are dropped before matching, since

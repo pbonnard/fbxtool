@@ -516,6 +516,28 @@ ul.record-tree .count { color: var(--muted); }
   text-align: left;
 }
 .material-map-note { color: var(--muted); flex: none; font-style: italic; }
+
+/* Leaving an image out, and taking that back. */
+.material-map-drop {
+  flex: none;
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0;
+}
+.material-map:hover .material-map-drop,
+.material-map.dropped .material-map-drop { opacity: 1; }
+.material-map-drop:hover { color: var(--accent); border-color: var(--line); }
+.material-map.dropped .material-map-file {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.material-map.dropped .material-map-note { color: var(--muted); }
 .material-map.absent .material-map-file,
 .material-map.absent .material-map-note { color: var(--warn); }
 
