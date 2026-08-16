@@ -146,8 +146,11 @@ _CLASS_NAME = 0x2042
 _CLASS_IDS = 0x2060
 
 #: Chunks inside a material and its parameter blocks.
-_MTL_BASE = 0x5431          # the block every material carries
-_MTL_PLUGIN_BASE = 0x0FA0   # the same block, where a plugin material keeps it
+#: The block a material keeps its name in, under each of the three ids it is
+#: written with.  0x5431 is where 3ds Max's own materials put it, 0x0FA0 is
+#: Corona's, and 0x4000 is what a Blend, a Standard and a VRayCarPaintMtl use —
+#: which is why those came out numbered rather than named.
+_MTL_BASES = (0x5431, 0x0FA0, 0x4000)
 _MTL_NAME = 0x4001          # its name, inside that block
 #: One parameter of a ParamBlock2, under either of the two ids the block is
 #: written with.  Which one a file uses is the writer's own business and not
@@ -725,11 +728,13 @@ def _material_name(scene: bytes, entity) -> str:
 
     3ds Max's own materials keep the name in the block every ``MtlBase``
     carries; a plugin's material writes the same block under an id of its own
-    � Corona's is 0x0FA0 � with the same name chunk inside it.  Both are read,
-    since a Corona scene otherwise comes out as a list of numbered materials
-    and its V-Ray twin as a list of named ones.
+    — Corona's is 0x0FA0, and a Blend, a Standard and a VRayCarPaintMtl use
+    0x4000 — with the same name chunk inside it.  All three are read, since a
+    scene otherwise comes out as a mixture of named materials and numbered
+    ones, and the numbered ones are the paints: an Audi's body is a Blend, and
+    'vray AUDI body grey' is in the file all along.
     """
-    for wanted in (_MTL_BASE, _MTL_PLUGIN_BASE):
+    for wanted in _MTL_BASES:
         block = _find(scene, entity.start, entity.end, wanted)
         if block is None:
             continue
@@ -810,7 +815,15 @@ _SHADERS = {
     # eight colours under the same ids, and the three that refract in one car
     # share a fog colour of (0.90, 0.96, 0.95) — the green a windscreen is.
     # Worth checking against a scene whose answer is known independently.
-    "vraymtl": {"diffuse": 1, "specular": 2, "refraction": 5},
+    # Parameter 3 is the reflection glossiness, which is how polished the
+    # surface is and the difference between chrome and a matte panel.  Read off
+    # the same car twice: 3ds Max's own FBX export of this scene states a
+    # glossiness for each of its seventy materials, and for every one of them
+    # parameter 3 of the .max holds that number — 0.3 for the paint, 0.65 for
+    # the rough plastic, 0.82 for a brake caliper, 1.0 for the chrome and the
+    # glass.  Without it every V-Ray surface came out at the same middling
+    # roughness, so a windscreen was as satin as a bumper.
+    "vraymtl": {"diffuse": 1, "specular": 2, "refraction": 5, "glossiness": 3},
     # Corona keeps its surface in one block, every channel a colour with a
     # level beside it, and its glossiness at 180 where nothing else is near.
     #
@@ -975,6 +988,12 @@ def _resolve_blends(materials: dict) -> None:
     mask, so a reader that takes the first picture below it paints a tyre with
     the map that mixes its dirt in.  What it looks like is its first
     ingredient: the base coat, with the rest laid over.
+
+    All of it, and not only the parts it says nothing about: a colour found in
+    a blend's own block is a stray number and not a surface, and taking it
+    left the base's glossiness behind with it.  This is what 3ds Max's own FBX
+    export does — a blend comes out of it carrying its base coat's colour, its
+    reflection and its shininess.
     """
     done: set = set()
 
@@ -987,8 +1006,7 @@ def _resolve_blends(materials: dict) -> None:
         done.add(index)
         if base is None:
             return material
-        if material.look["colour"] is None:
-            material.look = base.look
+        material.look = base.look
         material.texture = base.texture
         material.bump = base.bump
         return material
@@ -1448,12 +1466,16 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         # Specular level is a percentage in the file and a factor here.
         if look["level"] is not None:
             props.append(_p70("SpecularFactor", "Number", _d(look["level"])))
-        # Glossiness is 0 to 1; the exponent an FBX material carries is that
-        # as a percentage, which is the conversion 3ds Max's own exporter
-        # makes.
+        # Glossiness is 0 to 1 and the exponent an FBX material carries is
+        # two to the ten times it, which is the conversion 3ds Max's own
+        # exporter makes: read off its export of this same scene, where every
+        # one of seventy materials lands on 2**(10 * glossiness) to four
+        # decimals — 0.3 becomes 8, 0.65 becomes 90.51, 1.0 becomes 1024.
+        # A percentage instead put a mirror and a matte panel within a few of
+        # each other, and the whole car came out equally satin.
         if look["glossiness"] is not None:
             props.append(_p70("ShininessExponent", "Number",
-                              _d(look["glossiness"] * 100)))
+                              _d(2.0 ** (10.0 * min(1.0, max(0.0, look["glossiness"]))))))
         # Only where the material says so: a .max carries no opacity otherwise,
         # and writing 1 for every material would say something the file does
         # not.

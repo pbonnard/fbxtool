@@ -3262,8 +3262,11 @@ const FbxMax = (function () {
   const CLASS_NAME = 0x2042;
   const CLASS_IDS = 0x2060;
   // A material and its parameter blocks.
-  const MTL_BASE = 0x5431;
-  const MTL_PLUGIN_BASE = 0x0fa0;   // the same block, where a plugin keeps it
+  // The block a material keeps its name in, under each of the three ids it is
+  // written with. 0x5431 is where 3ds Max's own materials put it, 0x0fa0 is
+  // Corona's, and 0x4000 is what a Blend, a Standard and a VRayCarPaintMtl
+  // use — which is why those came out numbered rather than named.
+  const MTL_BASES = [0x5431, 0x0fa0, 0x4000];
   const MTL_NAME = 0x4001;
   // One parameter of a ParamBlock2, under either of the two ids the block is
   // written with. Which one a file uses is the writer's own business and not
@@ -3821,7 +3824,7 @@ const FbxMax = (function () {
    * and its V-Ray twin as a list of named ones.
    */
   function materialName(view, bytes, entity) {
-    for (const wanted of [MTL_BASE, MTL_PLUGIN_BASE]) {
+    for (const wanted of MTL_BASES) {
       const block = findChunk(view, entity.start, entity.end, wanted);
       if (!block) continue;
       const found = findChunk(view, block[0], block[1], MTL_NAME);
@@ -3906,7 +3909,12 @@ const FbxMax = (function () {
      * fifty-five VRayMtl blocks across three car scenes all carry the same
      * eight colours under the same ids, and the three that refract in one car
      * share a fog colour of (0.90, 0.96, 0.95) — the green a windscreen is. */
-    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5 }],
+    /* Parameter 3 is the reflection glossiness, which is how polished the
+     * surface is and the difference between chrome and a matte panel. Read
+     * off the same car twice: 3ds Max's own FBX export of this scene states a
+     * glossiness for each of its seventy materials, and for every one of them
+     * parameter 3 of the .max holds that number. */
+    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5, glossiness: 3 }],
     /* Corona keeps its surface in one block, every channel a colour with a
      * level beside it, and its glossiness at 180 where nothing else is near.
      *
@@ -4441,7 +4449,7 @@ const FbxMax = (function () {
       const base = resolveBlend(material.subs[0], new Set([...chain, index]));
       resolved.add(index);
       if (!base) return material;
-      if (!material.look.colour) material.look = base.look;
+      material.look = base.look;
       material.texture = base.texture;
       material.bump = base.bump;
       return material;
@@ -4467,10 +4475,16 @@ const FbxMax = (function () {
       if (look.specular) props.push(p70('SpecularColor', 'Color', ...look.specular.map(D)));
       // Specular level is a percentage in the file and a factor here.
       if (look.level !== null) props.push(p70('SpecularFactor', 'Number', D(look.level)));
-      // Glossiness is 0 to 1; the exponent an FBX material carries is that as
-      // a percentage, which is the conversion 3ds Max's own exporter makes.
+      // Glossiness is 0 to 1 and the exponent an FBX material carries is two
+      // to the ten times it, which is the conversion 3ds Max's own exporter
+      // makes: read off its export of this same scene, where every one of
+      // seventy materials lands on 2**(10 * glossiness) to four decimals —
+      // 0.3 becomes 8, 0.65 becomes 90.51, 1.0 becomes 1024. A percentage
+      // instead put a mirror and a matte panel within a few of each other,
+      // and the whole car came out equally satin.
       if (look.glossiness !== null) {
-        props.push(p70('ShininessExponent', 'Number', D(look.glossiness * 100)));
+        props.push(p70('ShininessExponent', 'Number',
+          D(2 ** (10 * Math.min(1, Math.max(0, look.glossiness))))));
       }
       // Only where the material says so: a .max carries no opacity otherwise,
       // and writing 1 for every material would say something the file does not.

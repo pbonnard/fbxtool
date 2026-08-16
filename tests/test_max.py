@@ -285,7 +285,8 @@ def test_a_shader_says_which_parameter_of_its_block_is_which():
     assert props["SpecularFactor"] == pytest.approx([fb.MAX_SPECULAR_LEVEL], abs=1e-6)
     # Glossiness is 0 to 1 in the file and a percentage as an exponent, which
     # is the conversion 3ds Max's own exporter makes.
-    assert props["ShininessExponent"] == pytest.approx([fb.MAX_GLOSSINESS * 100], abs=1e-4)
+    assert props["ShininessExponent"] == pytest.approx([fb.shininess(fb.MAX_GLOSSINESS)],
+                                                       abs=1e-4)
 
 
 def test_each_shader_reads_its_own_layout():
@@ -323,6 +324,11 @@ def test_a_vray_material_is_read_for_what_it_lets_through():
     assert props["SpecularColor"] == pytest.approx(fb.MAX_SPECULAR, abs=1e-6)
     # What it refracts is what it lets through, so it is the opposite of this.
     assert props["Opacity"] == pytest.approx([1 - max(fb.MAX_REFRACTION)], abs=1e-6)
+    # And parameter 3 is how polished it is, which is the difference between
+    # chrome and a matte panel — left out, every V-Ray surface came out at the
+    # same middling roughness and a windscreen was as satin as a bumper.
+    assert props["ShininessExponent"] == pytest.approx([fb.shininess(fb.MAX_GLOSSINESS)],
+                                                       abs=1e-4)
 
 
 @pytest.mark.parametrize("shader", ["CoronaMtl", "CoronaLegacyMtl"])
@@ -346,7 +352,8 @@ def test_a_corona_material_is_read_by_the_layout_it_writes(shader):
         [c * fb.MAX_DIFFUSE_LEVEL for c in fb.MAX_DIFFUSE], abs=1e-6)
     assert props["SpecularColor"] == pytest.approx(
         [c * fb.MAX_SPECULAR_LEVEL_CORONA for c in fb.MAX_SPECULAR], abs=1e-6)
-    assert props["ShininessExponent"] == pytest.approx([fb.MAX_GLOSSINESS * 100], abs=1e-4)
+    assert props["ShininessExponent"] == pytest.approx([fb.shininess(fb.MAX_GLOSSINESS)],
+                                                       abs=1e-4)
     assert props["Opacity"] == pytest.approx(
         [1 - max(fb.MAX_REFRACTION) * fb.MAX_REFRACTION_LEVEL], abs=1e-6)
 
@@ -565,7 +572,10 @@ def test_a_blend_looks_like_the_coat_it_is_built_on():
 
     What a Blend's own blocks hold is the mask that mixes its ingredients, so
     a reader that takes the first picture below it paints a tyre with the map
-    that blends its dirt in rather than with its tread.
+    that blends its dirt in rather than with its tread.  Its name is there too,
+    under an id of its own — a Blend, a Standard and a VRayCarPaintMtl all keep
+    theirs at 0x4000, which is why those came out numbered while everything
+    beside them was named.
     """
     doc = parse_max(fb.build_max(slots=2, materials=[0, 1, 0, 1, 0, 1],
                                  blend_slots={0}), load_arrays=True)
@@ -573,10 +583,32 @@ def test_a_blend_looks_like_the_coat_it_is_built_on():
     colours = {n.props[1].value.split("\x00")[0]:
                [round(p.value, 3) for p in n.get("Properties70").children[0].props[4:7]]
                for n in objects.children if n.name == "Material"}
-    # slot0 is the base the blend is built on, and blend0 takes its colour.
+    # The blend was found by the name it keeps rather than numbered after its
+    # entity, and it takes the colour of the base it is built on.
     assert colours["blend0"] == colours["slot0"]
     # Not the coat laid over it, which is a different colour entirely.
     assert colours["blend0"] != colours["coat0"]
+
+
+def test_the_exponent_is_the_one_3ds_max_writes_for_a_glossiness():
+    """Two to the ten times it, and not the percentage this used to write.
+
+    Settled against the answer: this project has one car as a ``.max`` and as
+    3ds Max's own ``.FBX`` export of the same scene, and over all seventy of
+    its materials every exponent in the export is ``2 ** (10 * g)`` of the
+    glossiness in the scene, to four decimals.  A percentage put a mirror and
+    a matte panel within a few of each other, so a windscreen came out as
+    satin as a bumper.
+    """
+    assert fb.shininess(1.0) == 1024
+    assert fb.shininess(0.3) == pytest.approx(8.0, abs=1e-9)
+    assert fb.shininess(0.65) == pytest.approx(90.5097, abs=1e-4)
+
+    for glossiness in (0.0, 0.25, 0.82, 1.0):
+        props = _material_props(parse_max(
+            fb.build_max(shader="VRayMtl", glossiness=glossiness), load_arrays=True))
+        assert props["ShininessExponent"] == pytest.approx([fb.shininess(glossiness)],
+                                                           abs=1e-4)
 
 
 # ---------------------------------------------------------- the node it hangs

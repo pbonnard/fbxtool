@@ -1729,6 +1729,17 @@ MAX_AMBIENT = (0.2, 0.2, 0.2)
 MAX_DIFFUSE = (0.8, 0.1, 0.05)
 MAX_SPECULAR = (1.0, 0.9, 0.8)
 MAX_GLOSSINESS = 0.25
+
+
+def shininess(glossiness: float) -> float:
+    """A glossiness as the exponent an FBX carries, the way 3ds Max converts it.
+
+    Two to the ten times the glossiness, which is what its own exporter
+    writes: over the seventy materials of a car this project has both ways,
+    every exponent in the ``.FBX`` is ``2 ** (10 * g)`` of the glossiness in
+    the ``.max`` to four decimals.
+    """
+    return 2.0 ** (10.0 * glossiness)
 MAX_SPECULAR_LEVEL = 0.6
 #: What a V-Ray material lets through, which is the opposite of its opacity —
 #: and the one thing a .max says about transparency at all.  Stored as a
@@ -1755,7 +1766,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               maps: "dict[int, str] | None" = None, maps_on: str = "material",
               blend_slots: "set[int] | None" = None,
               material_class: "str | None" = None,
-              param_chunk: int = 0x100E, assets_version: int = 3) -> bytes:
+              param_chunk: int = 0x100E, assets_version: int = 3,
+              glossiness: float = MAX_GLOSSINESS) -> bytes:
     """A .max holding one cube under one node.
 
     The cube is a unit cube, which is enough to exercise every rule the reader
@@ -1859,6 +1871,7 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         # ships would keep a glossiness.
         block = (_max_param_colour(1, MAX_DIFFUSE)
                  + _max_param_colour(2, MAX_SPECULAR)
+                 + _max_param_float(3, glossiness)
                  + _max_param_colour(5, MAX_REFRACTION))
     elif shader and shader.strip().lower().startswith("corona"):
         # Corona's own block: every channel a colour with a level beside it,
@@ -1985,10 +1998,13 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                                                             _max_utf16(f"coat{at}")),
                                                  container=True),
                                     container=True)
+                # A Blend keeps its name under 0x4000 rather than the id
+                # 3ds Max's own materials use, which is why blends came out
+                # numbered while everything beside them was named.
                 extra += _max_chunk(0x000D,
                                     _max_chunk(0x2034,
                                                struct.pack("<2I", held[-1], nxt + 1))
-                                    + _max_chunk(0x5431,
+                                    + _max_chunk(0x4000,
                                                  _max_chunk(0x4001,
                                                             _max_utf16(f"blend{at}")),
                                                  container=True),

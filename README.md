@@ -379,6 +379,31 @@ A Blend also takes its look and its maps from the base coat it is built on:
 what its own blocks hold is the mask that mixes its ingredients, and read as a
 colour that is a tyre painted with the map that blends its dirt in.
 
+### Checked against 3ds Max's own export
+
+One car ships both ways — an Audi SQ8 as four `.max` scenes and as 3ds Max's
+own `.FBX` export of the same two, which makes the export an answer key for the
+reader. Diffing the seventy materials each produces settled three things that
+guesswork had left wrong.
+
+A **VRayMtl keeps its reflection glossiness at parameter 3**: for every one of
+the seventy, the number the export states is the number parameter 3 holds.
+Without it every V-Ray surface fell back to one middling roughness, so a
+windscreen was as satin as a bumper. The **exponent an FBX carries is
+`2 ** (10 × glossiness)`** — 0.3 becomes 8, 0.65 becomes 90.51, 1.0 becomes
+1024, exact to four decimals across all seventy — where this used to write the
+glossiness as a percentage and put a mirror and a matte panel within a few of
+each other. And a **material's name can live under 0x4000** as well as the two
+ids already read: that is where a Blend, a Standard and a VRayCarPaintMtl keep
+theirs, so those came out numbered while everything beside them was named — an
+Audi's body being a Blend, `vray AUDI body grey` was in the file all along.
+
+Read this way the two agree on every colour, every reflection and every
+exponent of all seventy materials, to the last decimal the exporter's floats
+carry. The two properties that still differ are spellings of the same thing: a
+`SpecularFactor` of 1 against no factor at all, and an `Opacity` of 0.36
+against a `TransparencyFactor` of 0.64.
+
 ### Bump and normal maps
 
 A car is modelled smooth and detailed by its maps, so a viewer that draws only

@@ -316,9 +316,13 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
     # The same for Corona, which keys them on the block rather than itself.
     {"shader": "CoronaMtl", "material_class": "CoronaMtl", "maps_on": "block",
      "maps": {0: "colour.png", 6: "bump.png"}},
-    # A Blend in a slot, which must not shift the slots behind it.
+    # A Blend in a slot, which must not shift the slots behind it, and which
+    # keeps its name under an id of its own.
     {"slots": 4, "materials": [0, 1, 2, 3, 1, 0], "blend_slots": {1}},
-], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot"])
+    # A polished surface, so the exponent the two write has to agree.
+    {"shader": "VRayMtl", "glossiness": 0.82},
+], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot",
+        "glossiness"])
 def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
     """The same cross-check over the shapes a real car scene turns out to use.
 
