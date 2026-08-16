@@ -16,6 +16,11 @@ const FbxViewer = (function () {
    * 0.999 for "opaque", which is not worth a second pass. */
   const OPAQUE = 0.996;
 
+  /* The three-quarter view a model opens on. */
+  const VIEW_YAW = 0.9;
+  const VIEW_PITCH = 0.28;
+  const QUARTER_TURN = Math.PI / 2;
+
   /* Shared by the model and background shaders: one studio environment, in
    * linear radiance. A bright horizon band is what paint and chrome pick up. */
   const ENVIRONMENT = `
@@ -720,6 +725,8 @@ ${SHADOW_LOOKUP}
       this.distance = 4;
       this.target = [0, 0, 0];
       this.radius = 1;
+      /** Quarter turns added to the heading the model opens on. */
+      this.heading = 0;
       this.autoRotate = false;
       this.dirty = true;
       this._frame = 0;
@@ -1235,8 +1242,8 @@ ${SHADOW_LOOKUP}
       this.measure(min, max);
       this.target = [0, 0, 0];
       this.distance = this.radius * 2.6;
-      this.yaw = 0.9;
-      this.pitch = 0.28;
+      this.yaw = VIEW_YAW + this.heading * QUARTER_TURN;
+      this.pitch = VIEW_PITCH;
       this.dirty = true;
     }
 
@@ -1297,12 +1304,34 @@ ${SHADOW_LOOKUP}
       this.shadowStale = true;
       this.dirty = true;
     }
+    /**
+     * Which way round the model is looked at, in quarter turns about the up
+     * axis, taking effect now and on every reframing from here on.
+     *
+     * No file says which end of a model is its front. The axis declarations
+     * come close, but they are a convention of the format rather than a
+     * reading of the scene — every 3ds Max file says front is -Y whichever way
+     * the artist actually laid the car out — so a model whose length runs
+     * across that declaration opens showing whatever end happens to face the
+     * camera. Turning it round is therefore a thing to be told, not guessed,
+     * and unlike a mirror it is only a view: the export is unmoved.
+     */
+    setHeading(quarters) {
+      const next = ((Math.round(Number(quarters) || 0) % 4) + 4) % 4;
+      if (next === this.heading) return;
+      // Turn what is on screen by the difference, so the view the user is
+      // looking at swings round rather than jumping back to the default one.
+      this.yaw += (next - this.heading) * QUARTER_TURN;
+      this.heading = next;
+      this.dirty = true;
+    }
+
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
     setShowGround(on) { this.showGround = on !== false; this.dirty = true; }
 
     resetView() {
-      this.yaw = 0.9;
-      this.pitch = 0.28;
+      this.yaw = VIEW_YAW + this.heading * QUARTER_TURN;
+      this.pitch = VIEW_PITCH;
       this.distance = this.radius * 2.6;
       this.target = [0, 0, 0];
       this.dirty = true;

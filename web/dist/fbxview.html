@@ -171,6 +171,25 @@ body.loaded .viewport-controls { opacity: 1; pointer-events: auto; }
   padding: 3px 6px 3px 9px;
 }
 
+/* The turn button sits beside the mirrors and reads as one of them, being the
+   same kind of correction — but for the view rather than the model. */
+#turn-button {
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(20, 23, 29, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  line-height: 1;
+}
+#turn-button:hover { color: var(--text); }
+#turn-button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: transparent;
+  color: #08101d;
+  font-weight: 600;
+}
+
 .flips button {
   font-size: 12px;
   font-family: var(--mono);
@@ -631,6 +650,8 @@ ul.record-tree .count { color: var(--muted); }
         <button id="flip-y" type="button" data-axis="1" aria-pressed="false">Y</button>
         <button id="flip-z" type="button" data-axis="2" aria-pressed="false">Z</button>
       </span>
+      <button id="turn-button" type="button"
+              title="Turn the model a quarter turn to face the other way — remembered for this file, and only a view">turn</button>
       <label class="slider" title="Pull the parts away from each other">
         explode
         <input id="explode-slider" type="range" min="0" max="150" value="0" step="1" disabled>
@@ -7837,6 +7858,11 @@ const FbxViewer = (function () {
    * 0.999 for "opaque", which is not worth a second pass. */
   const OPAQUE = 0.996;
 
+  /* The three-quarter view a model opens on. */
+  const VIEW_YAW = 0.9;
+  const VIEW_PITCH = 0.28;
+  const QUARTER_TURN = Math.PI / 2;
+
   /* Shared by the model and background shaders: one studio environment, in
    * linear radiance. A bright horizon band is what paint and chrome pick up. */
   const ENVIRONMENT = `
@@ -8541,6 +8567,8 @@ ${SHADOW_LOOKUP}
       this.distance = 4;
       this.target = [0, 0, 0];
       this.radius = 1;
+      /** Quarter turns added to the heading the model opens on. */
+      this.heading = 0;
       this.autoRotate = false;
       this.dirty = true;
       this._frame = 0;
@@ -9056,8 +9084,8 @@ ${SHADOW_LOOKUP}
       this.measure(min, max);
       this.target = [0, 0, 0];
       this.distance = this.radius * 2.6;
-      this.yaw = 0.9;
-      this.pitch = 0.28;
+      this.yaw = VIEW_YAW + this.heading * QUARTER_TURN;
+      this.pitch = VIEW_PITCH;
       this.dirty = true;
     }
 
@@ -9118,12 +9146,34 @@ ${SHADOW_LOOKUP}
       this.shadowStale = true;
       this.dirty = true;
     }
+    /**
+     * Which way round the model is looked at, in quarter turns about the up
+     * axis, taking effect now and on every reframing from here on.
+     *
+     * No file says which end of a model is its front. The axis declarations
+     * come close, but they are a convention of the format rather than a
+     * reading of the scene — every 3ds Max file says front is -Y whichever way
+     * the artist actually laid the car out — so a model whose length runs
+     * across that declaration opens showing whatever end happens to face the
+     * camera. Turning it round is therefore a thing to be told, not guessed,
+     * and unlike a mirror it is only a view: the export is unmoved.
+     */
+    setHeading(quarters) {
+      const next = ((Math.round(Number(quarters) || 0) % 4) + 4) % 4;
+      if (next === this.heading) return;
+      // Turn what is on screen by the difference, so the view the user is
+      // looking at swings round rather than jumping back to the default one.
+      this.yaw += (next - this.heading) * QUARTER_TURN;
+      this.heading = next;
+      this.dirty = true;
+    }
+
     setAutoRotate(on) { this.autoRotate = on; this.dirty = true; }
     setShowGround(on) { this.showGround = on !== false; this.dirty = true; }
 
     resetView() {
-      this.yaw = 0.9;
-      this.pitch = 0.28;
+      this.yaw = VIEW_YAW + this.heading * QUARTER_TURN;
+      this.pitch = VIEW_PITCH;
       this.distance = this.radius * 2.6;
       this.target = [0, 0, 0];
       this.dirty = true;
@@ -9508,6 +9558,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
     flipButtons: [$('flip-x'), $('flip-y'), $('flip-z')],
+    turnButton: $('turn-button'),
     explodeSlider: $('explode-slider'),
     partInfo: $('part-info'),
     partName: $('part-name'),
@@ -10091,6 +10142,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       viewer.clear();
       viewer.setHighlight(-1);
       applyFlips();
+      heading = 0;
+      applyHeading();
     }
   }
 
@@ -10158,6 +10211,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       }
       flips = recallFlips(doc.fileName);
       applyFlips();
+      // Before the mesh is framed, so the first view is the remembered one.
+      heading = recallHeading(doc.fileName);
+      applyHeading();
       objectIndex = buildObjectIndex(currentAnalysis.objects);
 
       renderReport();
@@ -11075,6 +11131,42 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     } catch (error) {
       return [false, false, false];
     }
+  }
+
+  /* Which way round a model is looked at, remembered per file for the third
+   * time and the same reason: nothing in the file says which end is the front,
+   * so a car laid out across the format's idea of forward opens showing its
+   * back, and it will do so again tomorrow.
+   *
+   * Unlike a mirror this is not written into the export. Turning the camera
+   * round leaves the model exactly where the file put it. */
+  let heading = 0;
+
+  const headingKey = (name) => `fbxtool:heading:${name || 'unnamed'}`;
+
+  function rememberHeading() {
+    if (!currentDoc) return;
+    try {
+      if (heading) window.localStorage.setItem(headingKey(currentDoc.fileName), String(heading));
+      else window.localStorage.removeItem(headingKey(currentDoc.fileName));
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallHeading(fileName) {
+    try {
+      const saved = Number(window.localStorage.getItem(headingKey(fileName)));
+      return Number.isInteger(saved) && saved > 0 && saved < 4 ? saved : 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  /** Put the heading on the camera and on the button that says so. */
+  function applyHeading() {
+    viewer.setHeading(heading);
+    if (dom.turnButton) dom.turnButton.setAttribute('aria-pressed', heading ? 'true' : 'false');
   }
 
   /** Put the mirrors on the model and on the buttons that say so. */
@@ -12921,6 +13013,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         rememberFlips();
       });
     });
+    if (dom.turnButton) {
+      dom.turnButton.addEventListener('click', () => {
+        heading = (heading + 1) % 4;
+        applyHeading();
+        rememberHeading();
+      });
+    }
     dom.explodeSlider.addEventListener('input',
       () => viewer.setExplode(Number(dom.explodeSlider.value) / 100));
 
@@ -13046,6 +13145,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       redo: redoEdit,
       restoreAll,
       get flips() { return flips.slice(); },
+      get heading() { return heading; },
       get lastExport() { return lastExport; },
       get lastSurvey() { return lastSurvey; },
       exportMesh: () => currentMesh,

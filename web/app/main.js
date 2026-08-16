@@ -21,6 +21,7 @@
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
     flipButtons: [$('flip-x'), $('flip-y'), $('flip-z')],
+    turnButton: $('turn-button'),
     explodeSlider: $('explode-slider'),
     partInfo: $('part-info'),
     partName: $('part-name'),
@@ -604,6 +605,8 @@
       viewer.clear();
       viewer.setHighlight(-1);
       applyFlips();
+      heading = 0;
+      applyHeading();
     }
   }
 
@@ -671,6 +674,9 @@
       }
       flips = recallFlips(doc.fileName);
       applyFlips();
+      // Before the mesh is framed, so the first view is the remembered one.
+      heading = recallHeading(doc.fileName);
+      applyHeading();
       objectIndex = buildObjectIndex(currentAnalysis.objects);
 
       renderReport();
@@ -1588,6 +1594,42 @@
     } catch (error) {
       return [false, false, false];
     }
+  }
+
+  /* Which way round a model is looked at, remembered per file for the third
+   * time and the same reason: nothing in the file says which end is the front,
+   * so a car laid out across the format's idea of forward opens showing its
+   * back, and it will do so again tomorrow.
+   *
+   * Unlike a mirror this is not written into the export. Turning the camera
+   * round leaves the model exactly where the file put it. */
+  let heading = 0;
+
+  const headingKey = (name) => `fbxtool:heading:${name || 'unnamed'}`;
+
+  function rememberHeading() {
+    if (!currentDoc) return;
+    try {
+      if (heading) window.localStorage.setItem(headingKey(currentDoc.fileName), String(heading));
+      else window.localStorage.removeItem(headingKey(currentDoc.fileName));
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallHeading(fileName) {
+    try {
+      const saved = Number(window.localStorage.getItem(headingKey(fileName)));
+      return Number.isInteger(saved) && saved > 0 && saved < 4 ? saved : 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  /** Put the heading on the camera and on the button that says so. */
+  function applyHeading() {
+    viewer.setHeading(heading);
+    if (dom.turnButton) dom.turnButton.setAttribute('aria-pressed', heading ? 'true' : 'false');
   }
 
   /** Put the mirrors on the model and on the buttons that say so. */
@@ -3434,6 +3476,13 @@
         rememberFlips();
       });
     });
+    if (dom.turnButton) {
+      dom.turnButton.addEventListener('click', () => {
+        heading = (heading + 1) % 4;
+        applyHeading();
+        rememberHeading();
+      });
+    }
     dom.explodeSlider.addEventListener('input',
       () => viewer.setExplode(Number(dom.explodeSlider.value) / 100));
 
@@ -3559,6 +3608,7 @@
       redo: redoEdit,
       restoreAll,
       get flips() { return flips.slice(); },
+      get heading() { return heading; },
       get lastExport() { return lastExport; },
       get lastSurvey() { return lastSurvey; },
       exportMesh: () => currentMesh,

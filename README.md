@@ -691,6 +691,19 @@ determinant, so the exported file needs nothing else said about it. And the
 normals need no correction at all: a rotation with an axis mirrored is its own
 inverse transpose, which is what carries a normal properly.
 
+**Turn** is the third correction of this kind, and the only one that is purely
+a view. Nothing in any of these formats says which end of a model is its front.
+The axis declarations look like they do — `FrontAxis` sits right there beside
+`UpAxis` — but they are a property of the format rather than a reading of the
+scene: every `.max` says front is `-Y` and every glTF says `+Z`, whichever way
+the artist actually laid the car out. A Maserati Grecale modelled down the X
+axis therefore opens showing its rear, and no amount of reading the file harder
+will say so. Turn swings the camera a quarter turn about the up axis, four of
+them coming back to where it started, and is remembered per file so a model
+that has been turned round once stays turned round. Unlike a mirror it is not
+written into the export: the model stays exactly where the file put it, and
+only the camera moves.
+
 ### Legacy 6.x files
 
 FBX 6.x — anything the SDK still writes as version 6100, and plenty of models
@@ -1529,6 +1542,7 @@ node web/test/gltfin.js samples/cube_textured.fbx     # export, then read it bac
 node web/test/reload.js a.fbx b.fbx                  # one file replacing another
 node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
 node web/test/flip.js samples/scene_parts.fbx        # mirroring, and its winding
+node web/test/turn.js samples/scene_parts.fbx        # facing the other way, remembered
 node web/test/drop.js samples/pyramid.obj samples/pyramid.mtl samples/checker.png
 node web/test/edits.js samples/Shelby.fbx            # deleting and splitting
 ```

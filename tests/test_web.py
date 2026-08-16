@@ -822,6 +822,31 @@ def test_the_model_can_be_mirrored_on_each_axis(built):
 
 @needs_clang
 @needs_node
+def test_the_model_can_be_turned_to_face_the_other_way(built):
+    """A heading is a view setting, and the export does not follow it.
+
+    No file says which end of a model is its front — the axis declarations are
+    a convention of the format, not a reading of the scene — so a model laid
+    out across them opens showing its back. Being told once has to be enough,
+    which is why this asks what happens when the file is opened again.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = _run(["node", str(WEB / "test" / "turn.js"),
+                   str(ROOT / "samples" / "scene_parts.fbx")],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_smoothing_control(built, tmp_path):
     """Picking a level rebuilds what is on screen, and rounds it."""
     try:
