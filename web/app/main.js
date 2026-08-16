@@ -500,9 +500,10 @@
     unreadableTextures = textures.unreadable;
     viewer.setTextures(textures.images);
     viewer.setFinishTextures(textures.finish);
+    viewer.setBumpTextures(textures.bump);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
-      && textures.finish.length === 0;
+      && textures.finish.length === 0 && textures.bump.length === 0;
     return textures;
   }
 
@@ -1966,6 +1967,50 @@
   }
 
   /**
+   * A height map turned into the tangent-space normal map it stands for.
+   *
+   * A surface raised by a height `h` has the normal `(-dh/du, -dh/dv, 1)`
+   * normalised, which is one central difference per axis and no more. Both are
+   * "the texel before minus the texel after", `v` running down the image as
+   * glTF has it — so a ramp getting brighter to the right leaves red below the
+   * middle, and one getting brighter downwards leaves green below it.
+   *
+   * The differences and the strength are the viewer's own, so the file that
+   * comes out is shaded the way the screen shaded it rather than merely
+   * plausibly. The edges wrap, which is right for a tiling map and invisible
+   * on one that does not tile.
+   */
+  async function encodeNormals(image, strength) {
+    if (!image) return null;
+    const canvas = document.createElement('canvas');
+    const width = canvas.width = image.width;
+    const height = canvas.height = image.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, 0, 0);
+    const source = context.getImageData(0, 0, width, height);
+    const out = context.createImageData(width, height);
+    // The red channel is the height: a bump map is grey, and where it is not,
+    // red is the channel every convention agrees on.
+    const heightAt = (x, y) => source.data[
+      (((y + height) % height) * width + ((x + width) % width)) * 4] / 255;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const du = (heightAt(x - 1, y) - heightAt(x + 1, y)) * strength;
+        const dv = (heightAt(x, y - 1) - heightAt(x, y + 1)) * strength;
+        const length = Math.hypot(du, dv, 1);
+        const at = (y * width + x) * 4;
+        out.data[at] = Math.round(((du / length) * 0.5 + 0.5) * 255);
+        out.data[at + 1] = Math.round(((dv / length) * 0.5 + 0.5) * 255);
+        out.data[at + 2] = Math.round(((1 / length) * 0.5 + 0.5) * 255);
+        out.data[at + 3] = 255;
+      }
+    }
+    context.putImageData(out, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    return blob ? { bytes: new Uint8Array(await blob.arrayBuffer()), hasAlpha: false } : null;
+  }
+
+  /**
    * Whether an image carries transparency of its own.
    *
    * A JPEG has no alpha channel at all. A PNG says so in its header — colour
@@ -2034,6 +2079,18 @@
       ...image, wrapS: request.wrapS, wrapT: request.wrapT,
     });
 
+    /** A height map as the normal map glTF's normal slot has to hold. */
+    const normalsFor = async (request) => {
+      const key = `normal:${request.embedded || baseName(request.path)}`;
+      if (read.has(key)) return read.get(key);
+      const encoded = await encodeNormals(
+        await decodeTexture(request, suppliedImages), BUMP_RELIEF);
+      const image = encoded
+        ? { bytes: encoded.bytes, mimeType: 'image/png', hasAlpha: false } : null;
+      read.set(key, image);
+      return image;
+    };
+
     for (const entry of palette) {
       // An image left out of the palette is left out of the file: that is what
       // dropping it was for.
@@ -2045,7 +2102,12 @@
         const maps = [];
         for (const [slot, request] of Object.entries(entry.textures)) {
           if (!wanted(entry, slot)) continue;
-          const image = await bytesFor(request);
+          // glTF's normal texture is a direction, and a height map is not one:
+          // written straight out it says every surface faces the way its own
+          // brightness points. Turned into the normals it stands for, by the
+          // same differences the viewer shades it with, it says what it meant.
+          const image = slot === 'normal' && !entry.bumpIsNormalMap
+            ? await normalsFor(request) : await bytesFor(request);
           if (image) maps.push({ slot, ...withWrap(image, request) });
         }
         if (maps.length) textures.set(entry.name, maps);
@@ -2639,10 +2701,10 @@
    * Every texture bound to a material, by the glTF map it fills.
    *
    * A Texture attaches to a Material through an object-to-property connection
-   * naming the property it drives. Only the base colour is drawn — this tool
-   * has no opinion about a normal map — but the others are read all the same,
-   * so that an export can put them back where it found them rather than write
-   * a car with every shut line painted on.
+   * naming the property it drives. The base colour, the metallic-roughness
+   * map and the one that shapes the surface are drawn; the rest are read all
+   * the same, so that an export can put them back where it found them rather
+   * than write a car with every shut line painted on.
    *
    * The wrap modes come off the bound Texture record rather than the image:
    * a tiling tread that comes back clamped is a visible change on a wheel.
@@ -2783,16 +2845,70 @@
   }
 
   /**
-   * The images the viewer draws with: the base colour, and the map that says
-   * how metallic and how rough the surface is at each texel.
+   * How far a height map is allowed to tilt a normal, as the slope it stands
+   * for. A bump map says how high the surface is and not which way it faces,
+   * so the slope has to be read off the neighbouring texels and scaled by
+   * something; four is what makes a leather grain read as grain and a tyre's
+   * lettering stand off its sidewall without either turning to gravel.
+   */
+  const BUMP_RELIEF = 4;
+
+  /**
+   * The images the viewer draws with: the base colour, the map that says how
+   * metallic and how rough the surface is at each texel, and the map that says
+   * what shape it is between its own vertices.
    *
-   * The second is not a picture and is never shown as one — it is read so that
-   * a material stating one metalness for the whole of itself, over a map that
-   * varies it, is drawn as the map has it. A tyre whose file leaves
+   * Only the first is a picture. A metallic-roughness map is read so that a
+   * material stating one metalness for the whole of itself, over a map that
+   * varies it, is drawn as the map has it — a tyre whose file leaves
    * `metallicFactor` out takes glTF's default of 1, and drawn at that it is a
-   * white mirror with its tread cancelled.
+   * white mirror with its tread cancelled. A bump or normal map is read so
+   * that a surface modelled flat and detailed by its maps is not drawn flat.
    */
   const wanted = (entry, slot) => !(entry.droppedMaps || []).includes(slot);
+
+  /**
+   * Whether an image states a direction or a height.
+   *
+   * The same slot carries both. A tangent-space normal map is three channels
+   * of a unit vector, and since most of a surface faces roughly the way it
+   * already did, it comes out overwhelmingly blue with red and green around
+   * the middle. A bump map is a height, which is to say grey. Told apart the
+   * wrong way round, a normal map read as a height gives a surface shaped by
+   * its own blue channel and a bump map read as a direction tips every normal
+   * towards the same corner.
+   *
+   * Decided on a thumbnail rather than the whole image: this is a question
+   * about the image as a whole, and a 32-pixel square answers it.
+   */
+  function looksLikeNormalMap(image, edge = 32) {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = edge;
+      canvas.height = edge;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(image, 0, 0, edge, edge);
+      const pixels = context.getImageData(0, 0, edge, edge).data;
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      const count = pixels.length / 4;
+      for (let i = 0; i < pixels.length; i += 4) {
+        red += pixels[i];
+        green += pixels[i + 1];
+        blue += pixels[i + 2];
+      }
+      red /= count * 255;
+      green /= count * 255;
+      blue /= count * 255;
+      // Blue well ahead of the other two is the tell, and it is the one a grey
+      // image cannot fake however bright or dark it is.
+      return blue - Math.max(red, green) > 0.1
+        && Math.abs(red - 0.5) < 0.25 && Math.abs(green - 0.5) < 0.25;
+    } catch (error) {
+      return false;                // unreadable pixels: treat it as a height
+    }
+  }
 
   async function resolveTextures(palette) {
     const base = await resolveLayer(palette,
@@ -2800,14 +2916,27 @@
     const finish = await resolveLayer(palette,
       (m) => (wanted(m, 'metallicRoughness') && m.textures
         ? m.textures.metallicRoughness : null), 'finishLayer');
+    const relief = await resolveLayer(palette,
+      (m) => (wanted(m, 'normal') && m.textures ? m.textures.normal : null), 'bumpLayer');
+    // Which kind each layer turned out to be, and how hard to take it. A
+    // normal map states its own slopes and is taken as written; a height has
+    // to be turned into one, and the strength is what says how deep it reads.
+    const kinds = relief.images.map((image) => looksLikeNormalMap(image));
+    for (const material of palette) {
+      const layer = material.bumpLayer;
+      material.bumpIsNormalMap = layer >= 0 ? kinds[layer] : false;
+      material.bumpStrength = material.bumpIsNormalMap ? 1 : BUMP_RELIEF;
+    }
     return {
       images: base.images,
       requested: base.requested,
       // A map that was named and did not arrive is worth saying so about,
-      // whichever of the two it was.
-      missing: [...new Set([...base.missing, ...finish.missing])],
-      unreadable: [...new Set([...base.unreadable, ...finish.unreadable])],
+      // whichever of the three it was.
+      missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing])],
+      unreadable: [...new Set([...base.unreadable, ...finish.unreadable,
+        ...relief.unreadable])],
       finish: finish.images,
+      bump: relief.images,
     };
   }
 
@@ -2986,9 +3115,10 @@
       installPalette(built.palette, built.mesh);
       viewer.setTextures(textures.images);
       viewer.setFinishTextures(textures.finish);
+      viewer.setBumpTextures(textures.bump);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
-        && textures.finish.length === 0;
+        && textures.finish.length === 0 && textures.bump.length === 0;
       applyUpAxis(built.mesh);
 
       const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
@@ -3195,9 +3325,10 @@
       installPalette(built.palette, mesh);
       viewer.setTextures(textures.images);
       viewer.setFinishTextures(textures.finish);
+      viewer.setBumpTextures(textures.bump);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
-        && textures.finish.length === 0;
+        && textures.finish.length === 0 && textures.bump.length === 0;
 
       const chosen = applyUpAxis(mesh);
 

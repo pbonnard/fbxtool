@@ -295,6 +295,8 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uTextures; // one layer per distinct image
   // Metallic-roughness maps, stored linear: these are numbers, not a picture.
   uniform highp sampler2DArray uFinish;
+  // Bump and normal maps, linear for the same reason.
+  uniform highp sampler2DArray uBump;
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -336,6 +338,31 @@ ${SHADOW_LOOKUP}
     return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
   }
 
+  /* The frame a tangent-space map is written in, worked out here rather than
+   * stored on the mesh.
+   *
+   * A normal map is written against the surface's own axes — U to the right, V
+   * up, the normal out — and turning one back into a world direction needs
+   * those axes. A mesh usually does not carry them, and a .max never does, so
+   * they are recovered from how the position and the texture coordinate change
+   * across neighbouring pixels: two vectors along the surface and two along
+   * the map, which is enough to solve for the frame. Degenerate where a
+   * triangle has no area in one of the two, which is what the guard is for.
+   */
+  mat3 surfaceFrame(vec3 n, vec3 position, vec2 uv) {
+    vec3 dpx = dFdx(position);
+    vec3 dpy = dFdy(position);
+    vec2 duvx = dFdx(uv);
+    vec2 duvy = dFdy(uv);
+    vec3 perpY = cross(dpy, n);
+    vec3 perpX = cross(n, dpx);
+    vec3 tangent = perpY * duvx.x + perpX * duvy.x;
+    vec3 bitangent = perpY * duvx.y + perpX * duvy.y;
+    float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if (longest < 1e-16) return mat3(1.0);
+    return mat3(tangent * inversesqrt(longest), bitangent * inversesqrt(longest), n);
+  }
+
   /* Karis' analytic fit for the split-sum environment BRDF. */
   vec3 environmentBrdf(vec3 f0, float roughness, float nov) {
     const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
@@ -355,6 +382,47 @@ ${SHADOW_LOOKUP}
     }
     if (!gl_FrontFacing) normal = -normal;
 
+    // The material index is a whole number carried in a float attribute.
+    int slot = clamp(int(vMaterial + 0.5), 0, max(uPaletteSize - 1, 0));
+
+    /* What the surface is shaped like between its own vertices.
+     *
+     * The fourth row says which map, how strongly, and which of the two kinds
+     * it is. A normal map states the direction outright, three channels for
+     * three components. A bump map states a height and the direction is its
+     * slope, taken from the neighbouring texels — which is why it is sampled
+     * four more times rather than once.
+     *
+     * This happens before anything is shaded and before the normal preview, so
+     * what lights the surface and what is drawn as its normal are the same
+     * thing.
+     */
+    if (uPaletteSize > 0 && uUseTextures == 1) {
+      vec4 relief = texelFetch(uPalette, ivec2(slot, 3), 0);
+      int bumpLayer = int(relief.r + 0.5) - 1;
+      if (bumpLayer >= 0) {
+        vec3 uvw = vec3(vUv, float(bumpLayer));
+        vec3 tangentNormal;
+        if (relief.b > 0.5) {
+          tangentNormal = texture(uBump, uvw).xyz * 2.0 - 1.0;
+          tangentNormal.xy *= relief.g;
+        } else {
+          // Central differences, a texel either side. The height is the red
+          // channel: a bump map is grey, and where it is not, red is the
+          // channel every convention agrees on.
+          float left = textureOffset(uBump, uvw, ivec2(-1, 0)).r;
+          float right = textureOffset(uBump, uvw, ivec2(1, 0)).r;
+          float down = textureOffset(uBump, uvw, ivec2(0, -1)).r;
+          float up = textureOffset(uBump, uvw, ivec2(0, 1)).r;
+          tangentNormal = vec3((left - right) * relief.g, (down - up) * relief.g, 1.0);
+        }
+        if (dot(tangentNormal, tangentNormal) > 1e-8) {
+          mat3 frame = surfaceFrame(normal, vViewPosition, vUv);
+          normal = normalize(frame * normalize(tangentNormal));
+        }
+      }
+    }
+
     if (uMode == 3) {
       fragColour = vec4(normal * 0.5 + 0.5, 1.0);
       return;
@@ -365,8 +433,6 @@ ${SHADOW_LOOKUP}
     float roughness = 0.55;
     float opacity = 1.0;
     int group = -1;
-    // The material index is a whole number carried in a float attribute.
-    int slot = clamp(int(vMaterial + 0.5), 0, max(uPaletteSize - 1, 0));
     // The third row holds opacity and which material group this slot belongs
     // to; the group is wanted in every shading mode, for the highlight.
     vec4 extra = vec4(0.0, -1.0, 0.0, 0.0);
@@ -676,6 +742,7 @@ ${SHADOW_LOOKUP}
         paletteSize: gl.getUniformLocation(program, 'uPaletteSize'),
         textures: gl.getUniformLocation(program, 'uTextures'),
         finish: gl.getUniformLocation(program, 'uFinish'),
+        bump: gl.getUniformLocation(program, 'uBump'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -840,6 +907,8 @@ ${SHADOW_LOOKUP}
       this.textureLayers = 0;
       this.finishArray = gl.createTexture();
       this.finishLayers = 0;
+      this.bumpArray = gl.createTexture();
+      this.bumpLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -907,11 +976,13 @@ ${SHADOW_LOOKUP}
      * they connect to the model, which is what the per-polygon material index
      * refers to.
      *
-     * Three rows: the diffuse colour with the texture layer in alpha, the
+     * Four rows: the diffuse colour with the texture layer in alpha, the
      * specular colour with roughness in alpha, then opacity, the material
      * group, the metallic-roughness map's layer and the metalness that map
-     * scales. Floats, because the values are linear and eight bits of a linear
-     * ramp bands badly in the darks — the Mercedes' interior sits at 0.05.
+     * scales, and last the relief — which map shapes the surface, how strongly
+     * and which kind it is. Floats, because the values are linear and eight
+     * bits of a linear ramp bands badly in the darks — the Mercedes' interior
+     * sits at 0.05.
      */
     setPalette(materials) {
       const gl = this.gl;
@@ -920,7 +991,7 @@ ${SHADOW_LOOKUP}
       this.transparentMaterials = 0;
       if (!materials.length) { this.dirty = true; return; }
       const width = materials.length;
-      const data = new Float32Array(width * 3 * 4);
+      const data = new Float32Array(width * 4 * 4);
       materials.forEach((material, i) => {
         const rgb = material.colour || [0.72, 0.73, 0.76];
         const specular = material.specular || [0.04, 0.04, 0.04];
@@ -944,13 +1015,20 @@ ${SHADOW_LOOKUP}
         data[(width * 2 + i) * 4 + 2] = Math.max(0, finishLayer + 1);
         data[(width * 2 + i) * 4 + 3] = typeof material.metallic === 'number'
           ? Math.min(1, Math.max(0, material.metallic)) : 0;
+        // The map that shapes the surface: which layer, how strongly it is
+        // taken, and whether it states a direction or a height.
+        const bumpLayer = Number.isInteger(material.bumpLayer) ? material.bumpLayer : -1;
+        data[(width * 3 + i) * 4] = Math.max(0, bumpLayer + 1);
+        data[(width * 3 + i) * 4 + 1] = typeof material.bumpStrength === 'number'
+          ? Math.max(0, material.bumpStrength) : 1;
+        data[(width * 3 + i) * 4 + 2] = material.bumpIsNormalMap ? 1 : 0;
         if (opacity < OPAQUE) {
           this.hasTransparency = true;
           this.transparentMaterials++;
         }
       });
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 3, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 4, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;
@@ -980,6 +1058,18 @@ ${SHADOW_LOOKUP}
     setFinishTextures(images, edge = 1024) {
       this.finishLayers = images.length;
       this._uploadArray(this.finishArray, images, this.gl.RGBA8, edge);
+    }
+
+    /**
+     * The same again, for the maps that say what shape the surface is.
+     *
+     * A normal map holds a direction and a bump map a height; neither is a
+     * picture, and decoding either as sRGB would bend what it says. Stored as
+     * written, like the metallic-roughness maps beside them.
+     */
+    setBumpTextures(images, edge = 1024) {
+      this.bumpLayers = images.length;
+      this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
     }
 
     _uploadArray(target, images, internalFormat, edge = 1024) {
@@ -1491,12 +1581,15 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE4);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.finishArray);
       gl.uniform1i(this.uniforms.finish, 4);
+      gl.activeTexture(gl.TEXTURE5);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.bumpArray);
+      gl.uniform1i(this.uniforms.bump, 5);
       gl.activeTexture(gl.TEXTURE0);
-      // Either kind of map counts: a material can carry a metallic-roughness
+      // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
-        ((this.textureLayers > 0 || this.finishLayers > 0)
+        ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,

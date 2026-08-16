@@ -622,6 +622,36 @@ def checker_png(size: int = 64, squares: int = 8) -> bytes:
     return png(size, size, bytes(out))
 
 
+def height_png(size: int = 64) -> bytes:
+    """A bump map: grey, and getting brighter to the right and downwards.
+
+    A ramp rather than a pattern because its answer is known — the surface it
+    stands for leans one way over the whole of itself, so the normals it turns
+    into can be checked against a direction rather than against a picture.
+    """
+    out = bytearray()
+    for y in range(size):
+        for x in range(size):
+            value = (x + y) * 255 // max(2 * (size - 1), 1)
+            out += bytes((value, value, value))
+    return png(size, size, bytes(out))
+
+
+def normal_map_png(size: int = 64) -> bytes:
+    """A tangent-space normal map: mostly facing straight out, so mostly blue.
+
+    Which is what tells one from a height map — a height map is grey however
+    bright it is, and this is not.
+    """
+    out = bytearray()
+    for y in range(size):
+        for x in range(size):
+            # A gentle tilt, so it is a normal map rather than a flat blue.
+            lean = 20 if (x // 8 + y // 8) % 2 else -20
+            out += bytes((128 + lean, 128 - lean, 250))
+    return png(size, size, bytes(out))
+
+
 def _pack_bits(row: bytes) -> bytes:
     """One row as PackBits, the run-length coding a ``.psd`` stores rows in.
 

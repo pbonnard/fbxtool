@@ -585,7 +585,17 @@ def _vray(**kw):
                      load_arrays=True)
 
 
-def test_a_vray_material_wears_the_map_in_its_diffuse_slot():
+def _bound(doc):
+    """Which picture drives which property of the material wearing it."""
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    names = {n.props[0].value: n.props[1].value.split("\x00")[0]
+             for n in objects.children if n.name == "Texture"}
+    connections = next(n for n in doc.root.children if n.name == "Connections")
+    return {c.props[3].value: names[c.props[1].value] for c in connections.children
+            if c.props[0].value == "OP" and c.props[1].value in names}
+
+
+def test_a_vray_material_wears_each_map_in_the_slot_that_holds_it():
     """Not whichever map the walk happens to reach first.
 
     A VRayMtl keeps six parameter blocks and then its maps, and the first one
@@ -594,22 +604,26 @@ def test_a_vray_material_wears_the_map_in_its_diffuse_slot():
     tread it is bumped by comes out painted with that tread — pale grey where
     it should be black rubber — and a leather seat wears its own relief.
     """
-    assert _vray(maps={7: "colour.png", 10: "bump.png"}).extra["textures"] == ["colour.png"]
+    assert _bound(_vray(maps={7: "colour.png", 10: "bump.png"})) == {
+        "DiffuseColor": "colour.png", "Bump": "bump.png"}
     # The order the slots are written in must not decide it either.
-    assert _vray(maps={10: "bump.png", 7: "colour.png"}).extra["textures"] == ["colour.png"]
+    assert _bound(_vray(maps={10: "bump.png", 7: "colour.png"})) == {
+        "DiffuseColor": "colour.png", "Bump": "bump.png"}
 
 
-def test_a_vray_material_with_only_a_bump_wears_no_picture():
-    """An empty diffuse slot is an answer, not a reason to keep looking."""
-    assert _vray(maps={10: "bump.png"}).extra["textures"] == []
+def test_a_vray_material_with_only_a_bump_is_bumped_and_not_painted():
+    """An empty diffuse slot is an answer, not a reason to keep looking — and
+    the map that is there is still worth having, in the slot it belongs to."""
+    assert _bound(_vray(maps={10: "bump.png"})) == {"Bump": "bump.png"}
 
 
 def test_a_shader_whose_slots_are_not_known_keeps_the_older_rule():
     """The first picture below the material, which is all that can be said of
     a plugin nobody has read the reference order of."""
     doc = parse_max(fb.build_max(shader="Blinn"), load_arrays=True)
-    assert doc.extra["textures"] == ["paint.jpg"]
-    assert parse_max(fb.build_max(), load_arrays=True).extra["textures"] == ["paint.jpg"]
+    assert _bound(doc) == {"DiffuseColor": "paint.jpg"}
+    assert _bound(parse_max(fb.build_max(), load_arrays=True)) == {
+        "DiffuseColor": "paint.jpg"}
 
 
 # ------------------------------------------------- what an older 3ds Max writes

@@ -796,9 +796,8 @@ const FbxMax = (function () {
   }
 
   /**
-   * Which of a material's references holds the map its *surface colour* comes
-   * from, for the plugin materials whose reference order has been read off the
-   * files.
+   * Which of a material's references holds which map, for the plugin materials
+   * whose reference order has been read off the files.
    *
    * Without this the rule is the older one — the first picture anywhere below
    * the material — and for a V-Ray material that is usually the wrong one. A
@@ -808,9 +807,10 @@ const FbxMax = (function () {
    * reflection (a Falloff, which is what a V-Ray glass reflects by) and 10 the
    * bump — where that car keeps `suade_bump.png`, a Noise, and its tyre's
    * tread. Taken as the colour, a bump map paints a black tyre pale grey and a
-   * leather seat with its own relief.
+   * leather seat with its own relief; taken as the bump it is what makes the
+   * seat leather.
    */
-  const DIFFUSE_MAP = { vraymtl: 7 };
+  const MAP_SLOTS = { vraymtl: { diffuse: 7, bump: 10 } };
 
   /**
    * A material, and whatever its references say it is made of. The walk stops
@@ -831,11 +831,13 @@ const FbxMax = (function () {
     let plain = null;                 // the first colour anywhere, as a fallback
     let texture = null;
     const subs = [];
-    const slot = DIFFUSE_MAP[String(entity.cls.name || '').trim().toLowerCase()];
-    if (slot !== undefined) {
-      // The slot decides it, including when the slot is empty: a material with
-      // a bump and no diffuse map wears no picture at all.
-      texture = assetUnder(view, bytes, entities, entity.typed[slot], assets);
+    let bump = null;
+    const slots = MAP_SLOTS[String(entity.cls.name || '').trim().toLowerCase()];
+    if (slots) {
+      // The slots decide it, including when one is empty: a material with a
+      // bump and no diffuse map wears no picture and is bumped all the same.
+      texture = assetUnder(view, bytes, entities, entity.typed[slots.diffuse], assets);
+      bump = assetUnder(view, bytes, entities, entity.typed[slots.bump], assets);
     }
     const queue = entity.refs.map((at) => [at, entity.cls.name]);
     const walked = new Set();
@@ -858,7 +860,7 @@ const FbxMax = (function () {
         const first = params.find((p) => p.colour !== undefined);
         if (first) plain = first.colour;
       }
-      if (!texture && slot === undefined) texture = assetOf(view, bytes, part, assets);
+      if (!texture && !slots) texture = assetOf(view, bytes, part, assets);
       for (const ref of part.refs) queue.push([ref, holder]);
     }
     // A plugin's material lays its block out as it pleases, so all that can be
@@ -866,7 +868,7 @@ const FbxMax = (function () {
     if (!look) {
       look = { colour: plain, specular: null, glossiness: null, level: null, opacity: null };
     }
-    return { name: materialName(view, bytes, entity), look, texture, subs };
+    return { name: materialName(view, bytes, entity), look, texture, bump, subs };
   }
 
   /* ---------------------------------------------------------------- scene */
@@ -1180,27 +1182,32 @@ const FbxMax = (function () {
           node('Properties70', [], props),
         ]));
 
-      if (material.texture) {
-        if (!textureUids.has(material.texture)) {
+      // Each picture the material names, under the property it drives. The
+      // same file in two slots — which happens, a bump doubling as a
+      // displacement — is one Texture record bound twice.
+      for (const [filename, drives] of [[material.texture, 'DiffuseColor'],
+        [material.bump, 'Bump']]) {
+        if (!filename) continue;
+        if (!textureUids.has(filename)) {
           uid += 2;
-          textureUids.set(material.texture, uid - 1);
+          textureUids.set(filename, uid - 1);
           objects.push(node('Texture',
-            [L(uid - 1), S(`${material.texture}${CLASS_SEP}Texture`), S('')], [
+            [L(uid - 1), S(`${filename}${CLASS_SEP}Texture`), S('')], [
               node('Type', [S('TextureVideoClip')]),
               node('Version', [I(202)]),
-              node('FileName', [S(material.texture)]),
-              node('RelativeFilename', [S(material.texture)]),
+              node('FileName', [S(filename)]),
+              node('RelativeFilename', [S(filename)]),
             ]));
           objects.push(node('Video',
-            [L(uid), S(`${material.texture}${CLASS_SEP}Video`), S('Clip')], [
+            [L(uid), S(`${filename}${CLASS_SEP}Video`), S('Clip')], [
               node('Type', [S('Clip')]),
-              node('FileName', [S(material.texture)]),
-              node('RelativeFilename', [S(material.texture)]),
+              node('FileName', [S(filename)]),
+              node('RelativeFilename', [S(filename)]),
             ]));
           connections.push(node('C', [S('OO'), L(uid), L(uid - 1)]));
         }
-        connections.push(node('C', [S('OP'), L(textureUids.get(material.texture)),
-          L(materialUids.get(index)), S('DiffuseColor')]));
+        connections.push(node('C', [S('OP'), L(textureUids.get(filename)),
+          L(materialUids.get(index)), S(drives)]));
       }
     }
     // Every part is numbered before any is written, so a child can name the

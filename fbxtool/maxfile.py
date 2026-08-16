@@ -697,14 +697,21 @@ def _read_mesh(data: bytes, start: int, end: int) -> _Mesh | None:
 
 
 class _Material:
-    """One material as the viewer needs it: a name, a surface and a picture."""
+    """One material as the viewer needs it: a name, a surface and its pictures.
 
-    __slots__ = ("name", "look", "texture", "subs")
+    Two pictures, where the file has them: the one the surface is coloured by
+    and the one it is bumped by.  They are different slots and a reader that
+    kept only the first of them either painted a car with its own relief or
+    threw its relief away.
+    """
 
-    def __init__(self, name: str, look, texture, subs):
+    __slots__ = ("name", "look", "texture", "bump", "subs")
+
+    def __init__(self, name: str, look, texture, subs, bump=None):
         self.name = name
         self.look = look
         self.texture = texture
+        self.bump = bump
         self.subs = subs
 
 
@@ -906,9 +913,8 @@ def _asset_under(scene: bytes, entities: list, index, assets: dict,
     return None
 
 
-#: Which of a material's references holds the map its *surface colour* comes
-#: from, for the plugin materials whose reference order has been read off the
-#: files.
+#: Which of a material's references holds which map, for the plugin materials
+#: whose reference order has been read off the files.
 #:
 #: Without this the rule is the older one — the first picture anywhere below
 #: the material — and for a V-Ray material that is usually the wrong one.  A
@@ -916,10 +922,10 @@ def _asset_under(scene: bytes, entities: list, index, assets: dict,
 #: of them carry is not the diffuse: across one car's seventeen, reference 7
 #: holds the diffuse (a suede's colour, a blinker's lens), 8 the reflection (a
 #: Falloff, which is what a V-Ray glass reflects by) and 10 the bump — where
-#: that car keeps `suade_bump.png`, a Noise, and its tyre's tread.  Taken as
+#: that car keeps ``suade_bump.png``, a Noise, and its tyre's tread.  Taken as
 #: the colour, a bump map paints a black tyre pale grey and a leather seat
-#: with its own relief.
-_DIFFUSE_MAP = {"vraymtl": 7}
+#: with its own relief; taken as the bump it is what makes the seat leather.
+_MAP_SLOTS = {"vraymtl": {"diffuse": 7, "bump": 10}}
 
 
 def _read_material(scene: bytes, entities: list, index: int, assets: dict):
@@ -945,11 +951,13 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     texture = None
     subs: list[int] = []
 
-    slot = _DIFFUSE_MAP.get((entity.cls.get("name") or "").strip().lower())
-    if slot is not None:
-        # The slot decides it, including when the slot is empty: a material
-        # with a bump and no diffuse map wears no picture at all.
-        texture = _asset_under(scene, entities, entity.typed.get(slot), assets)
+    bump = None
+    slots = _MAP_SLOTS.get((entity.cls.get("name") or "").strip().lower())
+    if slots is not None:
+        # The slots decide it, including when one is empty: a material with a
+        # bump and no diffuse map wears no picture and is bumped all the same.
+        texture = _asset_under(scene, entities, entity.typed.get(slots["diffuse"]), assets)
+        bump = _asset_under(scene, entities, entity.typed.get(slots["bump"]), assets)
 
     queue = [(at, entity.cls.get("name") or "") for at in entity.refs]
     walked = set()
@@ -975,14 +983,14 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
             look = _appearance_of(params, layout)
         if plain is None:
             plain = next((v for _, kind, v in params if kind == "colour"), None)
-        if texture is None and slot is None:
+        if texture is None and slots is None:
             texture = _asset_of(scene, part, assets)
         queue.extend((ref, holder) for ref in part.refs)
     # A plugin's material lays its block out as it pleases, so all that can be
     # said of one is that the first colour in it is the diffuse.
     if look is None:
         look = {"colour": plain, "specular": None, "glossiness": None, "level": None}
-    return _Material(_material_name(scene, entity), look, texture, subs)
+    return _Material(_material_name(scene, entity), look, texture, subs, bump)
 
 
 class _Entity:
@@ -1360,26 +1368,32 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                    _node("ShadingModel", [_s("phong")]),
                    _node("Properties70", [], props)]))
 
-        if material.texture:
-            if material.texture not in texture_uids:
+        # Each picture the material names, under the property it drives.  The
+        # same file in two slots — which happens, a bump doubling as a
+        # displacement — is one Texture record bound twice.
+        for filename, drives in ((material.texture, "DiffuseColor"),
+                                 (material.bump, "Bump")):
+            if not filename:
+                continue
+            if filename not in texture_uids:
                 uid += 2
-                texture_uids[material.texture] = uid - 1
+                texture_uids[filename] = uid - 1
                 objects_node.children.append(
                     _node("Texture",
-                          [_l(uid - 1), _s(f"{material.texture}\x00\x01Texture"), _s("")],
+                          [_l(uid - 1), _s(f"{filename}\x00\x01Texture"), _s("")],
                           [_node("Type", [_s("TextureVideoClip")]),
                            _node("Version", [_i(202)]),
-                           _node("FileName", [_s(material.texture)]),
-                           _node("RelativeFilename", [_s(material.texture)])]))
+                           _node("FileName", [_s(filename)]),
+                           _node("RelativeFilename", [_s(filename)])]))
                 objects_node.children.append(
                     _node("Video",
-                          [_l(uid), _s(f"{material.texture}\x00\x01Video"), _s("Clip")],
+                          [_l(uid), _s(f"{filename}\x00\x01Video"), _s("Clip")],
                           [_node("Type", [_s("Clip")]),
-                           _node("FileName", [_s(material.texture)]),
-                           _node("RelativeFilename", [_s(material.texture)])]))
+                           _node("FileName", [_s(filename)]),
+                           _node("RelativeFilename", [_s(filename)])]))
                 connections.append(_node("C", [_s("OO"), _l(uid), _l(uid - 1)]))
-            connections.append(_node("C", [_s("OP"), _l(texture_uids[material.texture]),
-                                           _l(material_uids[index]), _s("DiffuseColor")]))
+            connections.append(_node("C", [_s("OP"), _l(texture_uids[filename]),
+                                           _l(material_uids[index]), _s(drives)]))
 
     # Every part is numbered before any is written, so a child can name the
     # parent that places it whichever of the two the scene lists first.

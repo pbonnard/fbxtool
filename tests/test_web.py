@@ -645,6 +645,44 @@ def test_a_dropped_folder_brings_its_textures(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_a_material_is_shaded_by_the_map_it_is_bumped_by(built, tmp_path):
+    """A .max names the map its surface is shaped by, and drawing it flat
+    throws away most of what the artist put there.
+
+    Two kinds arrive through the one slot — a height and a direction — and
+    they have to be told apart: read the wrong way round, a height map tips
+    every normal towards the same corner.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    height = tmp_path / "height.max"
+    height.write_bytes(fb.build_max(shader="VRayMtl", material_class="VRayMtl",
+                                    maps={10: "height.png"}))
+    (tmp_path / "height.png").write_bytes(fb.height_png())
+    facing = tmp_path / "facing.max"
+    facing.write_bytes(fb.build_max(shader="VRayMtl", material_class="VRayMtl",
+                                    maps={10: "facing.png"}))
+    (tmp_path / "facing.png").write_bytes(fb.normal_map_png())
+
+    result = _run(
+        ["node", str(WEB / "test" / "bump.js"),
+         str(height), str(tmp_path / "height.png"),
+         str(facing), str(tmp_path / "facing.png")],
+        env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_the_model_can_be_mirrored_on_each_axis(built):
     """A mirror is not a view setting: it goes out with the export.
 

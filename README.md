@@ -359,8 +359,33 @@ material has more than one: a VRayMtl keeps its diffuse at reference 7, its
 reflection at 8 and its bump at 10, and across one car's seventeen the first
 map most of them carry is the bump. Taken as the colour it paints a black tyre
 pale grey with its own tread and a leather seat with its own relief, so the
-slot is read rather than the order. A class whose reference order has not been
-read off the files keeps the older rule.
+slot is read rather than the order — and both maps come out, each bound to the
+property it drives. A class whose reference order has not been read off the
+files keeps the older rule.
+
+### Bump and normal maps
+
+A car is modelled smooth and detailed by its maps, so a viewer that draws only
+the colour draws a tyre with no tread and a seat with no grain. The slot holds
+two different things and the file never says which: a **normal map** states the
+direction outright, three channels of a unit vector, and a **bump map** states
+a height whose slope is the direction. Told apart the wrong way round, a height
+read as a direction tips every normal towards the same corner. They are told
+apart by looking: a tangent-space normal map is overwhelmingly blue with red
+and green around the middle, which is the one thing a grey image cannot fake
+however bright or dark it is.
+
+Neither needs tangents on the mesh, which is as well because a `.max` has none.
+The frame a map is written in — U to the right, V up, the normal out — is
+recovered per pixel from how the position and the texture coordinate change
+across neighbouring pixels, which is enough to solve for it. A height becomes a
+slope by central differences, one texel either side.
+
+An export cannot be so relaxed: glTF's `normalTexture` is a direction, and a
+height written straight into it says every surface faces the way its own
+brightness points. A height map is converted on the way out, by the same
+differences and the same strength the viewer shades it with, so what the file
+says is what the screen showed.
 
 A **Multi/Sub-Object** becomes one material
 per slot, and a face's material id picks between them. The Materials tab is
