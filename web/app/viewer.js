@@ -433,6 +433,10 @@ ${SHADOW_LOOKUP}
     float roughness = 0.55;
     float opacity = 1.0;
     int group = -1;
+    // A clear coat: a sharp mirror laid over whatever the surface otherwise
+    // is. Zero for everything that has none, which is most things.
+    float coatF0 = 0.0;
+    float coatRoughness = 0.05;
     // The third row holds opacity and which material group this slot belongs
     // to; the group is wanted in every shading mode, for the highlight.
     vec4 extra = vec4(0.0, -1.0, 0.0, 0.0);
@@ -440,6 +444,9 @@ ${SHADOW_LOOKUP}
       extra = texelFetch(uPalette, ivec2(slot, 2), 0);
       opacity = clamp(extra.r, 0.0, 1.0);
       group = int(extra.g + 0.5);
+      vec4 over = texelFetch(uPalette, ivec2(slot, 4), 0);
+      coatF0 = clamp(over.r, 0.0, 1.0);
+      coatRoughness = clamp(over.g, 0.05, 1.0);
     }
     if (uMode == 0 && uPaletteSize > 0) {
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
@@ -518,24 +525,45 @@ ${SHADOW_LOOKUP}
     float nol = max(dot(n, l), 0.0);
     float noh = max(dot(n, h), 0.0);
     float voh = max(dot(v, h), 0.0);
+    /* What the coat reflects, and so what it keeps from reaching the paint
+     * under it. A clear coat is a second, sharper surface: light bounces off
+     * it first, and only what it lets through — one minus its Fresnel — meets
+     * the base at all. Left out, a car's paint is whatever its base coat
+     * alone is, which for a V-Ray body is dark satin and reads as plastic. */
+    float coatA = max(coatRoughness * coatRoughness, 1e-3);
+    float coatFacing = coatF0 > 0.0 ? fresnelSchlick(vec3(coatF0), nov).r : 0.0;
+    float under = 1.0 - coatFacing;
+
     vec3 direct = vec3(0.0);
     if (nol > 0.0) {
       vec3 specular = fresnelSchlick(f0, voh)
         * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a));
+      vec3 beneath = (diffuseColour / PI + specular) * under;
+      if (coatF0 > 0.0) {
+        float coatSpec = fresnelSchlick(vec3(coatF0), voh).r
+          * (distributionGgx(noh, coatA) * visibilitySmith(nov, nol, coatA));
+        beneath += vec3(coatSpec);
+      }
       // Whatever the model puts between this point and the sun.
       float shadow = sunlight(vWorld, 1.0 - nol);
-      direct = (diffuseColour / PI + specular) * SUN_COLOUR * nol * shadow;
+      direct = beneath * SUN_COLOUR * nol * shadow;
     }
 
     // The environment, which is what makes a curved surface read as a surface.
     vec3 reflectance = environmentBrdf(f0, roughness, nov);
-    vec3 ambient = diffuseColour * environmentIrradiance(n)
-      + environmentSpecular(r, roughness) * reflectance;
+    vec3 ambient = (diffuseColour * environmentIrradiance(n)
+      + environmentSpecular(r, roughness) * reflectance) * under;
+    vec3 coatReflectance = vec3(0.0);
+    if (coatF0 > 0.0) {
+      coatReflectance = environmentBrdf(vec3(coatF0), coatRoughness, nov);
+      ambient += environmentSpecular(r, coatRoughness) * coatReflectance;
+    }
 
     // What a sheet of glass hides is what it lets through plus what it
     // reflects, and at a grazing angle it reflects nearly everything — which
     // is why a windscreen goes opaque as it turns away from you.
-    float mirrored = clamp(dot(reflectance, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    float mirrored = clamp(dot(reflectance * under + coatReflectance,
+                               vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     float coverage = clamp(opacity + (1.0 - opacity) * mirrored, 0.0, 1.0);
 
     // A marked material glows a little, so it reads even where it is in shadow.
@@ -976,11 +1004,12 @@ ${SHADOW_LOOKUP}
      * they connect to the model, which is what the per-polygon material index
      * refers to.
      *
-     * Four rows: the diffuse colour with the texture layer in alpha, the
+     * Five rows: the diffuse colour with the texture layer in alpha, the
      * specular colour with roughness in alpha, then opacity, the material
      * group, the metallic-roughness map's layer and the metalness that map
-     * scales, and last the relief — which map shapes the surface, how strongly
-     * and which kind it is. Floats, because the values are linear and eight
+     * scales, then the relief — which map shapes the surface, how strongly and
+     * which kind it is — and last the clear coat, which is how much a mirror
+     * laid over the whole reflects and how polished that mirror is. Floats, because the values are linear and eight
      * bits of a linear ramp bands badly in the darks — the Mercedes' interior
      * sits at 0.05.
      */
@@ -991,7 +1020,7 @@ ${SHADOW_LOOKUP}
       this.transparentMaterials = 0;
       if (!materials.length) { this.dirty = true; return; }
       const width = materials.length;
-      const data = new Float32Array(width * 4 * 4);
+      const data = new Float32Array(width * 5 * 4);
       materials.forEach((material, i) => {
         const rgb = material.colour || [0.72, 0.73, 0.76];
         const specular = material.specular || [0.04, 0.04, 0.04];
@@ -1022,13 +1051,19 @@ ${SHADOW_LOOKUP}
         data[(width * 3 + i) * 4 + 1] = typeof material.bumpStrength === 'number'
           ? Math.max(0, material.bumpStrength) : 1;
         data[(width * 3 + i) * 4 + 2] = material.bumpIsNormalMap ? 1 : 0;
+        // The clear coat: how much of it comes back facing you, and how
+        // polished it is. Nothing at zero, which is every surface without one.
+        data[(width * 4 + i) * 4] = typeof material.coat === 'number'
+          ? Math.min(1, Math.max(0, material.coat)) : 0;
+        data[(width * 4 + i) * 4 + 1] = typeof material.coatRoughness === 'number'
+          ? Math.min(1, Math.max(0.05, material.coatRoughness)) : 0.05;
         if (opacity < OPAQUE) {
           this.hasTransparency = true;
           this.transparentMaterials++;
         }
       });
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 4, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 5, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;

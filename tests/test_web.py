@@ -250,6 +250,31 @@ def test_the_index_is_found_however_it_is_spelt(spelling):
 
 
 @needs_node
+def test_a_clear_coat_is_read_as_its_own_surface():
+    """How much it reflects and how polished it is, and nothing else.
+
+    A coat is clear, so it needs no colour of its own — but it does need its
+    index, and an Audi's coat states 999, which is a mirror.  Without it the
+    coat would be a reflection of 1.0 taken at face value, which is the same
+    mirror by accident rather than by reading.
+    """
+    look = _appearance({"SpecularColor": [0.047, 0.047, 0.047], "ReflectionIor": 8.0,
+                        "CoatColor": [0.5, 0.5, 0.5], "CoatIor": 999.0,
+                        "CoatShininess": 1024.0})
+    assert look["coat"] == pytest.approx(0.498, abs=1e-3)
+    assert look["coatRoughness"] == pytest.approx(0.05, abs=1e-3)
+    # The base underneath is untouched by it.
+    assert look["specular"][0] == pytest.approx(0.047 * 0.6049, abs=1e-4)
+
+
+@needs_node
+def test_a_surface_with_no_coat_states_none():
+    """Which is most of them, and the shader skips the whole of it."""
+    look = _appearance({"SpecularColor": [1, 1, 1], "ReflectionIor": 1.52})
+    assert look["coat"] == 0
+
+
+@needs_node
 def test_a_specular_with_no_index_beside_it_is_still_capped():
     """It has to be.
 
@@ -399,8 +424,11 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
     # A diffuse slot filled by a colour rather than a picture.
     {"shader": "CoronaMtl", "material_class": "CoronaMtl", "maps_on": "block",
      "colour_map": (0.02, 0.04, 0.06)},
+    # A clear coat over a base, at half the strength the blend allows.
+    {"slots": 2, "materials": [0, 1, 0, 1, 0, 1], "blend_slots": {0},
+     "shader": "VRayMtl", "material_class": "VRayMtl", "coat_amount": 0.5},
 ], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot",
-        "glossiness", "symmetry", "dummy", "colour-map"])
+        "glossiness", "symmetry", "dummy", "colour-map", "clear-coat"])
 def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
     """The same cross-check over the shapes a real car scene turns out to use.
 

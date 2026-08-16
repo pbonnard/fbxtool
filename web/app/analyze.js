@@ -494,6 +494,22 @@ const FbxAnalyze = (function () {
     }
 
 
+    /* The clear coat over it, where the file states one.
+     *
+     * A car's paint is two surfaces and not one: a dark, half-rough base with
+     * a sharp mirror laid over it. Reading only the base is what makes paint
+     * come out as flat plastic. A coat is clear, so all that is needed of it
+     * is how much it reflects and how polished it is; the tint is dropped by
+     * taking the strongest channel, which for a coat is all of them.
+     */
+    const coatColour = vector(source.CoatColor, [0, 0, 0]);
+    const coatIor = Number(Array.isArray(source.CoatIor) ? source.CoatIor[0] : source.CoatIor);
+    const coatFacing = Number.isFinite(coatIor) && coatIor > 1
+      ? ((coatIor - 1) / (coatIor + 1)) ** 2 : 1;
+    const coat = clamp(Math.max(...coatColour) * coatFacing, 0, 1);
+    const coatShininess = number(source.CoatShininess, 1024);
+    const coatRoughness = clamp(Math.sqrt(2 / (Math.max(coatShininess, 0) + 2)), 0.05, 1);
+
     // What the surface gives off on its own. Nothing here edits it, but a
     // material carrying an emissive map and no colour beside it is a map that
     // can never light anything, so the two travel together.
@@ -506,6 +522,8 @@ const FbxAnalyze = (function () {
       specular: specularRgb.map((v) => clamp(v, 0, 1)),
       emissive: emissive.map((v) => clamp(v, 0, 1)),
       roughness,
+      coat,
+      coatRoughness,
       opacity: clamp(opacity, 0, 1),
       metallic: metalness !== null ? clamp(metalness, 0, 1)
         : clamp(number(source.Metallic, 0), 0, 1),

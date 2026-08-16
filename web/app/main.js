@@ -2584,6 +2584,10 @@
       colour: look.colour,
       specular: look.specular,
       roughness: look.roughness,
+      // The clear coat over it: a sharp mirror laid on a base that need not be
+      // sharp at all, which is what makes car paint read as car paint.
+      coat: look.coat,
+      coatRoughness: look.coatRoughness,
       opacity: look.opacity,
       // Whatever the file says it is: a .blend and a glTF state a metalness
       // outright, and so does an FBX written from a Physical Material or a

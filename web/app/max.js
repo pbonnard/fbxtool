@@ -890,6 +890,24 @@ const FbxMax = (function () {
    */
   const LIST_MATERIALS = new Set(['multi/sub-object', 'multimaterial']);
 
+  /* Where a blend keeps how much of the coat over its base actually shows.
+   *
+   * A VRayBlendMtl holds it as a colour on its own block, at parameter 2, and
+   * an Audi's paint sets it to a half — so its coat, which states the
+   * reflection of a mirror, shows at half of that. Taken whole, every panel
+   * and every one of the scene's material balls comes out chrome. */
+  const COAT_AMOUNT = { vrayblendmtl: 2 };
+
+  /**
+   * How much of a reflection comes back facing you, from its index.
+   *
+   * The Fresnel value at normal incidence, which is the number that tells a
+   * mirror from a windscreen. Kept here as well as in the reading of a
+   * material because choosing *which* layer is the coat needs it, and the
+   * strongest layer is not the one with the brightest colour.
+   */
+  const facingOf = (ior) => (!ior || ior <= 1 ? 1 : ((ior - 1) / (ior + 1)) ** 2);
+
   /* The shaders 3ds Max itself ships. Their specular is a highlight to be
    * capped; a renderer's own is a reflectance to be taken at face value, and
    * saying which is what the shading model on the material is for. */
@@ -940,7 +958,19 @@ const FbxMax = (function () {
     let texture = null;
     const subs = [];
     let bump = null;
+    let amount = 1;                 // how much of a coat a blend lets show
     let painted = null;             // a colour the diffuse slot holds outright
+    const atAmount = COAT_AMOUNT[String(entity.cls.name || '').trim().toLowerCase()];
+    if (atAmount !== undefined) {
+      for (const ref of entity.refs) {
+        if (ref >= entities.length) continue;
+        for (const p of paramsOf(view, entities[ref])) {
+          if (p.id === atAmount && p.colour) {
+            amount = Math.min(1, Math.max(0, Math.max(...p.colour)));
+          }
+        }
+      }
+    }
     const slots = MAP_SLOTS[String(entity.cls.name || '').trim().toLowerCase()];
     if (slots) {
       // The slots decide it, including when one is empty: a material with a
@@ -1003,6 +1033,12 @@ const FbxMax = (function () {
       // surface in its own right.
       subs,
       isList: LIST_MATERIALS.has(kind),
+      // The clear coat laid over this surface, where it has one: the
+      // reflection colour, the index that shapes it and how polished it is. A
+      // blend of a paint under a coat is two surfaces and not one.
+      coat: null,
+      // How much of that coat shows, where the blend says.
+      coatAmount: amount,
       // Which shading model the surface was read by. One of 3ds Max's own
       // shaders is a Phong and its specular is a highlight; a renderer's own
       // material has no model anybody here knows, and its specular is a
@@ -1442,6 +1478,25 @@ const FbxMax = (function () {
       material.look = base.look;
       material.texture = base.texture;
       material.bump = base.bump;
+      // And a clear coat is what the layers over that base are: the most
+      // reflective of them, since a coat is a coat and the rest are dirt. A
+      // layer that reflects nothing leaves no coat at all, which is what the
+      // dirt blended over a tyre comes to.
+      let best = 0;
+      for (const over of material.subs.slice(1)) {
+        const laid = resolveBlend(over, new Set([...chain, index]));
+        if (!laid || !laid.look.specular) continue;
+        const strength = Math.max(...laid.look.specular) * facingOf(laid.look.ior)
+          * material.coatAmount;
+        if (strength > best) {
+          best = strength;
+          material.coat = {
+            colour: laid.look.specular.map((c) => c * material.coatAmount),
+            ior: laid.look.ior,
+            glossiness: laid.look.glossiness,
+          };
+        }
+      }
       return material;
     };
     for (const index of [...materials.keys()]) resolveBlend(index);
@@ -1487,6 +1542,17 @@ const FbxMax = (function () {
       // it, and their own export carries it too.
       if (look.ior !== null && look.ior !== undefined && look.ior > 1) {
         props.push(p70('ReflectionIor', 'Number', D(look.ior)));
+      }
+      // The clear coat over it, written the same way its own reflection is. A
+      // car's paint is a dark satin base under a mirror, and dropping the
+      // mirror is dropping what makes paint look like paint.
+      if (material.coat) {
+        props.push(p70('CoatColor', 'Color', ...material.coat.colour.map(D)));
+        if (material.coat.ior > 1) props.push(p70('CoatIor', 'Number', D(material.coat.ior)));
+        if (material.coat.glossiness !== null && material.coat.glossiness !== undefined) {
+          props.push(p70('CoatShininess', 'Number',
+            D(2 ** (10 * Math.min(1, Math.max(0, material.coat.glossiness))))));
+        }
       }
       // Also as a property, which is where 3ds Max's own export puts it, and
       // so where the reading of a specular goes looking for it.

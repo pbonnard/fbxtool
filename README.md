@@ -1031,6 +1031,28 @@ states 1.0, and taken at face value the whole car turns to mirror and its dark
 blue reads as grey. The `.max` beside it keeps the index and reads the colour
 the file actually gives.
 
+### The clear coat
+
+A car's paint is two surfaces and not one. The base is dark and half rough —
+that Audi's is a reflection of 0.047 at an index of 8, and a glossiness of 0.3
+— and over it sits a **clear coat**: a separate material with a reflection of
+1.0 at an index of 999 and a glossiness of 1, which is to say a sharp mirror.
+Read only the base and the car draws as flat plastic; that is what makes paint
+look like paint.
+
+A blend states how much of that coat shows, and it matters. A VRayBlendMtl
+keeps it as a colour at parameter 2 of its own block, and the Audi's paint sets
+it to a **half** — taken whole, every panel and every material ball in the
+scene beside it comes out chrome. The coat is scaled by it, and a coat scaled
+to nothing is no coat at all, which is what the dirt blended over the Hummer's
+tyre comes to: only the most reflective layer over the base counts, and a layer
+that reflects nothing leaves the surface alone.
+
+The shader draws it as a second specular lobe with its own roughness, and takes
+what it reflects out of what reaches the base — one minus the coat's Fresnel —
+so the two do not both spend the same light. Glass under a coat hides what
+either of them mirrors.
+
 Colour is managed end to end: images upload as `SRGB8_ALPHA8` so the sampler
 returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before

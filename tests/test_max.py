@@ -593,6 +593,65 @@ def test_a_blend_looks_like_the_coat_it_is_built_on():
     assert colours["blend0"] != colours["coat0"]
 
 
+def _coat(**kw):
+    """A blend of a base under a coat, and whatever it says about that coat."""
+    doc = parse_max(fb.build_max(slots=2, materials=[0, 1, 0, 1, 0, 1],
+                                 blend_slots={0}, shader="VRayMtl",
+                                 material_class="VRayMtl", **kw), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    for m in objects.children:
+        if m.name != "Material":
+            continue
+        props = {q.props[0].value: [x.value for x in q.props[4:]]
+                 for q in m.get("Properties70").children}
+        if any(k.startswith("Coat") for k in props):
+            return {k: v for k, v in props.items() if k.startswith("Coat")}
+    return {}
+
+
+def test_a_blend_keeps_the_coat_laid_over_its_base():
+    """A car's paint is two surfaces and not one.
+
+    A dark, half-rough base with a sharp mirror over it — and reading only the
+    base is what makes paint come out as flat plastic.  The coat is written
+    out beside the base's own reflection, in the same three parts: what it
+    reflects, the index that shapes it, and how polished it is.
+    """
+    coat = _coat()
+    assert coat["CoatColor"] == pytest.approx([1.0, 1.0, 1.0], abs=1e-6)
+    assert coat["CoatIor"] == pytest.approx([999.0], abs=1e-6)
+    assert coat["CoatShininess"] == pytest.approx([fb.shininess(1.0)], abs=1e-4)
+
+
+def test_only_as_much_of_the_coat_as_the_blend_lets_show():
+    """A blend states how much, and an Audi's paint sets it to a half.
+
+    Taken whole, its coat states the reflection of a mirror and every panel of
+    the car — and every material ball in the scene beside it — comes out
+    chrome.
+    """
+    assert _coat(coat_amount=0.5)["CoatColor"] == pytest.approx([0.5, 0.5, 0.5], abs=1e-6)
+    # And none of it at all is no coat, not a coat of nothing.
+    assert _coat(coat_amount=0.0) == {}
+
+
+def test_a_layer_that_reflects_nothing_is_not_a_coat():
+    """Which is what the dirt blended over a tyre comes to.
+
+    A blend is not always a paint: the Hummer's tyre is rubber with dirt over
+    it, and the dirt reflects nothing.  Only the most reflective layer counts,
+    and where that is nothing there is no coat.
+    """
+    doc = parse_max(fb.build_max(shader="VRayMtl", material_class="VRayMtl"),
+                    load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    for m in objects.children:
+        if m.name != "Material":
+            continue
+        props = {q.props[0].value for q in m.get("Properties70").children}
+        assert not any(k.startswith("Coat") for k in props)
+
+
 def test_the_exponent_is_the_one_3ds_max_writes_for_a_glossiness():
     """Two to the ten times it, and not the percentage this used to write.
 

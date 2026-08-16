@@ -1767,6 +1767,7 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               colour_map: "tuple[float, float, float] | None" = None,
               diffuse_level: float = MAX_DIFFUSE_LEVEL,
               blend_slots: "set[int] | None" = None,
+              coat_amount: float = 1.0,
               material_class: "str | None" = None,
               param_chunk: int = 0x100E, assets_version: int = 3,
               glossiness: float = MAX_GLOSSINESS,
@@ -2016,7 +2017,10 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
             # every slot behind it moves up to fill the gap.
             if blend_slots and at in blend_slots:
                 extra += _max_chunk(0x0002,
-                                    _max_param_colour(1, (0.9, 0.1, 0.9), param_chunk),
+                                    _max_param_colour(1, (0.9, 0.1, 0.9), param_chunk)
+                                    + _max_param_colour(2, (1.0, 1.0, 1.0), param_chunk)
+                                    + _max_param_float(3, 1.0, param_chunk)
+                                    + _max_param_float(63, 999.0, param_chunk),
                                     container=True)
                 extra += _max_chunk(0x0003,
                                     _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, nxt))
@@ -2028,16 +2032,23 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                 # A Blend keeps its name under 0x4000 rather than the id
                 # 3ds Max's own materials use, which is why blends came out
                 # numbered while everything beside them was named.
+                # How much of the coat shows, which a VRayBlendMtl keeps as
+                # a colour at parameter 2 of the block it holds.
+                extra += _max_chunk(0x0002,
+                                    _max_param_colour(2, (coat_amount,) * 3,
+                                                      param_chunk),
+                                    container=True)
                 extra += _max_chunk(0x000D,
                                     _max_chunk(0x2034,
-                                               struct.pack("<2I", held[-1], nxt + 1))
+                                               struct.pack("<3I", held[-1], nxt + 1,
+                                                           nxt + 2))
                                     + _max_chunk(0x4000,
                                                  _max_chunk(0x4001,
                                                             _max_utf16(f"blend{at}")),
                                                  container=True),
                                     container=True)
-                held[-1] = nxt + 2
-                nxt += 3
+                held[-1] = nxt + 3
+                nxt += 4
         wears = nxt
         extra += _max_chunk(0x0009,
                             _max_chunk(0x2034,
@@ -2184,7 +2195,9 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                + _max_class("RootNode", 0x01, 0x02)
                + _max_class("Output", 0xC40, 0x0280)
                + _max_class("Bitmap", 0xC10, 0x0240)
-               + _max_class("Blend", 0xC00, 0x0210)
+               # A renderer's own blend, which is the one that states how
+               # much of its coat shows.
+               + _max_class("VRayBlendMtl", 0xC00, 0x0210)
                + _max_class("Symmetry", 0x810, 0x00B7)
                # A Dummy is a helper, not geometry: superclass 0x50, which is
                # what keeps it out of the tally of objects with no mesh.

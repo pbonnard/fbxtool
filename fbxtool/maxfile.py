@@ -708,7 +708,8 @@ class _Material:
     threw its relief away.
     """
 
-    __slots__ = ("name", "look", "texture", "bump", "subs", "is_list", "shading")
+    __slots__ = ("name", "look", "texture", "bump", "subs", "is_list", "shading",
+                 "coat", "coat_amount")
 
     def __init__(self, name: str, look, texture, subs, bump=None, is_list=False,
                  shading="unknown"):
@@ -728,6 +729,12 @@ class _Material:
         #: reflectance that was measured.  3ds Max says the same of its own
         #: export, writing ``unknown`` for every V-Ray and Corona material.
         self.shading = shading
+        #: The clear coat laid over this surface, where it has one: the
+        #: reflection colour, the index that shapes it and how polished it is.
+        #: A blend of a paint under a coat is two surfaces and not one.
+        self.coat = None
+        #: How much of that coat shows, where the blend says.
+        self.coat_amount = 1.0
 
 
 def _material_name(scene: bytes, entity) -> str:
@@ -1043,6 +1050,27 @@ _MAP_SLOTS["coronalegacymtl"] = _MAP_SLOTS["coronamtl"]
 #: logo across the sunroof.
 _LIST_MATERIALS = {"multi/sub-object", "multimaterial"}
 
+#: Where a blend keeps how much of the coat over its base actually shows.
+#:
+#: A VRayBlendMtl holds it as a colour on its own block, at parameter 2, and an
+#: Audi's paint sets it to a half — so its coat, which states the reflection of
+#: a mirror, shows at half of that.  Taken whole, every panel and every one of
+#: the scene's material balls comes out chrome.
+_COAT_AMOUNT = {"vrayblendmtl": 2}
+
+
+def _facing(ior) -> float:
+    """How much of a reflection comes back facing you, from its index.
+
+    The Fresnel value at normal incidence, which is the number that tells a
+    mirror from a windscreen.  Kept here as well as in the reading of a
+    material because choosing *which* layer is the coat needs it, and the
+    strongest layer is not the one with the brightest colour.
+    """
+    if not ior or ior <= 1.0:
+        return 1.0
+    return ((ior - 1.0) / (ior + 1.0)) ** 2
+
 
 def _resolve_blends(materials: dict) -> None:
     """Give a surface made of other materials the look of its base coat.
@@ -1073,6 +1101,22 @@ def _resolve_blends(materials: dict) -> None:
         material.look = base.look
         material.texture = base.texture
         material.bump = base.bump
+        # And a clear coat is what the layers over that base are: the most
+        # reflective of them, since a coat is a coat and the rest are dirt.
+        # A layer that reflects nothing leaves no coat at all, which is what
+        # the dirt blended over a tyre comes to.
+        best = 0.0
+        for over in material.subs[1:]:
+            laid = resolve(over, chain + (index,))
+            if laid is None or laid.look.get("specular") is None:
+                continue
+            strength = max(laid.look["specular"]) * _facing(laid.look.get("ior"))
+            strength *= material.coat_amount
+            if strength > best:
+                best = strength
+                shown = tuple(c * material.coat_amount for c in laid.look["specular"])
+                material.coat = (shown, laid.look.get("ior"),
+                                 laid.look.get("glossiness"))
         return material
 
     for index in list(materials):
@@ -1120,7 +1164,16 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     subs: list[int] = []
 
     bump = None
+    amount = 1.0                    # how much of a coat a blend lets show
     painted = None                  # a colour the diffuse slot holds outright
+    at_amount = _COAT_AMOUNT.get((entity.cls.get("name") or "").strip().lower())
+    if at_amount is not None:
+        for ref in entity.refs:
+            if ref >= len(entities):
+                continue
+            for param, kind, value in _params_of(scene, entities[ref]):
+                if param == at_amount and kind == "colour":
+                    amount = max(0.0, min(1.0, max(value)))
     slots = _MAP_SLOTS.get((entity.cls.get("name") or "").strip().lower())
     if slots is not None:
         # The slots decide it, including when one is empty: a material with a
@@ -1171,8 +1224,10 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     if painted is not None and look["colour"] is None:
         look = dict(look, colour=painted)
     kind = (entity.cls.get("name") or "").strip().lower()
-    return _Material(_material_name(scene, entity), look, texture, subs, bump,
+    made = _Material(_material_name(scene, entity), look, texture, subs, bump,
                      kind in _LIST_MATERIALS, shading)
+    made.coat_amount = amount
+    return made
 
 
 class _Entity:
@@ -1681,6 +1736,17 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         # state it, and their own export carries it too.
         if look.get("ior") is not None and look["ior"] > 1.0:
             props.append(_p70("ReflectionIor", "Number", _d(look["ior"])))
+        # The clear coat over it, written the same way its own reflection is.
+        # A car's paint is a dark satin base under a mirror, and dropping the
+        # mirror is dropping what makes paint look like paint.
+        if material.coat is not None:
+            coat_colour, coat_ior, coat_gloss = material.coat
+            props.append(_p70("CoatColor", "Color", *(_d(c) for c in coat_colour)))
+            if coat_ior is not None and coat_ior > 1.0:
+                props.append(_p70("CoatIor", "Number", _d(coat_ior)))
+            if coat_gloss is not None:
+                props.append(_p70("CoatShininess", "Number",
+                                  _d(2.0 ** (10.0 * min(1.0, max(0.0, coat_gloss))))))
         # Also as a property, which is where 3ds Max's own export puts it, and
         # so where the reading of a specular goes looking for it.
         props.append(_node("P", [_s("ShadingModel"), _s("KString"), _s(""), _s(""),
