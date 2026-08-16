@@ -307,7 +307,10 @@ def test_a_plugins_own_material_is_read_no_further_than_its_colour():
     """
     props = _material_props(parse_max(fb.build_max(shader="ArnoldStandardSurface"),
                                       load_arrays=True))
-    assert list(props) == ["DiffuseColor"]
+    # Nothing about the finish — and the shading model left as the unknown it
+    # is, which is what says its specular would have been a reflectance.
+    assert list(props) == ["DiffuseColor", "ShadingModel"]
+    assert props["ShadingModel"] == ["unknown"]
     assert props["DiffuseColor"] == pytest.approx(fb.MAX_AMBIENT, abs=1e-6)
 
 

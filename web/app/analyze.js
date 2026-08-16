@@ -300,6 +300,30 @@ const FbxAnalyze = (function () {
   }
 
   /**
+   * The index of refraction a material states beside its reflection.
+   *
+   * Spelt three ways for the same thing — V-Ray's `reflection_ior`, Corona's
+   * `fresnelIor`, and this project's own `ReflectionIor` — so it is matched
+   * the way a texture slot is, on the letters with the vendor and the
+   * separators taken out. The map slots that merely *drive* one are named
+   * `texmapFresnelIor` and the like, and do not match; nor does the
+   * refraction's own `ior`, which is a different number about a different
+   * thing.
+   */
+  function reflectionIor(source) {
+    for (const key of Object.keys(source)) {
+      const plain = plainName(key);
+      if (plain !== 'reflectionior' && plain !== 'fresnelior') continue;
+      const raw = source[key];
+      const v = Number(Array.isArray(raw) ? raw[0] : raw);
+      // Below one is not an index of refraction; a renderer writes 1 for "no
+      // Fresnel at all", which is a mirror and not a surface at zero per cent.
+      if (Number.isFinite(v) && v > 1) return v;
+    }
+    return null;
+  }
+
+  /**
    * A texture's wrap modes as glTF numbers them.
    *
    * FBX writes 0 for repeat and 1 for clamp; glTF writes the GL enums. Mirrored
@@ -403,13 +427,45 @@ const FbxAnalyze = (function () {
       // reflectance of a dielectric at normal incidence.
       specularRgb = scale(vector(specular, [0.04, 0.04, 0.04]),
         number(source.SpecularFactor, 1));
-      // A Phong specular colour scales a highlight; it is not a Fresnel
-      // reflectance, and taken literally it turns every surface into a mirror —
-      // OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at the
-      // brightest a dielectric reaches, unless the file states a metalness, in
-      // which case the value was computed rather than inferred.
+      /* A Phong specular colour scales a highlight; it is not a Fresnel
+       * reflectance, and taken literally it turns every surface into a mirror
+       * — OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at
+       * the brightest a dielectric reaches.
+       *
+       * Except where the file declines to name a shading model at all, which
+       * is what a renderer's own material exports as, and there the number is
+       * a reflectance that was measured rather than a highlight that was
+       * guessed. 3ds Max writes a V-Ray or Corona reflection straight into
+       * `SpecularColor` and marks the model `unknown`; its chrome states 1.0
+       * and means it, and capped to 0.16 it draws as white plastic. Ordinary
+       * exports say `Phong` — the Mercedes and the Shelby in `samples/` both
+       * do, and sixteen of the Mercedes' twenty-three materials are over the
+       * cap, which is exactly the habit it is there for.
+       *
+       * A stated metalness is the same case: computed, not inferred. */
+      /* Unless the file states the index of refraction that shapes it, which
+       * turns the number into one worth having: the reflection colour is only
+       * the tint, and how much comes back facing you is `((n-1)/(n+1))**2` of
+       * it.
+       *
+       * This is the whole of what tells a mirror from a windscreen, and both
+       * renderers state it per material. On one Audi: chrome and the clear
+       * coat over its paint say 999, which is an artist writing "metal" and
+       * comes to 0.996; its glass, its gloss black and its plastic all say
+       * 1.52, the index of glass, which comes to 0.043; the paint under the
+       * coat says 8. Its chrome capped to 0.16 draws as white plastic, and its
+       * windscreen taken at face value draws as a sheet of chrome.
+       *
+       * With no index beside it the cap stands, and it has to: a legacy 6.x
+       * export carries the reflection without it, and that same car's every
+       * material states 1.0 — taken at face value the whole of it turns to
+       * mirror and a dark blue Ferrari comes out grey. */
+      const ior = reflectionIor(source);
       const peak = Math.max(specularRgb[0], specularRgb[1], specularRgb[2]);
-      if (source.Metallic === undefined && peak > 0.16) {
+      if (ior !== null) {
+        const facing = ((ior - 1) / (ior + 1)) ** 2;
+        specularRgb = specularRgb.map((v) => v * facing);
+      } else if (source.Metallic === undefined && peak > 0.16) {
         specularRgb = specularRgb.map((v) => v * (0.16 / peak));
       }
       // A bare `Metallic` arrives already split — this project's own importers
@@ -436,6 +492,7 @@ const FbxAnalyze = (function () {
     } else {
       opacity = 1 - number(source.TransparencyFactor, 1 - number(source.Opacity, 1));
     }
+
 
     // What the surface gives off on its own. Nothing here edits it, but a
     // material carrying an emissive map and no colour beside it is a map that

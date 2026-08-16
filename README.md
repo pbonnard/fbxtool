@@ -1001,6 +1001,36 @@ dielectric reaches, unless the file states a metalness outright. A `.blend`
 does, and so do glTF and an FBX written from a Physical Material or a
 standardSurface, so those are read and converted rather than guessed at.
 
+### The index of refraction beside a reflection
+
+A renderer's own material states something better than either, and it is the
+whole of what tells a mirror from a windscreen. V-Ray and Corona both write a
+reflection *colour* and, beside it, the **index of refraction** the reflection
+is shaped by — and what comes back facing you is `((n-1)/(n+1))²` of that
+colour, not the colour itself.
+
+Across one Audi: its chrome and the clear coat over its paint say **999**,
+which is an artist writing *metal*, and comes to 0.996; its glass, its gloss
+black and its plastic all say **1.52**, the index of glass, and come to 0.043;
+the paint under the coat says **8**. Every one of them states a reflection
+colour of 1.0 or thereabouts, so the colour alone cannot tell them apart —
+capped, the chrome draws as white plastic; taken at face value, the windscreen
+draws as a sheet of chrome. Read with the index, chrome mirrors, glass is four
+per cent facing you and nearly all of it edge-on, and the shader's own Fresnel
+does the rest.
+
+It is matched the way a texture slot is, on the letters with the vendor and the
+separators taken out, so V-Ray's `reflection_ior`, Corona's `fresnelIor` and
+this reader's own `ReflectionIor` are one thing. The map slots that merely
+*drive* an index — `texmapFresnelIor` and the like — are not, and neither is
+the refraction's own `ior`.
+
+Where no index is stated the cap stands, and it has to. A legacy FBX 6.x export
+carries the reflection and loses the index; that Ferrari's every material
+states 1.0, and taken at face value the whole car turns to mirror and its dark
+blue reads as grey. The `.max` beside it keeps the index and reads the colour
+the file actually gives.
+
 Colour is managed end to end: images upload as `SRGB8_ALPHA8` so the sampler
 returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before

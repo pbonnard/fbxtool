@@ -3914,7 +3914,10 @@ const FbxMax = (function () {
      * off the same car twice: 3ds Max's own FBX export of this scene states a
      * glossiness for each of its seventy materials, and for every one of them
      * parameter 3 of the .max holds that number. */
-    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5, glossiness: 3 }],
+    /* Parameter 63 is the index of refraction the reflection is shaped by,
+     * which is what tells a mirror from a windscreen: 999 for chrome, 1.52
+     * for glass and plastic, 8 for the paint under a clear coat. */
+    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5, glossiness: 3, ior: 63 }],
     /* Corona keeps its surface in one block, every channel a colour with a
      * level beside it, and its glossiness at 180 where nothing else is near.
      *
@@ -3932,7 +3935,7 @@ const FbxMax = (function () {
       diffuse: 101, diffuseLevel: 121,
       specular: 102, specularLevel: 122,
       refraction: 103, refractionLevel: 123,
-      glossiness: 180,
+      glossiness: 180, ior: 183,
     }],
   ]);
   SHADERS.set('coronalegacymtl', SHADERS.get('coronamtl'));
@@ -3980,6 +3983,7 @@ const FbxMax = (function () {
       specular: scaled('specular'),
       glossiness: at('glossiness', 'value'),
       level: at('level', 'value'),
+      ior: at('ior', 'value'),
       opacity: refraction === null
         ? null : 1 - Math.min(1, Math.max(0, Math.max(...refraction))),
     };
@@ -4099,6 +4103,12 @@ const FbxMax = (function () {
    */
   const LIST_MATERIALS = new Set(['multi/sub-object', 'multimaterial']);
 
+  /* The shaders 3ds Max itself ships. Their specular is a highlight to be
+   * capped; a renderer's own is a reflectance to be taken at face value, and
+   * saying which is what the shading model on the material is for. */
+  const MAX_SHADERS = new Set(['blinn', 'phong', 'metal', 'oren-nayar-blinn',
+    'anisotropic', 'strauss']);
+
   const MAP_SLOTS = {
     vraymtl: { on: 'self', diffuse: 7, bump: 10 },
     coronamtl: { on: 'block', diffuse: 0, bump: 6 },
@@ -4139,6 +4149,7 @@ const FbxMax = (function () {
     const entity = entities[index];
     let look = null;
     let plain = null;                 // the first colour anywhere, as a fallback
+    let shading = 'unknown';
     let texture = null;
     const subs = [];
     let bump = null;
@@ -4169,7 +4180,12 @@ const FbxMax = (function () {
       // A shader's block wins wherever the walk finds it: a Standard material
       // keeps three more blocks of its own, and one of them holds a filter
       // colour that would otherwise pass for the colour of the surface.
-      if (layout && !look) look = appearanceOf(params, layout, painted);
+      if (layout && !look) {
+        look = appearanceOf(params, layout, painted);
+        if (look && MAX_SHADERS.has(String(holder).trim().toLowerCase())) {
+          shading = 'phong';
+        }
+      }
       if (!plain) {
         const first = params.find((p) => p.colour !== undefined);
         if (first) plain = first.colour;
@@ -4180,7 +4196,10 @@ const FbxMax = (function () {
     // A plugin's material lays its block out as it pleases, so all that can be
     // said of one is that the first colour in it is the diffuse.
     if (!look) {
-      look = { colour: plain, specular: null, glossiness: null, level: null, opacity: null };
+      look = {
+        colour: plain, specular: null, glossiness: null, level: null,
+        ior: null, opacity: null,
+      };
     }
     // Where no shader layout claimed the block, the slot's colour is still
     // better than the placeholder beside it.
@@ -4197,6 +4216,11 @@ const FbxMax = (function () {
       // surface in its own right.
       subs,
       isList: LIST_MATERIALS.has(kind),
+      // Which shading model the surface was read by. One of 3ds Max's own
+      // shaders is a Phong and its specular is a highlight; a renderer's own
+      // material has no model anybody here knows, and its specular is a
+      // reflectance that was measured.
+      shading,
     };
   }
 
@@ -4670,10 +4694,21 @@ const FbxMax = (function () {
       if (look.opacity !== null && look.opacity !== undefined && look.opacity < 1) {
         props.push(p70('Opacity', 'Number', D(look.opacity)));
       }
+      // The index of refraction the reflection is shaped by. What comes back
+      // facing you is ((n-1)/(n+1))**2 of the colour beside it, which is the
+      // difference between a mirror and a sheet of glass; both renderers state
+      // it, and their own export carries it too.
+      if (look.ior !== null && look.ior !== undefined && look.ior > 1) {
+        props.push(p70('ReflectionIor', 'Number', D(look.ior)));
+      }
+      // Also as a property, which is where 3ds Max's own export puts it, and
+      // so where the reading of a specular goes looking for it.
+      props.push(node('P', [S('ShadingModel'), S('KString'), S(''), S(''),
+        S(material.shading)]));
       objects.push(node('Material',
         [L(uid), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),
-          node('ShadingModel', [S('phong')]),
+          node('ShadingModel', [S(material.shading)]),
           node('Properties70', [], props),
         ]));
 
@@ -5584,6 +5619,30 @@ const FbxAnalyze = (function () {
   }
 
   /**
+   * The index of refraction a material states beside its reflection.
+   *
+   * Spelt three ways for the same thing — V-Ray's `reflection_ior`, Corona's
+   * `fresnelIor`, and this project's own `ReflectionIor` — so it is matched
+   * the way a texture slot is, on the letters with the vendor and the
+   * separators taken out. The map slots that merely *drive* one are named
+   * `texmapFresnelIor` and the like, and do not match; nor does the
+   * refraction's own `ior`, which is a different number about a different
+   * thing.
+   */
+  function reflectionIor(source) {
+    for (const key of Object.keys(source)) {
+      const plain = plainName(key);
+      if (plain !== 'reflectionior' && plain !== 'fresnelior') continue;
+      const raw = source[key];
+      const v = Number(Array.isArray(raw) ? raw[0] : raw);
+      // Below one is not an index of refraction; a renderer writes 1 for "no
+      // Fresnel at all", which is a mirror and not a surface at zero per cent.
+      if (Number.isFinite(v) && v > 1) return v;
+    }
+    return null;
+  }
+
+  /**
    * A texture's wrap modes as glTF numbers them.
    *
    * FBX writes 0 for repeat and 1 for clamp; glTF writes the GL enums. Mirrored
@@ -5687,13 +5746,45 @@ const FbxAnalyze = (function () {
       // reflectance of a dielectric at normal incidence.
       specularRgb = scale(vector(specular, [0.04, 0.04, 0.04]),
         number(source.SpecularFactor, 1));
-      // A Phong specular colour scales a highlight; it is not a Fresnel
-      // reflectance, and taken literally it turns every surface into a mirror —
-      // OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at the
-      // brightest a dielectric reaches, unless the file states a metalness, in
-      // which case the value was computed rather than inferred.
+      /* A Phong specular colour scales a highlight; it is not a Fresnel
+       * reflectance, and taken literally it turns every surface into a mirror
+       * — OBJ material libraries habitually write `Ks 0.9 0.9 0.9`. Cap it at
+       * the brightest a dielectric reaches.
+       *
+       * Except where the file declines to name a shading model at all, which
+       * is what a renderer's own material exports as, and there the number is
+       * a reflectance that was measured rather than a highlight that was
+       * guessed. 3ds Max writes a V-Ray or Corona reflection straight into
+       * `SpecularColor` and marks the model `unknown`; its chrome states 1.0
+       * and means it, and capped to 0.16 it draws as white plastic. Ordinary
+       * exports say `Phong` — the Mercedes and the Shelby in `samples/` both
+       * do, and sixteen of the Mercedes' twenty-three materials are over the
+       * cap, which is exactly the habit it is there for.
+       *
+       * A stated metalness is the same case: computed, not inferred. */
+      /* Unless the file states the index of refraction that shapes it, which
+       * turns the number into one worth having: the reflection colour is only
+       * the tint, and how much comes back facing you is `((n-1)/(n+1))**2` of
+       * it.
+       *
+       * This is the whole of what tells a mirror from a windscreen, and both
+       * renderers state it per material. On one Audi: chrome and the clear
+       * coat over its paint say 999, which is an artist writing "metal" and
+       * comes to 0.996; its glass, its gloss black and its plastic all say
+       * 1.52, the index of glass, which comes to 0.043; the paint under the
+       * coat says 8. Its chrome capped to 0.16 draws as white plastic, and its
+       * windscreen taken at face value draws as a sheet of chrome.
+       *
+       * With no index beside it the cap stands, and it has to: a legacy 6.x
+       * export carries the reflection without it, and that same car's every
+       * material states 1.0 — taken at face value the whole of it turns to
+       * mirror and a dark blue Ferrari comes out grey. */
+      const ior = reflectionIor(source);
       const peak = Math.max(specularRgb[0], specularRgb[1], specularRgb[2]);
-      if (source.Metallic === undefined && peak > 0.16) {
+      if (ior !== null) {
+        const facing = ((ior - 1) / (ior + 1)) ** 2;
+        specularRgb = specularRgb.map((v) => v * facing);
+      } else if (source.Metallic === undefined && peak > 0.16) {
         specularRgb = specularRgb.map((v) => v * (0.16 / peak));
       }
       // A bare `Metallic` arrives already split — this project's own importers
@@ -5720,6 +5811,7 @@ const FbxAnalyze = (function () {
     } else {
       opacity = 1 - number(source.TransparencyFactor, 1 - number(source.Opacity, 1));
     }
+
 
     // What the surface gives off on its own. Nothing here edits it, but a
     // material carrying an emissive map and no colour beside it is a map that

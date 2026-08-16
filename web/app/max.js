@@ -701,7 +701,10 @@ const FbxMax = (function () {
      * off the same car twice: 3ds Max's own FBX export of this scene states a
      * glossiness for each of its seventy materials, and for every one of them
      * parameter 3 of the .max holds that number. */
-    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5, glossiness: 3 }],
+    /* Parameter 63 is the index of refraction the reflection is shaped by,
+     * which is what tells a mirror from a windscreen: 999 for chrome, 1.52
+     * for glass and plastic, 8 for the paint under a clear coat. */
+    ['vraymtl', { diffuse: 1, specular: 2, refraction: 5, glossiness: 3, ior: 63 }],
     /* Corona keeps its surface in one block, every channel a colour with a
      * level beside it, and its glossiness at 180 where nothing else is near.
      *
@@ -719,7 +722,7 @@ const FbxMax = (function () {
       diffuse: 101, diffuseLevel: 121,
       specular: 102, specularLevel: 122,
       refraction: 103, refractionLevel: 123,
-      glossiness: 180,
+      glossiness: 180, ior: 183,
     }],
   ]);
   SHADERS.set('coronalegacymtl', SHADERS.get('coronamtl'));
@@ -767,6 +770,7 @@ const FbxMax = (function () {
       specular: scaled('specular'),
       glossiness: at('glossiness', 'value'),
       level: at('level', 'value'),
+      ior: at('ior', 'value'),
       opacity: refraction === null
         ? null : 1 - Math.min(1, Math.max(0, Math.max(...refraction))),
     };
@@ -886,6 +890,12 @@ const FbxMax = (function () {
    */
   const LIST_MATERIALS = new Set(['multi/sub-object', 'multimaterial']);
 
+  /* The shaders 3ds Max itself ships. Their specular is a highlight to be
+   * capped; a renderer's own is a reflectance to be taken at face value, and
+   * saying which is what the shading model on the material is for. */
+  const MAX_SHADERS = new Set(['blinn', 'phong', 'metal', 'oren-nayar-blinn',
+    'anisotropic', 'strauss']);
+
   const MAP_SLOTS = {
     vraymtl: { on: 'self', diffuse: 7, bump: 10 },
     coronamtl: { on: 'block', diffuse: 0, bump: 6 },
@@ -926,6 +936,7 @@ const FbxMax = (function () {
     const entity = entities[index];
     let look = null;
     let plain = null;                 // the first colour anywhere, as a fallback
+    let shading = 'unknown';
     let texture = null;
     const subs = [];
     let bump = null;
@@ -956,7 +967,12 @@ const FbxMax = (function () {
       // A shader's block wins wherever the walk finds it: a Standard material
       // keeps three more blocks of its own, and one of them holds a filter
       // colour that would otherwise pass for the colour of the surface.
-      if (layout && !look) look = appearanceOf(params, layout, painted);
+      if (layout && !look) {
+        look = appearanceOf(params, layout, painted);
+        if (look && MAX_SHADERS.has(String(holder).trim().toLowerCase())) {
+          shading = 'phong';
+        }
+      }
       if (!plain) {
         const first = params.find((p) => p.colour !== undefined);
         if (first) plain = first.colour;
@@ -967,7 +983,10 @@ const FbxMax = (function () {
     // A plugin's material lays its block out as it pleases, so all that can be
     // said of one is that the first colour in it is the diffuse.
     if (!look) {
-      look = { colour: plain, specular: null, glossiness: null, level: null, opacity: null };
+      look = {
+        colour: plain, specular: null, glossiness: null, level: null,
+        ior: null, opacity: null,
+      };
     }
     // Where no shader layout claimed the block, the slot's colour is still
     // better than the placeholder beside it.
@@ -984,6 +1003,11 @@ const FbxMax = (function () {
       // surface in its own right.
       subs,
       isList: LIST_MATERIALS.has(kind),
+      // Which shading model the surface was read by. One of 3ds Max's own
+      // shaders is a Phong and its specular is a highlight; a renderer's own
+      // material has no model anybody here knows, and its specular is a
+      // reflectance that was measured.
+      shading,
     };
   }
 
@@ -1457,10 +1481,21 @@ const FbxMax = (function () {
       if (look.opacity !== null && look.opacity !== undefined && look.opacity < 1) {
         props.push(p70('Opacity', 'Number', D(look.opacity)));
       }
+      // The index of refraction the reflection is shaped by. What comes back
+      // facing you is ((n-1)/(n+1))**2 of the colour beside it, which is the
+      // difference between a mirror and a sheet of glass; both renderers state
+      // it, and their own export carries it too.
+      if (look.ior !== null && look.ior !== undefined && look.ior > 1) {
+        props.push(p70('ReflectionIor', 'Number', D(look.ior)));
+      }
+      // Also as a property, which is where 3ds Max's own export puts it, and
+      // so where the reading of a specular goes looking for it.
+      props.push(node('P', [S('ShadingModel'), S('KString'), S(''), S(''),
+        S(material.shading)]));
       objects.push(node('Material',
         [L(uid), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),
-          node('ShadingModel', [S('phong')]),
+          node('ShadingModel', [S(material.shading)]),
           node('Properties70', [], props),
         ]));
 

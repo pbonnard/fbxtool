@@ -708,9 +708,10 @@ class _Material:
     threw its relief away.
     """
 
-    __slots__ = ("name", "look", "texture", "bump", "subs", "is_list")
+    __slots__ = ("name", "look", "texture", "bump", "subs", "is_list", "shading")
 
-    def __init__(self, name: str, look, texture, subs, bump=None, is_list=False):
+    def __init__(self, name: str, look, texture, subs, bump=None, is_list=False,
+                 shading="unknown"):
         self.name = name
         self.look = look
         self.texture = texture
@@ -721,6 +722,12 @@ class _Material:
         #: surface in its own right.
         self.subs = subs
         self.is_list = is_list
+        #: Which shading model the surface was read by.  One of 3ds Max's own
+        #: shaders is a Phong and its specular is a highlight; a renderer's own
+        #: material has no model anybody here knows, and its specular is a
+        #: reflectance that was measured.  3ds Max says the same of its own
+        #: export, writing ``unknown`` for every V-Ray and Corona material.
+        self.shading = shading
 
 
 def _material_name(scene: bytes, entity) -> str:
@@ -823,7 +830,12 @@ _SHADERS = {
     # the rough plastic, 0.82 for a brake caliper, 1.0 for the chrome and the
     # glass.  Without it every V-Ray surface came out at the same middling
     # roughness, so a windscreen was as satin as a bumper.
-    "vraymtl": {"diffuse": 1, "specular": 2, "refraction": 5, "glossiness": 3},
+    # Parameter 63 is the index of refraction the reflection is shaped by,
+    # which is what tells a mirror from a windscreen.  Matched against the
+    # export of the same car: 999 for its chrome and the clear coat over its
+    # paint, 8 for the paint under it, 1.52 for its glass and its plastic.
+    "vraymtl": {"diffuse": 1, "specular": 2, "refraction": 5, "glossiness": 3,
+                "ior": 63},
     # Corona keeps its surface in one block, every channel a colour with a
     # level beside it, and its glossiness at 180 where nothing else is near.
     #
@@ -839,12 +851,17 @@ _SHADERS = {
         "diffuse": 101, "diffuse_level": 121,
         "specular": 102, "specular_level": 122,
         "refraction": 103, "refraction_level": 123,
-        "glossiness": 180,
+        "glossiness": 180, "ior": 183,
     },
 }
 #: Corona renamed its material when the newer one arrived; the block did not
 #: change, and a scene saved by either reads the same.
 _SHADERS["coronalegacymtl"] = _SHADERS["coronamtl"]
+
+#: The shaders 3ds Max itself ships.  Their specular is a highlight to be
+#: capped; a renderer's own is a reflectance to be taken at face value.
+_MAX_SHADERS = {"blinn", "phong", "metal", "oren-nayar-blinn", "anisotropic",
+                "strauss"}
 
 
 def _appearance_of(params, layout, diffuse=None):
@@ -895,6 +912,7 @@ def _appearance_of(params, layout, diffuse=None):
         "specular": scaled("specular"),
         "glossiness": at("glossiness", "value"),
         "level": at("level", "value"),
+        "ior": at("ior", "value"),
         "opacity": opacity,
     }
 
@@ -1097,6 +1115,7 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     entity = entities[index]
     look = None
     plain = None                    # the first colour anywhere, as a fallback
+    shading = "unknown"
     texture = None
     subs: list[int] = []
 
@@ -1135,6 +1154,8 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
         # surface.
         if layout and look is None:
             look = _appearance_of(params, layout, painted)
+            if look is not None and holder.strip().lower() in _MAX_SHADERS:
+                shading = "phong"
         if plain is None:
             plain = next((v for _, kind, v in params if kind == "colour"), None)
         if texture is None and slots is None:
@@ -1143,14 +1164,15 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     # A plugin's material lays its block out as it pleases, so all that can be
     # said of one is that the first colour in it is the diffuse.
     if look is None:
-        look = {"colour": plain, "specular": None, "glossiness": None, "level": None}
+        look = {"colour": plain, "specular": None, "glossiness": None,
+                "level": None, "ior": None}
     # Where no shader layout claimed the block, the slot's colour is still
     # better than the placeholder beside it.
     if painted is not None and look["colour"] is None:
         look = dict(look, colour=painted)
     kind = (entity.cls.get("name") or "").strip().lower()
     return _Material(_material_name(scene, entity), look, texture, subs, bump,
-                     kind in _LIST_MATERIALS)
+                     kind in _LIST_MATERIALS, shading)
 
 
 class _Entity:
@@ -1653,12 +1675,22 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         # not.
         if look.get("opacity") is not None and look["opacity"] < 1.0:
             props.append(_p70("Opacity", "Number", _d(look["opacity"])))
+        # The index of refraction the reflection is shaped by.  What comes back
+        # facing you is ((n-1)/(n+1))**2 of the colour beside it, which is the
+        # difference between a mirror and a sheet of glass; both renderers
+        # state it, and their own export carries it too.
+        if look.get("ior") is not None and look["ior"] > 1.0:
+            props.append(_p70("ReflectionIor", "Number", _d(look["ior"])))
+        # Also as a property, which is where 3ds Max's own export puts it, and
+        # so where the reading of a specular goes looking for it.
+        props.append(_node("P", [_s("ShadingModel"), _s("KString"), _s(""), _s(""),
+                                 _s(material.shading)]))
         objects_node.children.append(
             _node("Material",
                   [_l(uid), _s(f"{material.name or f'material{index}'}\x00\x01Material"),
                    _s("")],
                   [_node("Version", [_i(102)]),
-                   _node("ShadingModel", [_s("phong")]),
+                   _node("ShadingModel", [_s(material.shading)]),
                    _node("Properties70", [], props)]))
 
         # Each picture the material names, under the property it drives.  The

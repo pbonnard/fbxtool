@@ -195,6 +195,77 @@ def test_a_document_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, wh
     assert _decode_psd(tmp_path, mangle(good)) is None, why
 
 
+# --------------------------------------------- how a reflection is read
+
+
+def _appearance(props: dict) -> dict:
+    """Run the page's own reading of a material's surface, under Node."""
+    script = (
+        f"const A=require({str(WEB / 'app' / 'analyze.js')!r});"
+        f"console.log(JSON.stringify(A.materialAppearance({json.dumps(props)})));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@needs_node
+@pytest.mark.parametrize("ior,expected,what", [
+    (999.0, 0.996, "an artist writing 'metal', which is a mirror"),
+    (1.52, 0.0426, "the index of glass, and of most plastics"),
+    (8.0, 0.6049, "a car paint's base under its coat"),
+], ids=["chrome", "glass", "paint"])
+def test_a_reflection_is_shaped_by_the_index_beside_it(ior, expected, what):
+    """A reflection colour is the tint; the index says how much comes back.
+
+    Facing you it is ``((n-1)/(n+1))**2`` of the colour, which is the whole of
+    what tells a mirror from a windscreen — and both are stated as a reflection
+    of 1.  Capped instead, an Audi's chrome draws as white plastic; taken at
+    face value, its windscreen draws as a sheet of chrome.
+    """
+    look = _appearance({"DiffuseColor": [0, 0, 0], "SpecularColor": [1, 1, 1],
+                        "ReflectionIor": ior})
+    assert look["specular"][0] == pytest.approx(expected, abs=1e-3), what
+
+
+@needs_node
+def test_the_tint_of_a_reflection_is_kept():
+    """The index says how much, the colour says what of it."""
+    look = _appearance({"DiffuseColor": [0, 0, 0], "SpecularColor": [0.8, 0.4, 0.2],
+                        "ReflectionIor": 1.52})
+    facing = ((1.52 - 1) / (1.52 + 1)) ** 2
+    assert look["specular"] == pytest.approx([0.8 * facing, 0.4 * facing, 0.2 * facing],
+                                             abs=1e-4)
+
+
+@needs_node
+@pytest.mark.parametrize("spelling", [
+    "ReflectionIor",                        # this project's own
+    "3dsMax|basic|reflection_ior",          # V-Ray, through 3ds Max's exporter
+    "3dsMax|CoronaMtlPb|fresnelIor",        # Corona, the same way
+], ids=["ours", "vray", "corona"])
+def test_the_index_is_found_however_it_is_spelt(spelling):
+    look = _appearance({"SpecularColor": [1, 1, 1], spelling: 999.0})
+    assert look["specular"][0] == pytest.approx(0.996, abs=1e-3)
+
+
+@needs_node
+def test_a_specular_with_no_index_beside_it_is_still_capped():
+    """It has to be.
+
+    A legacy 6.x export carries the reflection and loses the index, and that
+    car's every material states 1.0 — taken at face value the whole of it turns
+    to mirror and a dark blue Ferrari comes out grey.  An OBJ's `Ks 0.9 0.9
+    0.9` is the same habit and the reason the cap is there at all.
+    """
+    look = _appearance({"DiffuseColor": [0, 0.1, 0.3], "SpecularColor": [1, 1, 1]})
+    assert max(look["specular"]) == pytest.approx(0.16, abs=1e-6)
+    # And a map slot that merely drives an index is not one.
+    driven = _appearance({"SpecularColor": [1, 1, 1],
+                          "3dsMax|CoronaMtlPb|texmapFresnelIor": 999.0})
+    assert max(driven["specular"]) == pytest.approx(0.16, abs=1e-6)
+
+
 def _wasm_dump(path: str) -> dict:
     result = _run(["node", str(WEB / "test" / "dump.js"), path], env=_node_env())
     assert result.returncode == 0, result.stderr
