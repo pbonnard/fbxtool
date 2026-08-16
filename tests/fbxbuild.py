@@ -1765,6 +1765,11 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               child: "tuple[float, float, float] | None" = None,
               maps: "dict[int, str] | None" = None, maps_on: str = "material",
               colour_map: "tuple[float, float, float] | None" = None,
+              reflect_map: "tuple[float, float, float] | None" = None,
+              falloff_near: "tuple[float, float, float] | None" = None,
+              fresnel_ior: "float | None" = None,
+              refract_ior: "float | None" = None,
+              layered_coat: "tuple[float, float, float] | None" = None,
               diffuse_level: float = MAX_DIFFUSE_LEVEL,
               blend_slots: "set[int] | None" = None,
               coat_amount: float = 1.0,
@@ -1808,6 +1813,13 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     ``materials`` gives each face the slot it wears.  ``child`` hangs a second
     node off the first, placed there, which is how a scene says a wheel belongs
     to a body.
+
+    ``reflect_map`` and ``falloff_near`` fill the *reflection* slot instead,
+    with a CoronaColor and with a Falloff whose near end is that colour;
+    ``fresnel_ior`` and ``refract_ior`` write Corona's two indices, which sit
+    side by side and mean different things.  ``layered_coat`` wraps the whole
+    material in a CoronaLayeredMtl whose coat amount is a Falloff of that
+    colour, kept at a map slot rather than as a number.
 
     ``colour_map`` fills the diffuse slot with a CoronaColor of that colour —
     a map that is nothing but a colour, which is what leaves the colour beside
@@ -1902,6 +1914,14 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                  + _max_param_small_float(123, MAX_REFRACTION_LEVEL)
                  + _max_param_texmap(141)
                  + _max_param_small_float(180, MAX_GLOSSINESS))
+        # Corona keeps two indices side by side: 182 shapes the reflection and
+        # 183 is what light bends by on the way through.  Written with
+        # different values on purpose — a reader taking the wrong one cannot
+        # tell them apart otherwise, since 183 is 1.52 on nearly everything.
+        if fresnel_ior is not None:
+            block += _max_param_small_float(182, fresnel_ior)
+        if refract_ior is not None:
+            block += _max_param_small_float(183, refract_ior)
     elif shader:
         block = (_max_param_colour(0, MAX_AMBIENT, param_chunk)
                  + _max_param_colour(1, MAX_DIFFUSE, param_chunk)
@@ -1952,6 +1972,32 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                             _max_chunk(0x2034, struct.pack("<I", nxt)),
                             container=True)
         map_refs.append((0 if maps_on == "block" else 7, nxt + 1))
+        nxt += 2
+
+    # And one in the reflection slot, which is slot 1.  Corona's own colour
+    # beside it stays white, as a real one does, so what arrives says which of
+    # the two was read.
+    if reflect_map is not None:
+        extra += _max_chunk(0x0002,
+                            _max_param_colour(52, reflect_map, param_chunk),
+                            container=True)
+        extra += _max_chunk(0x0010,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        map_refs.append((1, nxt + 1))
+        nxt += 2
+
+    # A Falloff in that slot instead: not a colour but a ramp between two of
+    # them, near at parameter 0 and far at 4, with nothing beneath it.
+    if falloff_near is not None:
+        extra += _max_chunk(0x0002,
+                            _max_param_colour(0, falloff_near, param_chunk)
+                            + _max_param_colour(4, (1.0, 1.0, 1.0), param_chunk),
+                            container=True)
+        extra += _max_chunk(0x0011,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        map_refs.append((1, nxt + 1))
         nxt += 2
 
     # Corona keys its maps on the block rather than on the material, so where
@@ -2058,6 +2104,51 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                                          container=True),
                             container=True)
         nxt += 1
+
+    # A CoronaLayeredMtl over whatever the node wore: that material as its
+    # base, a mirror over it as its coat, and how much of the coat shows kept
+    # as a *map* at slot 11 rather than as a number — a Falloff, black facing
+    # you, which is a coat seen along the edges of a panel and nowhere else.
+    if layered_coat is not None:
+        base_at = wears
+        extra += _max_chunk(0x0002,
+                            _max_param_small_colour(101, (0.0, 0.0, 0.0))
+                            + _max_param_small_colour(102, (1.0, 1.0, 1.0))
+                            + _max_param_small_float(121, 1.0)
+                            + _max_param_small_float(122, 1.0)
+                            + _max_param_small_float(180, 1.0)
+                            + _max_param_small_float(182, 999.0),
+                            container=True)
+        extra += _max_chunk(0x0003,
+                            _max_chunk(0x2034, struct.pack("<I", nxt))
+                            + _max_chunk(0x0FA0,
+                                         _max_chunk(0x4001, _max_utf16("Coat")),
+                                         container=True),
+                            container=True)
+        coat_at = nxt + 1
+        nxt += 2
+        extra += _max_chunk(0x0002,
+                            _max_param_colour(0, layered_coat, param_chunk)
+                            + _max_param_colour(4, (1.0, 1.0, 1.0), param_chunk),
+                            container=True)
+        extra += _max_chunk(0x0011,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        amount_at = nxt + 1
+        nxt += 2
+        extra += _max_chunk(0x0002,
+                            _max_chunk(0x2035, struct.pack("<7I", 3, 0, base_at,
+                                                           1, coat_at,
+                                                           11, amount_at)),
+                            container=True)
+        extra += _max_chunk(0x0012,
+                            _max_chunk(0x2034, struct.pack("<I", nxt))
+                            + _max_chunk(0x4000,
+                                         _max_chunk(0x4001, _max_utf16("Layered")),
+                                         container=True),
+                            container=True)
+        wears = nxt + 1
+        nxt += 2
     node_refs.append((3, wears))
 
     if smooth:
@@ -2202,7 +2293,12 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                # A Dummy is a helper, not geometry: superclass 0x50, which is
                # what keeps it out of the tally of objects with no mesh.
                + _max_class("Dummy", 0x50, 8872500)
-               + _max_class("CoronaColor", 0xC10, 0x0300))
+               + _max_class("CoronaColor", 0xC10, 0x0300)
+               # A Falloff is a ramp between two colours by viewing angle, and
+               # a layered material is a base with coats over it that keeps how
+               # much of each shows as a map slot rather than as a number.
+               + _max_class("Falloff", 0xC10, 0x0310)
+               + _max_class("CoronaLayeredMtl", 0xC00, 0x0320))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),

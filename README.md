@@ -1038,6 +1038,45 @@ this reader's own `ReflectionIor` are one thing. The map slots that merely
 *drive* an index — `texmapFresnelIor` and the like — are not, and neither is
 the refraction's own `ior`.
 
+**Which of Corona's two indices.** A CoronaMtl keeps both, next to each other:
+the Fresnel index at parameter **182** and the refraction index at **183**.
+Only 182 shapes a reflection; 183 is what light bends by on the way *through*,
+and it is 1.52 on everything that is not glass because that is the default
+nobody changes. Read at 183, every Corona surface in every scene came back at
+the reflectance of window glass — a Maserati's chrome, its polished steel and
+its wing mirrors all drew as dark plastic.
+
+3ds Max settles it by exporting both under their own names: for all four of
+that car's bright metals `CoronaMtlPb|fresnelIor` is the number at 182 — 999
+for the mirror, 50 for the steel, 8 and 6 for the two irons — while
+`CoronaMtlPb|ior` is the 1.52 at 183. The same export writes a specular factor
+of `10 × glossiness × min(1, fresnelIor / 16)`, which comes out exactly right
+for all seven materials that carry one, 182 in hand and not 183.
+
+The Audi settles it a second time, and independently: that car ships a Corona
+scene and a V-Ray scene of the same model, read down two entirely separate
+paths — parameter 63 and reference key 8 on one side, 182 and block slot 1 on
+the other. Scored material by material against its V-Ray twin, the Corona
+reading went from a mean reflectance error of **0.125** to **0.004**, and from
+38 to **50 of its 52** shared materials agreeing within 0.03. Every chrome on
+the car — `window frame chrome`, `chrome logo`, `rims brushed steel`, `matte
+chrome reflector` — moved from 0.043, the reflectance of glass, to the 0.996 of
+its twin, while every pane of glass stayed at 0.043.
+
+**A reflection slot is read like a diffuse one.** A filled slot makes the
+colour beside it a placeholder, and Corona's reflection slot is slot 1. Car
+paint is where it shows: all three of that Maserati's layered paints leave the
+reflection colour at white and put the real one in the slot, as a Falloff —
+black facing you, white at grazing, with the paint's own `CoronaColor`
+underneath. Read the white and the whole body comes out chrome; the gold badge
+reflects white instead of gold.
+
+A Falloff is not a colour but a ramp between two of them by viewing angle, so
+what is taken from one is its **near** end, because that is what facing the
+camera means and the shader's own Fresnel takes it the rest of the way. It is a
+fallback and not a rule: a Falloff with a map in its near slot shows that map,
+so what lies beneath is asked first.
+
 Where no index is stated the cap stands, and it has to. A legacy FBX 6.x export
 carries the reflection and loses the index; that Ferrari's every material
 states 1.0, and taken at face value the whole car turns to mirror and its dark
@@ -1060,6 +1099,13 @@ scene beside it comes out chrome. The coat is scaled by it, and a coat scaled
 to nothing is no coat at all, which is what the dirt blended over the Hummer's
 tyre comes to: only the most reflective layer over the base counts, and a layer
 that reflects nothing leaves the surface alone.
+
+A CoronaLayeredMtl says it as a *map* rather than a number, at slot 11, which
+is a stronger statement: all three of the Maserati's paints fill it with a
+Falloff that is black facing you and 0.86 at grazing. That is a coat seen along
+the edge of a panel and nowhere else, so facing the camera there is none — and
+that is what 3ds Max's own export makes of those three as well, writing the
+base coat's reflection and shininess and saying nothing about a layer at all.
 
 The shader draws it as a second specular lobe with its own roughness, and takes
 what it reflects out of what reaches the base — one minus the coat's Fresnel —

@@ -264,11 +264,15 @@ def test_the_material_a_part_wears_comes_with_it():
     assert any(c.props[1].value == material_uid for c in connections.children)
 
 
+def _props_of(material):
+    return {p.props[0].value: [q.value for q in p.props[4:]]
+            for p in material.get("Properties70").children}
+
+
 def _material_props(doc):
     objects = next(n for n in doc.root.children if n.name == "Objects")
     material = next(n for n in objects.children if n.name == "Material")
-    return {p.props[0].value: [q.value for q in p.props[4:]]
-            for p in material.get("Properties70").children}
+    return _props_of(material)
 
 
 def test_a_shader_says_which_parameter_of_its_block_is_which():
@@ -902,6 +906,94 @@ def test_a_diffuse_that_is_switched_off_stays_off_whatever_fills_it():
         fb.build_max(shader="CoronaMtl", material_class="CoronaMtl", maps_on="block",
                      colour_map=(0.8, 0.8, 0.8), diffuse_level=0.0), load_arrays=True))
     assert props["DiffuseColor"] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+
+
+def test_corona_reflects_by_the_index_it_reflects_by_and_not_the_other_one():
+    """Corona keeps two indices side by side and only one shapes a reflection.
+
+    182 is the Fresnel index — what tells a mirror from a bumper — and 183 is
+    what light bends by on the way *through*, which is 1.52 on everything that
+    is not glass because that is what it defaults to.  Read at 183 every Corona
+    surface in every scene came back at the reflectance of window glass, and a
+    Maserati's chrome, its polished steel and its wing mirrors all drew as dark
+    plastic.
+
+    3ds Max settles it by exporting both under their own names: for all four of
+    that car's bright metals ``CoronaMtlPb|fresnelIor`` is the number at 182 —
+    999 for the mirror, 50 for the steel, 8 and 6 for the two irons — while
+    ``CoronaMtlPb|ior`` is the 1.52 at 183.  The same export states a specular
+    factor of ``10 x glossiness x min(1, fresnelIor / 16)``, which comes out
+    right for all seven of the materials that carry one.
+    """
+    props = _material_props(parse_max(
+        fb.build_max(shader="CoronaMtl", material_class="CoronaMtl",
+                     fresnel_ior=999.0, refract_ior=1.52), load_arrays=True))
+    assert props["ReflectionIor"] == pytest.approx([999.0], abs=1e-4)
+
+
+def test_a_colour_in_the_reflection_slot_stands_where_the_flat_one_did():
+    """A filled slot makes the colour beside it a placeholder — the same rule
+    the diffuse is already read by, and for the same reason.
+
+    Corona leaves the reflection colour at white and puts the real one in the
+    slot.  Read the white and every layered car paint comes out chrome: a black
+    Maserati turns to a mirror, and its gold badge reflects white.
+    """
+    props = _material_props(parse_max(
+        fb.build_max(shader="CoronaMtl", material_class="CoronaMtl", maps_on="block",
+                     reflect_map=(0.19, 0.15, 0.13)), load_arrays=True))
+    assert props["SpecularColor"] == pytest.approx(
+        [c * fb.MAX_SPECULAR_LEVEL_CORONA for c in (0.19, 0.15, 0.13)], abs=1e-6)
+
+
+def test_a_falloff_hands_over_the_end_of_it_that_faces_you():
+    """A Falloff is not a colour but a ramp between two of them by viewing
+    angle, and every number this reader hands the renderer is a facing one.
+
+    Artists draw the Fresnel curve by hand this way — black facing you, white
+    at grazing — and the renderer's own Fresnel takes it the rest of the way,
+    so the near end is the number that reproduces the curve.
+    """
+    props = _material_props(parse_max(
+        fb.build_max(shader="CoronaMtl", material_class="CoronaMtl", maps_on="block",
+                     falloff_near=(0.02, 0.02, 0.02)), load_arrays=True))
+    assert props["SpecularColor"] == pytest.approx(
+        [0.02 * fb.MAX_SPECULAR_LEVEL_CORONA] * 3, abs=1e-6)
+
+
+def test_a_coat_that_shows_at_the_edges_alone_is_no_coat_facing_you():
+    """A layered material can keep how much of its coat shows as a map.
+
+    Corona puts that at slot 11, and all three of a Maserati's paints fill it
+    with a Falloff that is black facing you and 0.86 at grazing.  Taken whole,
+    a mirror's worth of coat goes over every panel and the body draws grey;
+    read facing, there is no coat there at all — which is also what 3ds Max's
+    own export makes of those three, writing the base coat and saying nothing
+    about a layer.
+    """
+    doc = parse_max(fb.build_max(shader="CoronaMtl", material_class="CoronaMtl",
+                                 layered_coat=(0.0, 0.0, 0.0)), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    worn = [n for n in objects.children if n.name == "Material"
+            and n.props[1].value.split("\x00")[0] == "Layered"]
+    assert worn, [n.props[1].value.split("\x00")[0] for n in objects.children
+                  if n.name == "Material"]
+    assert "CoatColor" not in _props_of(worn[0])
+    # And the base coat it is laid over still arrives, so what is lost is the
+    # coat and not the surface under it.
+    assert _props_of(worn[0])["SpecularColor"] == pytest.approx(
+        [c * fb.MAX_SPECULAR_LEVEL_CORONA for c in fb.MAX_SPECULAR], abs=1e-6)
+
+
+def test_a_coat_that_is_there_facing_you_is_still_laid_over_the_base():
+    """The other way round: a layer amount that is white facing you is a coat
+    like any other, so what is read is the amount and not the map."""
+    doc = parse_max(fb.build_max(shader="CoronaMtl", material_class="CoronaMtl",
+                                 layered_coat=(1.0, 1.0, 1.0)), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    worn = next(n for n in objects.children if n.name == "Material"
+                and n.props[1].value.split("\x00")[0] == "Layered")
+    assert _props_of(worn)["CoatColor"] == pytest.approx([1.0, 1.0, 1.0], abs=1e-6)
 
 
 def test_a_shader_whose_slots_are_not_known_keeps_the_older_rule():

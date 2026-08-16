@@ -427,8 +427,23 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
     # A clear coat over a base, at half the strength the blend allows.
     {"slots": 2, "materials": [0, 1, 0, 1, 0, 1], "blend_slots": {0},
      "shader": "VRayMtl", "material_class": "VRayMtl", "coat_amount": 0.5},
+    # Corona's two indices side by side, only one of which shapes a reflection.
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl",
+     "fresnel_ior": 999.0, "refract_ior": 1.52},
+    # A reflection slot filled by a colour, and by a ramp between two.
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl", "maps_on": "block",
+     "reflect_map": (0.19, 0.15, 0.13)},
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl", "maps_on": "block",
+     "falloff_near": (0.02, 0.02, 0.02)},
+    # A layered material whose coat amount is a map rather than a number.
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl",
+     "layered_coat": (0.0, 0.0, 0.0)},
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl",
+     "layered_coat": (1.0, 1.0, 1.0)},
 ], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot",
-        "glossiness", "symmetry", "dummy", "colour-map", "clear-coat"])
+        "glossiness", "symmetry", "dummy", "colour-map", "clear-coat",
+        "corona-ior", "reflect-colour", "reflect-falloff",
+        "layered-edge-coat", "layered-full-coat"])
 def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
     """The same cross-check over the shapes a real car scene turns out to use.
 

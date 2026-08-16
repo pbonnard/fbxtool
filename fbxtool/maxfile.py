@@ -854,11 +854,27 @@ _SHADERS = {
     # already read — and the two that differ are a windscreen and a body the
     # artist tuned differently for each renderer, which the rest of their own
     # numbers agree about.
+    #
+    # Corona keeps two indices side by side and only one of them shapes the
+    # reflection.  182 is the Fresnel index — what tells a mirror from a
+    # bumper — and 183 is the index light bends by on the way *through*, which
+    # is 1.52 on everything that is not glass because that is what it defaults
+    # to.  Read at 183 every Corona surface in every scene came back at the
+    # reflectance of window glass, and the Grecale's chrome, its polished steel
+    # and its wing mirrors all drew as dark plastic.
+    #
+    # The file settles it rather than the documentation: 3ds Max exports these
+    # under their own names, and for all four of that car's bright metals
+    # `CoronaMtlPb|fresnelIor` is the number at 182 — 999 for the mirror, 50
+    # for the steel, 8 and 6 for the two irons — while `CoronaMtlPb|ior` is the
+    # 1.52 sitting at 183.  The parameters run in the order the export lists
+    # them, which is the same check that fixes 180 as the reflection
+    # glossiness: 2**(10 x 180) is the ShininessExponent of every one of them.
     "coronamtl": {
         "diffuse": 101, "diffuse_level": 121,
         "specular": 102, "specular_level": 122,
         "refraction": 103, "refraction_level": 123,
-        "glossiness": 180, "ior": 183,
+        "glossiness": 180, "ior": 182,
     },
 }
 #: Corona renamed its material when the newer one arrived; the block did not
@@ -871,21 +887,24 @@ _MAX_SHADERS = {"blinn", "phong", "metal", "oren-nayar-blinn", "anisotropic",
                 "strauss"}
 
 
-def _appearance_of(params, layout, diffuse=None):
+def _appearance_of(params, layout, diffuse=None, specular=None):
     """What a block of parameters says the surface is, by a shader's layout.
 
     Each value comes from the id that holds it, and nothing is returned for a
     block that has no diffuse where the layout says one is — that block
     belongs to something else the material keeps, not to its surface.
 
-    ``diffuse`` stands in for the colour the block itself holds, for a material
-    whose diffuse slot is filled by a colour rather than a picture: the one
-    beside it is then a placeholder.  It goes in *before* the level is applied,
-    since a diffuse switched off is switched off whichever colour it was given.
+    ``diffuse`` and ``specular`` stand in for the colours the block itself
+    holds, for a material whose slot is filled by a colour rather than a
+    picture: the one beside it is then a placeholder.  They go in *before* the
+    level is applied, since a channel switched off is switched off whichever
+    colour it was given.
     """
+    stood_in = {"diffuse": diffuse, "specular": specular}
+
     def at(which: str, kind: str):
-        if which == "diffuse" and kind == "colour" and diffuse is not None:
-            return diffuse
+        if kind == "colour" and stood_in.get(which) is not None:
+            return stood_in[which]
         if which not in layout:
             return None
         for param, got, value in params:
@@ -943,6 +962,14 @@ def _asset_of(scene: bytes, entity, assets: dict):
 _CORONA_COLOUR_MAP = "coronacolor"
 _CORONA_COLOUR = 52
 
+#: A Falloff is not a colour but a ramp between two of them by viewing angle,
+#: and the end that matters is the near one — parameter 0 — because that is
+#: what facing the camera means, and every number this reader hands the
+#: renderer is a facing one.  It is a fallback and not a rule: a Falloff with a
+#: map in its near slot shows that map, so what lies beneath is asked first.
+_FALLOFF_MAP = "falloff"
+_FALLOFF_NEAR = 0
+
 
 def _colour_under(scene: bytes, entities: list, index, depth: int = 0,
                   seen: set | None = None):
@@ -973,6 +1000,13 @@ def _colour_under(scene: bytes, entities: list, index, depth: int = 0,
         found = _colour_under(scene, entities, ref, depth + 1, seen)
         if found:
             return found
+    if (entity.cls.get("name") or "").strip().lower() == _FALLOFF_MAP:
+        for ref in [index, *entity.refs]:
+            if ref >= len(entities):
+                continue
+            for param, kind, value in _params_of(scene, entities[ref]):
+                if param == _FALLOFF_NEAR and kind == "colour":
+                    return value
     return None
 
 
@@ -1025,9 +1059,17 @@ def _asset_under(scene: bytes, entities: list, index, assets: dict,
 #: two ``_aniso``.  Nothing else in the file says which is which — the slot
 #: parameters themselves are written byte for byte identical whether they are
 #: filled or not.
+#:
+#: Slot 1 is the reflection, and it is read for the same reason the diffuse is:
+#: a filled slot makes the colour beside it a placeholder.  Car paint is where
+#: this shows.  All three of the Grecale's layered paints put a Falloff there —
+#: black facing you, white at grazing, with the paint's own CoronaColor beneath
+#: it — which is an artist drawing the Fresnel curve by hand.  The flat white
+#: parameter left in the block is not what reflects: read it and the whole body
+#: comes out chrome, and the gold reflects white instead of gold.
 _MAP_SLOTS = {
     "vraymtl": {"on": "self", "diffuse": 7, "bump": 10},
-    "coronamtl": {"on": "block", "diffuse": 0, "bump": 6},
+    "coronamtl": {"on": "block", "diffuse": 0, "specular": 1, "bump": 6},
 }
 #: Corona renamed its material when the newer one arrived; the block did not
 #: change, and a scene saved by either keys its maps the same way.
@@ -1057,6 +1099,15 @@ _LIST_MATERIALS = {"multi/sub-object", "multimaterial"}
 #: a mirror, shows at half of that.  Taken whole, every panel and every one of
 #: the scene's material balls comes out chrome.
 _COAT_AMOUNT = {"vrayblendmtl": 2}
+
+#: And where one keeps it as a map slot instead, which is a stronger statement
+#: than a number: a CoronaLayeredMtl puts the amount of its first layer at slot
+#: 11, and all three of the Grecale's paints fill it with a Falloff that is
+#: black facing you and 0.86 at grazing.  That is a coat seen along the edges
+#: of a panel and nowhere else — so facing the camera there is no coat, which
+#: is also what 3ds Max's own export makes of these three: it writes the base
+#: coat's reflection and shininess and says nothing about a layer at all.
+_COAT_AMOUNT_SLOT = {"coronalayeredmtl": 11}
 
 
 def _facing(ior) -> float:
@@ -1166,7 +1217,9 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     bump = None
     amount = 1.0                    # how much of a coat a blend lets show
     painted = None                  # a colour the diffuse slot holds outright
-    at_amount = _COAT_AMOUNT.get((entity.cls.get("name") or "").strip().lower())
+    reflected = None                # and the same for the reflection slot
+    named = (entity.cls.get("name") or "").strip().lower()
+    at_amount = _COAT_AMOUNT.get(named)
     if at_amount is not None:
         for ref in entity.refs:
             if ref >= len(entities):
@@ -1174,7 +1227,13 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
             for param, kind, value in _params_of(scene, entities[ref]):
                 if param == at_amount and kind == "colour":
                     amount = max(0.0, min(1.0, max(value)))
-    slots = _MAP_SLOTS.get((entity.cls.get("name") or "").strip().lower())
+    at_slot = _COAT_AMOUNT_SLOT.get(named)
+    if at_slot is not None:
+        shown = _colour_under(scene, entities,
+                              _keyed_maps(entities, entity, "block").get(at_slot))
+        if shown is not None:
+            amount = max(0.0, min(1.0, max(shown)))
+    slots = _MAP_SLOTS.get(named)
     if slots is not None:
         # The slots decide it, including when one is empty: a material with a
         # bump and no diffuse map wears no picture and is bumped all the same.
@@ -1184,6 +1243,8 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
         bump = _asset_under(scene, entities, keyed.get(slots["bump"]), assets)
         if texture is None:
             painted = _colour_under(scene, entities, diffuse)
+        if "specular" in slots:
+            reflected = _colour_under(scene, entities, keyed.get(slots["specular"]))
 
     queue = [(at, entity.cls.get("name") or "") for at in entity.refs]
     walked = set()
@@ -1206,7 +1267,7 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
         # filter colour that would otherwise pass for the colour of the
         # surface.
         if layout and look is None:
-            look = _appearance_of(params, layout, painted)
+            look = _appearance_of(params, layout, painted, reflected)
             if look is not None and holder.strip().lower() in _MAX_SHADERS:
                 shading = "phong"
         if plain is None:
@@ -1223,9 +1284,8 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     # better than the placeholder beside it.
     if painted is not None and look["colour"] is None:
         look = dict(look, colour=painted)
-    kind = (entity.cls.get("name") or "").strip().lower()
     made = _Material(_material_name(scene, entity), look, texture, subs, bump,
-                     kind in _LIST_MATERIALS, shading)
+                     named in _LIST_MATERIALS, shading)
     made.coat_amount = amount
     return made
 

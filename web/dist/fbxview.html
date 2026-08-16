@@ -3951,12 +3951,26 @@ const FbxMax = (function () {
      * for each renderer, which the rest of their own numbers agree about.
      *
      * Corona renamed the material when the newer one arrived; the block did
-     * not change, so a scene saved by either reads the same. */
+     * not change, so a scene saved by either reads the same.
+     *
+     * It keeps two indices side by side and only one of them shapes the
+     * reflection. 182 is the Fresnel index — what tells a mirror from a
+     * bumper — and 183 is the index light bends by on the way *through*, which
+     * is 1.52 on everything that is not glass because that is what it defaults
+     * to. Read at 183 every Corona surface in every scene came back at the
+     * reflectance of window glass, and the Grecale's chrome, its polished
+     * steel and its wing mirrors all drew as dark plastic.
+     *
+     * The file settles it rather than the documentation: 3ds Max exports these
+     * under their own names, and for all four of that car's bright metals
+     * `CoronaMtlPb|fresnelIor` is the number at 182 — 999 for the mirror, 50
+     * for the steel, 8 and 6 for the two irons — while `CoronaMtlPb|ior` is
+     * the 1.52 sitting at 183. */
     ['coronamtl', {
       diffuse: 101, diffuseLevel: 121,
       specular: 102, specularLevel: 122,
       refraction: 103, refractionLevel: 123,
-      glossiness: 180, ior: 183,
+      glossiness: 180, ior: 182,
     }],
   ]);
   SHADERS.set('coronalegacymtl', SHADERS.get('coronamtl'));
@@ -3971,14 +3985,15 @@ const FbxMax = (function () {
    * block that has no diffuse where the layout says one is — that block
    * belongs to something else the material keeps, not to its surface.
    */
-  function appearanceOf(params, layout, diffuse = null) {
+  function appearanceOf(params, layout, diffuse = null, specular = null) {
+    const stoodIn = { diffuse, specular };
     const at = (which, key) => {
-      // `diffuse` stands in for the colour the block itself holds, for a
-      // material whose diffuse slot is filled by a colour rather than a
-      // picture: the one beside it is then a placeholder. It goes in before
-      // the level is applied, since a diffuse switched off is switched off
-      // whichever colour it was given.
-      if (which === 'diffuse' && key === 'colour' && diffuse) return diffuse;
+      // These stand in for the colours the block itself holds, for a material
+      // whose slot is filled by a colour rather than a picture: the one beside
+      // it is then a placeholder. They go in before the level is applied,
+      // since a channel switched off is switched off whichever colour it was
+      // given.
+      if (key === 'colour' && stoodIn[which]) return stoodIn[which];
       if (layout[which] === undefined) return null;
       const found = params.find((p) => p.id === layout[which] && p[key] !== undefined);
       return found ? found[key] : null;
@@ -4029,6 +4044,8 @@ const FbxMax = (function () {
    * black of rubber, and its `red` to (0.114, 0, 0). */
   const CORONA_COLOUR_MAP = 'coronacolor';
   const CORONA_COLOUR = 52;
+  const FALLOFF_MAP = 'falloff';
+  const FALLOFF_NEAR = 0;
 
   /**
    * A colour standing where a picture would, at or below one slot.
@@ -4057,6 +4074,20 @@ const FbxMax = (function () {
     for (const ref of entity.refs) {
       const found = colourUnder(view, entities, ref, depth + 1, seen);
       if (found) return found;
+    }
+    /* A Falloff is not a colour but a ramp between two of them by viewing
+     * angle, and the end that matters is the near one — parameter 0 — because
+     * that is what facing the camera means, and every number this reader hands
+     * the renderer is a facing one. It is a fallback and not a rule: a Falloff
+     * with a map in its near slot shows that map, so what lies beneath is
+     * asked first. */
+    if (String(entity.cls.name || '').trim().toLowerCase() === FALLOFF_MAP) {
+      for (const ref of [index, ...entity.refs]) {
+        if (ref >= entities.length) continue;
+        for (const p of paramsOf(view, entities[ref])) {
+          if (p.id === FALLOFF_NEAR && p.colour !== undefined) return p.colour;
+        }
+      }
     }
     return null;
   }
@@ -4132,6 +4163,16 @@ const FbxMax = (function () {
    * and every one of the scene's material balls comes out chrome. */
   const COAT_AMOUNT = { vrayblendmtl: 2 };
 
+  /* And where one keeps it as a map slot instead, which is a stronger
+   * statement than a number: a CoronaLayeredMtl puts the amount of its first
+   * layer at slot 11, and all three of the Grecale's paints fill it with a
+   * Falloff that is black facing you and 0.86 at grazing. That is a coat seen
+   * along the edges of a panel and nowhere else — so facing the camera there
+   * is no coat, which is also what 3ds Max's own export makes of these three:
+   * it writes the base coat's reflection and shininess and says nothing about
+   * a layer at all. */
+  const COAT_AMOUNT_SLOT = { coronalayeredmtl: 11 };
+
   /**
    * How much of a reflection comes back facing you, from its index.
    *
@@ -4148,9 +4189,17 @@ const FbxMax = (function () {
   const MAX_SHADERS = new Set(['blinn', 'phong', 'metal', 'oren-nayar-blinn',
     'anisotropic', 'strauss']);
 
+  /* Slot 1 is the reflection, and it is read for the same reason the diffuse
+   * is: a filled slot makes the colour beside it a placeholder. Car paint is
+   * where this shows. All three of the Grecale's layered paints put a Falloff
+   * there — black facing you, white at grazing, with the paint's own
+   * CoronaColor beneath it — which is an artist drawing the Fresnel curve by
+   * hand. The flat white parameter left in the block is not what reflects:
+   * read it and the whole body comes out chrome, and the gold reflects white
+   * instead of gold. */
   const MAP_SLOTS = {
     vraymtl: { on: 'self', diffuse: 7, bump: 10 },
-    coronamtl: { on: 'block', diffuse: 0, bump: 6 },
+    coronamtl: { on: 'block', diffuse: 0, specular: 1, bump: 6 },
   };
   // Corona renamed its material when the newer one arrived; the block did not
   // change, and a scene saved by either keys its maps the same way.
@@ -4194,7 +4243,9 @@ const FbxMax = (function () {
     let bump = null;
     let amount = 1;                 // how much of a coat a blend lets show
     let painted = null;             // a colour the diffuse slot holds outright
-    const atAmount = COAT_AMOUNT[String(entity.cls.name || '').trim().toLowerCase()];
+    let reflected = null;           // and the same for the reflection slot
+    const named = String(entity.cls.name || '').trim().toLowerCase();
+    const atAmount = COAT_AMOUNT[named];
     if (atAmount !== undefined) {
       for (const ref of entity.refs) {
         if (ref >= entities.length) continue;
@@ -4205,7 +4256,13 @@ const FbxMax = (function () {
         }
       }
     }
-    const slots = MAP_SLOTS[String(entity.cls.name || '').trim().toLowerCase()];
+    const atSlot = COAT_AMOUNT_SLOT[named];
+    if (atSlot !== undefined) {
+      const shown = colourUnder(view, entities,
+        keyedMaps(entities, entity, 'block')[atSlot]);
+      if (shown) amount = Math.min(1, Math.max(0, Math.max(...shown)));
+    }
+    const slots = MAP_SLOTS[named];
     if (slots) {
       // The slots decide it, including when one is empty: a material with a
       // bump and no diffuse map wears no picture and is bumped all the same.
@@ -4214,6 +4271,9 @@ const FbxMax = (function () {
       texture = assetUnder(view, bytes, entities, diffuse, assets);
       bump = assetUnder(view, bytes, entities, keyed[slots.bump], assets);
       if (!texture) painted = colourUnder(view, entities, diffuse);
+      if (slots.specular !== undefined) {
+        reflected = colourUnder(view, entities, keyed[slots.specular]);
+      }
     }
     const queue = entity.refs.map((at) => [at, entity.cls.name]);
     const walked = new Set();
@@ -4232,7 +4292,7 @@ const FbxMax = (function () {
       // keeps three more blocks of its own, and one of them holds a filter
       // colour that would otherwise pass for the colour of the surface.
       if (layout && !look) {
-        look = appearanceOf(params, layout, painted);
+        look = appearanceOf(params, layout, painted, reflected);
         if (look && MAX_SHADERS.has(String(holder).trim().toLowerCase())) {
           shading = 'phong';
         }
