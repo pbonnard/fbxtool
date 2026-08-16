@@ -195,6 +195,369 @@ def test_a_document_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, wh
     assert _decode_psd(tmp_path, mangle(good)) is None, why
 
 
+# ------------------------------------------ the DirectDraw Surface decoder
+
+
+def _decode_dds(tmp_path, data: bytes) -> dict:
+    """Run the page's own ``dds.js`` over some bytes, under Node."""
+    source = tmp_path / "image.dds"
+    source.write_bytes(data)
+    script = (
+        "const fs=require('fs');"
+        f"const D=require({str(WEB / 'app' / 'dds.js')!r});"
+        f"const b=new Uint8Array(fs.readFileSync({str(source)!r}));"
+        "const image=D.decode(b);"
+        "console.log(JSON.stringify(image ? "
+        "{width:image.width,height:image.height,rgba:Array.from(image.rgba)} : null));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@needs_node
+def test_a_block_compressed_surface_is_decoded_to_its_corners(tmp_path):
+    """BC1 stores a 4x4 tile as two endpoint colours and sixteen selectors, and
+    the two in between are a third and two thirds of the way along.
+
+    Assetto Corsa keeps almost every texture in a `.dds` — 111 of the 135 in
+    one car — and no browser will make an image of one, so without this a
+    `.kn5` opens as a grey model with its paint and its badges missing.
+    """
+    import fbxbuild as fb
+
+    image = _decode_dds(tmp_path, fb.dds_bc1())
+    assert image is not None, "the decoder would not claim it"
+    assert (image["width"], image["height"]) == (4, 4)
+    assert image["rgba"][0:4] == [255, 0, 0, 255], "the first endpoint"
+    assert image["rgba"][4:8] == [0, 0, 255, 255], "the second"
+    assert image["rgba"][8:12] == [170, 0, 85, 255], "two thirds of the way"
+    assert image["rgba"][12:16] == [85, 0, 170, 255], "one third"
+
+
+@needs_node
+def test_the_alpha_of_a_bc3_tile_is_interpolated_the_way_it_was_written(tmp_path):
+    """BC3 puts eight bytes of alpha in front of the colour: two endpoints and
+    sixteen three-bit selectors over six bytes, which is where a decoder that
+    reads them as one 48-bit number goes wrong.
+
+    Glass and a spinning wheel are both fully transparent textures in a car,
+    so alpha read as zero is indistinguishable from alpha not read at all.
+    """
+    import fbxbuild as fb
+
+    image = _decode_dds(tmp_path, fb.dds_bc3(alpha=(255, 0)))
+    assert image is not None
+    got = image["rgba"][3::4][:8]
+    assert got == [255, 0, 218, 182, 145, 109, 72, 36]
+
+
+@needs_node
+def test_an_uncompressed_surface_is_read_by_its_channel_masks(tmp_path):
+    """A mask says which bits of a pixel are which channel, so B8G8R8A8 needs
+    no entry in a table of layouts — and neither does anything else."""
+    import fbxbuild as fb
+
+    image = _decode_dds(tmp_path, fb.dds_bgra(2, 1, bytes([10, 20, 30, 40,
+                                                           200, 150, 100, 255])))
+    assert image is not None
+    assert image["rgba"] == [30, 20, 10, 40, 100, 150, 200, 255]
+
+
+@needs_node
+def test_a_greyscale_surface_comes_out_grey_rather_than_red(tmp_path):
+    """One channel is the picture, not the red of a picture missing two."""
+    import fbxbuild as fb
+
+    image = _decode_dds(tmp_path, fb.dds_luminance(3, 1, bytes([10, 128, 250])))
+    assert image is not None
+    assert image["rgba"] == [10, 10, 10, 255, 128, 128, 128, 255, 250, 250, 250, 255]
+
+
+@needs_node
+@pytest.mark.parametrize("mangle,why", [
+    (lambda d: b"DDX " + d[4:], "not a DDS at all"),
+    (lambda d: d[:84] + b"BC7 " + d[88:], "a block format this does not decode"),
+    (lambda d: d[:100], "cut off before the pixels"),
+], ids=["not-dds", "bc7", "truncated"])
+def test_a_surface_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, why):
+    """A texture nobody can tell is wrong is one nobody fixes."""
+    import fbxbuild as fb
+
+    assert _decode_dds(tmp_path, mangle(fb.dds_bc1())) is None, why
+
+
+# ----------------------------------------- the Assetto Corsa reader
+
+def _rounded(value, places: int = 9):
+    """The same structure with every number rounded, for comparing readers.
+
+    Both read the file's own 32-bit floats, so the values are the same to the
+    bit; what differs in the last place is the arithmetic on top of them —
+    ``Math.hypot`` against a square root of a sum of squares — and rounding is
+    what lets those be held equal without letting a real difference through.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return round(float(value), places)
+    if isinstance(value, dict):
+        return {key: _rounded(v, places) for key, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_rounded(v, places) for v in value]
+    return value
+
+
+def _kn5_dump(path: str) -> dict:
+    """Run the page's own ``kn5.js`` over a file, under Node."""
+    result = _run(["node", str(WEB / "test" / "kn5.js"), path], env=_node_env())
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def _kn5_python(path: str) -> dict:
+    """The same facts, read by the Python reader, in the same shape."""
+    doc = read_fbx(path, load_arrays=True)
+    objects = doc.root.path("Objects")
+
+    def plain(entry):
+        return str(entry.value(1)).split("\x00")[0]
+
+    def properties(entry):
+        block = entry.get("Properties70")
+        out = {}
+        for prop in (block.children if block else []):
+            values = [p.value for p in prop.props][4:]
+            out[prop.props[0].value] = values[0] if len(values) == 1 else values
+        return out
+
+    def arrays(entry, name=None):
+        out = {}
+        for prop in entry.props:
+            if prop.array is not None:
+                out[name or entry.name] = {"length": prop.array.length}
+        for child in entry.children:
+            out.update(arrays(child, child.name))
+        return out
+
+    def head(entry, name):
+        found = entry.get(name) if entry is not None else None
+        return list(found.props[0].value)[:12] if found is not None else None
+
+    first = next((o for o in objects.children if o.name == "Geometry"), None)
+    counts: dict[str, int] = {}
+    for entry in objects.children:
+        counts[entry.name] = counts.get(entry.name, 0) + 1
+    return {
+        "format": doc.format,
+        "encoding": doc.encoding,
+        "counts": counts,
+        "connections": len(doc.root.path("Connections").children),
+        "materials": [{"name": plain(m), "props": properties(m)}
+                      for m in objects.get_all("Material")],
+        "models": [{"name": plain(m), "subclass": m.value(2),
+                    "props": properties(m)} for m in objects.get_all("Model")],
+        "links": [[p.value for p in c.props]
+                  for c in doc.root.path("Connections").children],
+        "firstGeometry": first and {
+            "name": plain(first),
+            "arrays": arrays(first),
+            "vertices": head(first, "Vertices"),
+            "polygons": head(first, "PolygonVertexIndex"),
+            "normals": head(first.get("LayerElementNormal"), "Normals"),
+            "uv": head(first.get("LayerElementUV"), "UV"),
+        },
+    }
+
+
+def _sample_kn5(tmp_path) -> str:
+    """A small car with a texture, three materials and a placed wheel."""
+    import fbxbuild as fb
+
+    triangle = [
+        ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0), (1.0, 0.0, 0.0)),
+        ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 0.25), (1.0, 0.0, 0.0)),
+        ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0), (1.0, 0.0, 0.0)),
+    ]
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    # A wheel turned round, which is how the right-hand side of a car is built
+    # and where a decomposition that mistakes a half turn for a mirror shows.
+    turned = (-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+              0.0, 0.0, -1.0, 0.0, 0.8, 0.36, 1.41, 1.0)
+    materials = [
+        fb.kn5_material("body", "ksPerPixelMultiMap",
+                        properties=(fb.kn5_property("ksDiffuse", 0.4)
+                                    + fb.kn5_property("ksSpecularEXP", 200.0)
+                                    + fb.kn5_property("fresnelC", 0.04)),
+                        property_count=3,
+                        slots=(("txDiffuse", 0, "paint.dds"),
+                               ("txNormal", 1, "body_n.dds"))),
+        fb.kn5_material("glass", "ksPerPixelReflection", blend=1,
+                        properties=fb.kn5_property("fresnelC", 0.0),
+                        property_count=1,
+                        slots=(("txDiffuse", 0, "paint.dds"),)),
+        fb.kn5_material("grille", "ksPerPixelAT", alpha_tested=True,
+                        properties=fb.kn5_property("ksAlphaRef", 0.4),
+                        property_count=1),
+    ]
+    mesh = fb.kn5_mesh("tyre", triangle, [0, 1, 2, 2, 1, 0], material=1)
+    tree = fb.kn5_dummy("car", identity,
+                        fb.kn5_dummy("WHEEL_RF", turned, mesh, 1), 1)
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(6, textures=[("paint.dds", fb.dds_bc1())],
+                                  materials=materials, tree=tree))
+    return str(path)
+
+
+@needs_node
+def test_the_page_reads_a_kn5_exactly_as_python_does(tmp_path):
+    """A `.kn5` has no offsets and no lengths above the record level, so the
+    two readers cannot disagree quietly: a field mis-sized in one of them walks
+    off the rest of the file and produces a different car, not an error.
+    """
+    path = _sample_kn5(tmp_path)
+    page = _kn5_dump(path)
+    python = _kn5_python(path)
+    for key in ("format", "encoding", "counts", "connections", "links",
+                "models", "materials", "firstGeometry"):
+        assert _rounded(page[key]) == _rounded(python[key]), f"{key} differs"
+    assert page["extra"]["kn5Version"] == 6
+    assert page["extra"]["missingTextures"] == ["body_n.dds"]
+
+
+@needs_clang
+@needs_node
+def test_geometry_the_file_switched_off_is_not_drawn(built, tmp_path):
+    """A car ships with its own spares — a shattered windscreen behind the
+    clear one, a blurred disc inside each wheel — every one switched off until
+    the game wants it.  Drawn anyway, the Mercedes comes out with cracked glass
+    in every window and two cockpits.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    triangle = [
+        ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0), (1.0, 0.0, 0.0)),
+        ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 0.0), (1.0, 0.0, 0.0)),
+        ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0), (1.0, 0.0, 0.0)),
+    ]
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    drawn = fb.kn5_mesh("drawn", triangle, [0, 1, 2])
+    invisible = fb.kn5_mesh("cracked", triangle, [0, 1, 2], visible=False)
+    # Switched off a node up, which is how the blurred wheels are switched off.
+    under_an_off_node = fb.kn5_dummy(
+        "RIM_BLUR_LF", identity, fb.kn5_mesh("blur", triangle, [0, 1, 2]), 1,
+        active=False)
+    tree = fb.kn5_dummy("car", identity,
+                        drawn + invisible + under_an_off_node, 3)
+    path = tmp_path / "switched.kn5"
+    path.write_bytes(fb.build_kn5(materials=[fb.kn5_material("paint")], tree=tree))
+
+    result = _run(["node", str(WEB / "test" / "hidden.js"), str(path)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_a_texture_reaches_the_gpu_the_right_way_up_and_with_its_colour(built):
+    """FBX texture space has V running upwards, so V=0 must sample the bottom
+    of the picture — the viewer turns each image over on the way in rather than
+    in the shader, so the UVs stay as the file wrote them.
+
+    That turn is easy to lose without anything saying so. `UNPACK_FLIP_Y_WEBGL`
+    is what a canvas or an ImageData upload obeys, and an `ImageBitmap` ignores
+    it in silence. A model is a poor witness: a car's UV islands are scattered
+    over the sheet, so a flip moves the paint about rather than turning the car
+    over, and it reads as some other fault entirely — which is how it got past
+    a suite that renders four cars and reads their pixels back.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    result = _run(["node", str(WEB / "test" / "texorient.js")],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_transparency_that_lives_in_a_texture_rather_than_in_a_factor(built, tmp_path):
+    """A racing game's cars state no opacity factor at all: a windscreen keeps
+    its 26% in the alpha channel of the picture it wears, a badge keeps its
+    outline there, and a tail lamp its tint.
+
+    And a material that never asked for any of that must not be given it — the
+    light housings on a Cullinan carry an ambient-occlusion map whose alpha is
+    nothing at all, and read as coverage every lamp on the car disappears.
+
+    And where the alpha is zero throughout, the colour still has to arrive.
+    Multiplied by its own alpha on the way to the GPU — which is what a browser
+    does by default, and all a 2D canvas can do — it does not: a Renault 5
+    Turbo whose seats, carpet and dashboard are `.dds` files with an empty
+    alpha channel comes out as a black car.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    files = []
+    for name, kwargs in (
+        ("blend", {"blend": 1}),
+        ("mask", {"blend": 0, "alpha_tested": True, "cutoff": 0.5}),
+        ("opaque", {"blend": 0}),
+        # An alpha channel of nothing at all, which is what a `.dds` written
+        # out of the game routinely carries beside a colour that matters.
+        ("empty", {"blend": 0, "shell_alpha": 0}),
+    ):
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.kn5_shell_and_core(**kwargs))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "texalpha.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_node
+def test_the_page_reads_a_real_car_to_its_last_byte():
+    """Set ``FBXTOOL_KN5`` to a car out of the game; none is checked in."""
+    candidate = os.environ.get("FBXTOOL_KN5")
+    if not candidate or not Path(candidate).is_file():
+        pytest.skip("set FBXTOOL_KN5 to a real .kn5 file to run this test")
+    page = _kn5_dump(candidate)
+    doc = read_fbx(candidate)
+    assert not any("past the end" in w for w in page["warnings"])
+    assert page["extra"]["vertices"] == doc.extra["vertices"]
+    assert page["extra"]["triangles"] == doc.extra["triangles"]
+    assert page["extra"]["meshes"] == doc.extra["meshes"]
+    assert page["extra"]["materials"] == doc.extra["materials"]
+    assert page["connections"] == len(doc.root.path("Connections").children)
+
+
 # --------------------------------------------- how a reflection is read
 
 

@@ -10,6 +10,7 @@ from .ascii import is_ascii_fbx, parse_ascii
 from .binary import MAGIC, is_binary_fbx, parse_binary
 from .blend import is_blend, parse_blend
 from .gltf import is_gltf, parse_gltf, starts_json_object
+from .kn5 import is_kn5, parse_kn5
 from .maxfile import is_compound, parse_max
 from .model import Document, UnsupportedFormatError
 from .obj import is_obj, parse_obj
@@ -25,8 +26,8 @@ def detect_format(data: bytes) -> str:
     """Identify a file from its head.
 
     Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"blend"``,
-    ``"gltf"``, ``"max"``, or ``"unknown"``. The FBX names are kept as they
-    were so existing callers continue to work.
+    ``"gltf"``, ``"max"``, ``"kn5"``, or ``"unknown"``. The FBX names are kept
+    as they were so existing callers continue to work.
 
     A ``.max`` is answered from its container alone, since what distinguishes
     it from another compound file is a stream too deep in to sniff; reading it
@@ -39,6 +40,8 @@ def detect_format(data: bytes) -> str:
     """
     if is_binary_fbx(data[: len(MAGIC)]):
         return "binary"
+    if is_kn5(data):
+        return "kn5"
     if is_compound(data):
         return "max"
     if is_blend(data):
@@ -73,8 +76,8 @@ def read_model(
 ) -> Document:
     """Read the model file at *path*, choosing the reader by content sniffing.
 
-    Handles FBX (binary and ASCII), Wavefront OBJ, glTF 2.0, Blender .blend
-    and 3ds Max .max files.
+    Handles FBX (binary and ASCII), Wavefront OBJ, glTF 2.0, Blender .blend,
+    3ds Max .max and Assetto Corsa .kn5 files.
     """
     path = os.fspath(path)
     with open(path, "rb") as handle:
@@ -90,6 +93,9 @@ def read_model(
             whole = handle.read()
             if is_gltf(whole):
                 return parse_gltf(whole, path=path, load_arrays=load_arrays)
+        if kind == "kn5":
+            handle.seek(0)
+            return parse_kn5(handle.read(), path=path, load_arrays=load_arrays)
         if kind == "max":
             handle.seek(0)
             return parse_max(handle.read(), path=path, load_arrays=load_arrays)
@@ -128,7 +134,7 @@ def read_model(
             return doc
     raise UnsupportedFormatError(
         f"{path}: unrecognised format — not FBX (binary or ASCII), OBJ, glTF, "
-        ".blend or .max"
+        ".blend, .max or .kn5"
     )
 
 
@@ -200,6 +206,8 @@ def parse_bytes(
     # the sniffing window costs nothing to recognise.
     if kind == "unknown" and starts_json_object(data) and is_gltf(data):
         kind = "gltf"
+    if kind == "kn5":
+        return parse_kn5(data, path=path, load_arrays=load_arrays)
     if kind == "max":
         return parse_max(data, path=path, load_arrays=load_arrays)
     if kind == "gltf":
@@ -226,5 +234,5 @@ def parse_bytes(
         return doc
     raise UnsupportedFormatError(
         "unrecognised format — not FBX (binary or ASCII), OBJ, glTF, "
-        ".blend or .max"
+        ".blend, .max or .kn5"
     )

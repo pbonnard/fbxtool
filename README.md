@@ -10,9 +10,10 @@ with **no dependencies** and without the Autodesk FBX SDK.
 | **glTF 2.0** (`.gltf` and `.glb`) | full — inspect, render and export; Draco-compressed geometry is decompressed |
 | **Blender `.blend`** | inspect and render, for the `MVert`/`MPoly`/`MLoop` layout |
 | **3ds Max `.max`** | inspect and render — Editable Poly and Editable Mesh, with materials and the textures they name |
+| **Assetto Corsa `.kn5`** | full — inspect and render, with the textures embedded in it decoded from DDS |
 
-OBJ, glTF, `.blend` and `.max` are normalised into the same record tree as FBX,
-so every option and the viewer apply to them unchanged.
+OBJ, glTF, `.blend`, `.max` and `.kn5` are normalised into the same record tree
+as FBX, so every option and the viewer apply to them unchanged.
 
 ```
 $ fbxinfo samples/cube_binary.fbx
@@ -528,6 +529,174 @@ apiece; the twelfth assigns none to any node, which is what its nodes say and
 not something to work around. On the one that ships an FBX
 export of the same scene beside it, the two agree exactly: 217,930 vertices and
 the same bounds to the decimal.
+
+### Assetto Corsa files
+
+`fbxinfo car.kn5` reads Assetto Corsa's own model file — what ksEditor writes
+out of 3ds Max for the game to load. One binary file holds the whole car:
+its textures, its materials with every shader parameter, and the node tree
+that places them.
+
+```
+$ fbxinfo f_e63.kn5
+File
+────
+  Path:        f_e63.kn5
+  Size:        78.9 MiB
+  Format:      Assetto Corsa kn5
+  Encoding:    binary
+  kn5 version: 6
+  Scene:       889 nodes, 396 meshes, 7 deep
+  Geometry:    412,529 vertices, 454,543 triangles
+  Not drawn:   11 inactive node(s), 6 hidden mesh(es)
+  Materials:   150 (150 worn by a mesh)
+  Shaders:     ksBrakeDisc, ksBrokenGlass, ksPerPixel, ksPerPixelAT, ksPerPixelAT_NM, ksPerPixelAlpha …
+  Textures:    135 embedded, 58.8 MiB — 111 DDS, 24 PNG
+
+Global settings
+───────────────
+  Axis system: up +Y, front +Z, right -X
+  Units:       100 cm per unit (metres)
+```
+
+There is no specification and nothing above the record level says how long
+anything is: the file is a texture table, a material table and a node tree,
+read straight through from the first byte to the last. A field mis-sized
+anywhere walks off the whole of the rest — which is why the tests check that
+the cursor lands exactly on the end of the file, and why the reader refuses a
+node class it does not know rather than carrying on.
+
+Both versions in the wild are read; version 6 puts one more number in the
+header and moves nothing else. A mesh's vertices are interleaved — position,
+normal, UV and tangent, 44 bytes apiece, or 76 with weights on a skinned one —
+and are unpacked only when arrays are asked for, which is what keeps `--brief`
+on an 80 MB car down to a tenth of a second.
+
+Two things are turned round on the way in. The game measures V downwards from
+the top of a texture, as Direct3D does and FBX does not, so V is flipped; left
+alone, every badge and number plate on the car is upside down. And the
+transforms are Direct3D's row-major 4×4 with the translation in the last row —
+the same sixteen numbers in the same order as a column-major matrix acting on
+column vectors, so they decompose as they stand, except that a negative
+determinant is kept as a negative scale. A right-hand wheel is the left one
+turned half round, and taken as a rotation a genuinely mirrored part comes back
+the right way round and inside out.
+
+Nothing else is moved. The game's axes are right-handed with Y up and +Z
+towards the front of the car, which leaves +X pointing at its left-hand side;
+that is what `GlobalSettings` says, rather than mirroring a car to make it look
+like something else.
+
+**Materials.** A kn5 material has no colour of its own — `txDiffuse` is the
+albedo, and `ksAmbient` and `ksDiffuse` weight the ambient and direct halves of
+the game's own lighting rather than tinting anything — so the diffuse colour is
+white and the texture is what is seen. `ksSpecularEXP` is the shininess
+exponent, and `fresnelC` is a reflectance facing you, so that is what it is
+written as, rather than a Phong highlight that has to be capped before it is
+believed. Every parameter the file names is also carried under the name it
+named it with, so a shader setting with no FBX spelling is still there to read.
+
+**Metals.** A kn5 states no metalness. The game shades a car with a Blinn-Phong
+highlight and a Schlick Fresnel over it — `fresnelC` facing you rising to
+`fresnelMaxLevel` at grazing, over `fresnelEXP` — and chrome is simply a
+material whose `fresnelC` an artist set high.
+
+But that number is a reflectance at normal incidence, and it is the one place
+the two kinds of surface cannot be confused: **no dielectric reflects more than
+about 17% facing you** — diamond, at an index of refraction of 2.42 — **and no
+metal less than about half**, iron and chromium being the dullest of them.
+Glass and plastic sit near 4%, and an artist writing 15% for a windscreen is
+still describing one. So a reflectance between the two is read as a surface
+partly of each, and the diffuse and the reflectance are split by it the way
+every other importer here splits them.
+
+Nothing is read from a surface the file also says is see-through: light passes
+through a dielectric and not through a conductor, so a windscreen with a strong
+reflection is a windscreen.
+
+What comes out is what you would pick by hand. Across fifteen cars it finds the
+mirrors, the chrome, the alloy and the exhaust tips and nothing else: a
+Cullinan's `mirror` at 1.00 and its `int_chrome` and `light_chrome` at 0.39; a
+Puma's `Ext_chrome` at 0.70 and `Ext_exhaust` at 0.24. Where an artist stated
+nothing it reads zero rather than guessing from a material's name — an Alfa
+Brera's `chrome` and its `body` are the same numbers to three decimal places,
+and the whole of the difference between them is the picture each one wears.
+
+The viewer takes that as a stronger reflection but still draws the diffuse
+under it, which is what the game itself does; only a material carrying a
+metallic-roughness map has its diffuse cancelled per pixel. An exported `.glb`
+carries the metalness as `metallicFactor`.
+
+**Texture slots.** `txDiffuse`, `txNormal` and `txGlow` fill the FBX slots that
+mean the same thing. Everything else keeps the game's own name — `txMaps` is
+not a metallic-roughness map however much it looks like one, and a map drawn
+from the wrong end is worse than one not drawn. On the shaders that model a car
+being crashed, `txNormal` is not the surface's own relief either: it is the
+dents, blended in as damage accumulates. The Mercedes' body names a
+1024-square of them there, and drawn at face value every panel comes out beaten
+in, with the sun catching each crease pink.
+
+**What the game switched off.** A car ships with its own spares — a shattered
+windscreen behind the clear one, a blurred disc inside each wheel, a low-detail
+cockpit inside the real one — each of them a mesh marked invisible or a node
+marked inactive. They are read, counted and reported, and they are not drawn;
+visibility descends, so a node switched off takes the twelve meshes under it
+with it. Drawn anyway, the Mercedes comes out with cracked glass in every
+window and two cockpits.
+
+**Textures.** They are carried as bytes on the `Video` clip, the way an
+embedded FBX texture is, and one `Texture` record is shared by every material
+that names it: a car's paint is worn by dozens, and copying sixty megabytes of
+DDS once per slot describes nothing. A LOD or a skin carries no textures at all
+and reads them from the car's main `.kn5` — so the ones a material names and
+the file has not got are listed rather than left to be guessed at.
+
+The viewer decodes DDS itself — BC1, BC2 and BC3, BC4 and BC5, and
+uncompressed surfaces read by their channel masks. No browser will make an
+image of one, and 111 of that Mercedes' 135 textures are DDS, so without it the
+car opens as a grey model with no paint, no badges and no dials.
+
+**A protected car** is a different thing again, and the report says which kind
+of file it has been given rather than leaving a shattered model to be taken for
+a bug in the reader. Three of fifteen cars to hand are published this way, and
+they say so themselves: the last forty-two bytes are Custom Shaders Patch's
+`__AC_SHADERS_PATCH_KN5ENC_v1__` marker, the offset the encrypted part starts
+at, and a version. In front of it stands a whole, readable kn5 that has been
+*spoiled to match* — every texture in the table replaced by one seventy-byte
+PNG of a single blue pixel under the name of the picture that used to be there,
+and the vertex stream scrambled.
+
+Nothing in the model says the second part. Its counts are right, its normals
+are unit vectors and every index is in range, so a reader has no reason to
+doubt it — a Mercedes CLS63 comes out as a car-shaped explosion of shards. What
+gives it away is the geometry against itself: **a triangle's corners in order
+give it a facing, and the normals its vertices carry should agree**, because
+the exporter wrote both from one surface. Two dozen triangles a mesh settles
+it. Twelve sound cars sit between 95% and 100% agreeing; the three spoiled ones
+sit on a coin toss — 49.6%, 50.1%, 50.8%.
+
+So the file is reported as protected, the geometry as not the shape that was
+modelled, and the textures as held back with the rest of it. **The game
+decrypts what follows; nothing here does, and nothing here tries.** The stand-in
+is not drawn either way — carried, it paints the whole car one translucent
+blue — so what comes up is the model in its own material colours with every
+texture listed as one to go and find. A car spoiled without the marker is
+caught by the same geometry check and reported on its own.
+
+Read on that car and its three LODs plus its collider: all five parse to the
+last byte, 3,161 bytes to 82.7 MB, and the whole one renders — 434,279
+triangles once its spares are left switched off, with 80 textures decoded, in
+under a tenth of a second of parsing.
+
+A material the file marks `AlphaBlend` or alpha-tested says so in its
+`AlphaMode`, and its transparency lives in the alpha channel of its diffuse
+texture — which is where the viewer reads it from, per pixel. See
+[Transparency](#transparency).
+
+What is not read: the animations in `animations/`, the physics in `data.acd`,
+and the `.knh` hierarchies beside the model, none of which are geometry — nor
+the encrypted half of a protected car, which is somebody's work kept back on
+purpose.
 
 ### What gets reported
 
@@ -1275,6 +1444,49 @@ Something the tool has been given and cannot read is not something it is
 missing, and the two are said differently: one asks for the folder, the other
 asks for a PNG.
 
+### DirectDraw surfaces
+
+The same problem again, and the one that matters most: a `.dds` holds blocks
+meant for a GPU rather than a picture, no browser will decode one, and Assetto
+Corsa keeps almost every texture in one — 111 of the 135 inside a single
+Mercedes. `web/app/dds.js` decodes the top mip level to RGBA: BC1, BC2 and BC3,
+BC4 and BC5 (whose missing third channel is rebuilt, since a normal is a unit
+vector), and uncompressed surfaces read by their **channel masks** rather than
+by a table of layouts — a mask says which bits of a pixel are which channel, so
+B8G8R8A8 and R5G6B5 need no entry apiece.
+
+BC3's alpha is where a decoder goes wrong quietly: sixteen three-bit selectors
+over six bytes, which read as one 48-bit number come out as zero. Glass and a
+spinning wheel are both fully transparent textures in a car, so alpha read as
+zero is indistinguishable from alpha not read at all — and the tests hold the
+interpolated ramp against the values the block was written with. BC6H, BC7 and
+floating-point surfaces are declined rather than guessed at.
+
+**Colour and alpha are kept apart all the way to the GPU**, which is less
+obvious than it sounds. Multiplied together — which is what a browser does by
+default, and the only thing a 2D canvas can do, since that is how it stores
+pixels — a texel at zero alpha loses its colour outright: dividing it back out
+is a division by nothing. On a texel nobody sees that costs nothing. On a
+material that never asked for alpha in the first place it costs the whole
+picture, and a `.dds` written out of this game routinely carries an alpha
+channel of nothing at all beside a colour that matters — an A8R8G8B8 whose
+alpha byte was simply never written, or an A8L8 that is really an L8. A Renault
+5 Turbo has twenty-four of them: its seats, its carpet, its dashboard, its
+interior plastic and its rubber, every one of which drew as a black panel.
+Resizing with `createImageBitmap` instead of a canvas keeps them, so long as
+every call in the chain is told not to premultiply — one default anywhere has
+already thrown the colour away by the time the next asks for it back.
+
+The turn each texture takes on the way in has to be asked for of the bitmap
+too. V runs upwards in FBX texture space, so V=0 must sample the *bottom* of
+the picture, and the viewer turns each image over rather than doing it in the
+shader — but `UNPACK_FLIP_Y_WEBGL` is what a canvas or an `ImageData` upload
+obeys, and an `ImageBitmap` ignores it in silence. A model is a poor witness to
+that: a car's UV islands are scattered over the sheet, so a flip moves the
+paint about rather than turning the car over, and it reads as some other fault
+entirely. The array texture is asked directly instead, with a picture that
+cannot be mistaken either way up.
+
 ### Importing glTF
 
 The same page reads glTF back, so a `.glb` or a `.gltf` opens like any other
@@ -1406,6 +1618,27 @@ Transparency reaches the viewer from every format: `Opacity` and
 alpha of a Blender material's colour. Both the Mercedes FBX and the `.blend` of
 the same car carry it — `WindowsTint` at 0.5, `Lights_Glass` at 0.25 — so the
 windows show the interior rather than a black panel.
+
+A factor is not the only place it lives, though, and on a game's cars it is not
+where any of it lives. A material that says it is **blended** takes its
+coverage from the alpha channel of the colour texture it wears, per pixel: a
+Rolls-Royce Cullinan's windscreen states no factor at all and keeps its 26% in
+a 128-square of grey, its interior glazing keeps a mask cut to the shape of
+each window, and its tail lamps keep their tint the same way. Read as a factor
+alone every one of them is a solid panel. A material that says it is **cut
+out** is tested against that alpha instead and stays in the solid pass, since a
+grille with its holes dropped is opaque everywhere it is drawn at all — cut at
+or below the threshold rather than under it, so a file stating zero drops what
+is not there, and never above one eight-bit step, because the sampler filters
+between mip levels and a badge's transparent surround comes back a hair above
+zero a level or two down.
+
+Which pass a triangle belongs to is a property of its material, not of the
+pixel: a sheet whose alpha comes out of a texture goes in the blended pass
+wherever that texture puts it, so it never lays down depth that the glass
+behind it then fails against. Only a material that says nothing about blending,
+or that has no colour texture to say it with, stays in the solid pass — so a
+file with nothing transparent still never pays for the second pass.
 
 ## Library
 
@@ -1630,7 +1863,9 @@ exporter wrote use them:
 | `samples/Shelby.fbx` | 44 parts in their own spaces, one material on 24 of them, 20 materials carrying nothing at all |
 
 `FBXTOOL_SAMPLE` and `FBXTOOL_SCENE` point those tests at your own files;
-`FBXTOOL_BLEND` does the same for a `.blend`, of which none is checked in.
+`FBXTOOL_BLEND` does the same for a `.blend` and `FBXTOOL_KN5` for an Assetto
+Corsa car, of which none of either is checked in — a car is tens of megabytes
+and not ours to redistribute.
 
 `samples/cube_ascii.fbx` is checked in as source; `samples/cube_binary.fbx` and
 `samples/scene_parts.fbx` are generated by the same minimal writer the tests

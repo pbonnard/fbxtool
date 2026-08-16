@@ -102,6 +102,12 @@ async function main() {
         encoding: doc.encoding,
         format: doc.format || 'fbx',
         meshes: (doc.extra && doc.extra.meshes) || 0,
+        // A `.kn5` carries its textures inside it, so whether any were drawn
+        // is answerable from the file alone rather than from its name — unless
+        // it was published with them stripped out, and then there are none to
+        // draw and the report says so.
+        embedded: (doc.extra && !doc.extra.placeholderTextures
+          && doc.extra.textures) || 0,
         version: doc.version,
         records: analysis.totalRecords,
         objects: analysis.objects.length,
@@ -144,6 +150,12 @@ async function main() {
     }
     check('no warnings', result.warnings.length === 0,
       result.warnings.length ? result.warnings.join('; ') : 'clean');
+    if (result.format === 'kn5' && result.embedded > 0) {
+      // Every one of them is a DDS, which no browser will decode: a car whose
+      // textures did not come back is a grey model with no paint on it.
+      check('embedded textures decoded', result.textureLayers > 0,
+        `${result.textureLayers} of ${result.embedded} layer(s)`);
+    }
     if (expectTexture) {
       check('UVs present', result.hasUv);
       check('texture uploaded', result.textureLayers > 0,

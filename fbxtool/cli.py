@@ -21,6 +21,7 @@ examples:
   fbxinfo model.obj                     the same report for a Wavefront OBJ
   fbxinfo scene.blend                   Blender container: version, blocks, DNA
   fbxinfo model.glb                     glTF 2.0, either container
+  fbxinfo car.kn5                       an Assetto Corsa model, textures and all
   fbxinfo scene.fbx --tree --depth 3    the record tree, three levels deep
   fbxinfo scene.fbx --objects --props   every object plus full property values
   fbxinfo scene.fbx --json > scene.json machine-readable output
@@ -31,6 +32,8 @@ normalised into the same record tree as FBX, so every option below applies.
 A .blend is reported as a container — version, file-blocks and SDNA — since
 its struct layouts are Blender's internal business and change between
 releases; no geometry is extracted from one.
+A .kn5 is Assetto Corsa's own model file: its textures, materials and node
+tree are read out of the one file, and the same report applies.
 """
 
 
@@ -39,14 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="fbxinfo",
         description=(
             "Report the format version and object structure of model files: "
-            "FBX (binary and ASCII), Wavefront OBJ, glTF 2.0, and Blender "
-            ".blend."
+            "FBX (binary and ASCII), Wavefront OBJ, glTF 2.0, Blender .blend, "
+            "3ds Max .max and Assetto Corsa .kn5."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("files", metavar="FILE", nargs="+",
-                        help="model file(s) to inspect: .fbx, .obj, .gltf, .glb or .blend")
+                        help="model file(s) to inspect: .fbx, .obj, .gltf, .glb, "
+                             ".blend, .max or .kn5")
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -186,6 +190,8 @@ def _brief(path: str, analysis) -> str:
     elif doc.format == "gltf":
         descriptor = ("glTF " + (doc.extra.get("gltf_version") or "2.0")
                       + ("  |  .glb" if doc.encoding == "binary" else "  |  .gltf"))
+    elif doc.format == "kn5":
+        descriptor = f"Assetto Corsa kn5 v{doc.extra.get('kn5_version', '?')}"
     else:
         version = analysis.version
         descriptor = f"{doc.encoding}  |  " + (version.label if version

@@ -16,6 +16,12 @@ const FbxViewer = (function () {
    * 0.999 for "opaque", which is not worth a second pass. */
   const OPAQUE = 0.996;
 
+  /* What a material says about its own coverage, as the shader numbers it.
+   * `BLEND` takes the alpha of its colour texture as it is; `MASK` cuts the
+   * surface away below the threshold beside it and is solid everywhere else.
+   * Anything the file did not say is opaque. */
+  const ALPHA_MODES = { BLEND: 1, MASK: 2, OPAQUE: 0 };
+
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
@@ -442,6 +448,16 @@ ${SHADOW_LOOKUP}
     // is. Zero for everything that has none, which is most things.
     float coatF0 = 0.0;
     float coatRoughness = 0.05;
+    /* How the file asked to be blended: 0 opaque, 1 blended by the alpha of
+     * its own colour texture, 2 cut out against it.
+     *
+     * An opacity factor is not the only place transparency lives, and on a
+     * racing game's cars it is not where any of it lives: a windscreen states
+     * no factor at all and keeps its 26% in the alpha channel of the picture
+     * it wears, a badge keeps its outline there, and a tail lamp its tint.
+     * Read as a factor alone every one of them is a solid panel. */
+    int alphaMode = 0;
+    float alphaCutoff = 0.0;
     // The third row holds opacity and which material group this slot belongs
     // to; the group is wanted in every shading mode, for the highlight.
     vec4 extra = vec4(0.0, -1.0, 0.0, 0.0);
@@ -452,6 +468,8 @@ ${SHADOW_LOOKUP}
       vec4 over = texelFetch(uPalette, ivec2(slot, 4), 0);
       coatF0 = clamp(over.r, 0.0, 1.0);
       coatRoughness = clamp(over.g, 0.05, 1.0);
+      alphaMode = int(over.b + 0.5);
+      alphaCutoff = over.a;
     }
     if (uMode == 0 && uPaletteSize > 0) {
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
@@ -465,7 +483,21 @@ ${SHADOW_LOOKUP}
       if (uUseTextures == 1 && layer >= 0) {
         // A bound diffuse texture replaces the flat colour, as most DCC tools
         // and viewers treat it. The sampler is sRGB, so this is already linear.
-        albedo = texture(uTextures, vec3(vUv, float(layer))).rgb;
+        vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
+        albedo = painted.rgb;
+        /* …and its fourth channel is how much of the surface is there, for a
+         * material that said that is where its transparency lives.
+         *
+         * Cut out at or below the threshold rather than under it: a file that
+         * states a threshold of zero means "drop what is not there at all",
+         * and taken strictly that would keep every hole in a grille. One
+         * eight-bit step is the floor, because the sampler filters between
+         * mip levels and a badge's transparent surround comes back a hair
+         * above zero a level or two down — kept, it draws as a solid box
+         * around the badge, since a cut-out surface is opaque wherever it is
+         * drawn at all. */
+        if (alphaMode == 2 && painted.a <= max(alphaCutoff, 1.0 / 255.0)) discard;
+        if (alphaMode == 1) opacity *= painted.a;
       }
       /* A metallic-roughness map, where the material has one.
        *
@@ -494,9 +526,11 @@ ${SHADOW_LOOKUP}
     } else if (uMode == 1) {
       albedo = indexColour(vMaterial);
       opacity = 1.0;
+      alphaMode = 0;
     } else {
       albedo = uClayColour;
       opacity = 1.0;
+      alphaMode = 0;
     }
 
     // Picking a material out of the list marks where it is on the model.
@@ -508,8 +542,15 @@ ${SHADOW_LOOKUP}
       albedo = mix(albedo, vec3(0.15, 0.62, 1.0), 0.55);
     }
 
-    // Each pass takes the half of the scene it is set up to draw.
-    bool blended = opacity < uOpaqueLimit;
+    /* Each pass takes the half of the scene it is set up to draw.
+     *
+     * Which half a triangle belongs to is a property of its material and not
+     * of the pixel: a windscreen whose alpha comes out of a texture is see-
+     * through wherever that texture is, and drawing the sheet in the solid
+     * pass where it happens to be opaque would lay down depth the glass behind
+     * it then fails against. Cut-out materials stay solid — a grille with its
+     * holes dropped is opaque everywhere it is drawn at all. */
+    bool blended = opacity < uOpaqueLimit || alphaMode == 1;
     if (blended != (uPass == 1)) discard;
 
     vec3 viewDir = normalize(-vViewPosition);
@@ -1016,9 +1057,11 @@ ${SHADOW_LOOKUP}
      * group, the metallic-roughness map's layer and the metalness that map
      * scales, then the relief — which map shapes the surface, how strongly and
      * which kind it is — and last the clear coat, which is how much a mirror
-     * laid over the whole reflects and how polished that mirror is. Floats, because the values are linear and eight
-     * bits of a linear ramp bands badly in the darks — the Mercedes' interior
-     * sits at 0.05.
+     * laid over the whole reflects and how polished that mirror is, beside how
+     * the file asked to be blended and the threshold it asked to be cut at.
+     *
+     * Floats, because the values are linear and eight bits of a linear ramp
+     * bands badly in the darks — the Mercedes' interior sits at 0.05.
      */
     setPalette(materials) {
       const gl = this.gl;
@@ -1064,7 +1107,18 @@ ${SHADOW_LOOKUP}
           ? Math.min(1, Math.max(0, material.coat)) : 0;
         data[(width * 4 + i) * 4 + 1] = typeof material.coatRoughness === 'number'
           ? Math.min(1, Math.max(0.05, material.coatRoughness)) : 0.05;
-        if (opacity < OPAQUE) {
+        /* How the file asked to be blended, and against what.
+         *
+         * Only meaningful with a colour texture to read the alpha out of, so a
+         * material that names none is left opaque rather than sent to a pass
+         * that would draw it exactly as the solid one already had.
+         */
+        const painted = Number.isInteger(material.layer) && material.layer >= 0;
+        const mode = painted ? ALPHA_MODES[material.alphaMode] || 0 : 0;
+        data[(width * 4 + i) * 4 + 2] = mode;
+        data[(width * 4 + i) * 4 + 3] = typeof material.alphaCutoff === 'number'
+          ? Math.min(1, Math.max(0, material.alphaCutoff)) : 0.5;
+        if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
         }
@@ -1083,11 +1137,11 @@ ${SHADOW_LOOKUP}
      * common square first. That costs some fidelity on non-square textures but
      * keeps the whole mesh to a single draw call.
      */
-    setTextures(images, edge = 1024) {
+    async setTextures(images, edge = 1024) {
       this.textureLayers = images.length;
       // sRGB storage: image files hold display-encoded colour, and shading has
       // to happen in linear light. The sampler undoes the encoding for free.
-      this._uploadArray(this.textureArray, images, this.gl.SRGB8_ALPHA8, edge);
+      return this._uploadArray(this.textureArray, images, this.gl.SRGB8_ALPHA8, edge);
     }
 
     /**
@@ -1097,9 +1151,9 @@ ${SHADOW_LOOKUP}
      * and its blue a metalness, both already linear. Decoding it as sRGB would
      * bend both curves, so it is stored as it was written.
      */
-    setFinishTextures(images, edge = 1024) {
+    async setFinishTextures(images, edge = 1024) {
       this.finishLayers = images.length;
-      this._uploadArray(this.finishArray, images, this.gl.RGBA8, edge);
+      return this._uploadArray(this.finishArray, images, this.gl.RGBA8, edge);
     }
 
     /**
@@ -1109,36 +1163,62 @@ ${SHADOW_LOOKUP}
      * picture, and decoding either as sRGB would bend what it says. Stored as
      * written, like the metallic-roughness maps beside them.
      */
-    setBumpTextures(images, edge = 1024) {
+    async setBumpTextures(images, edge = 1024) {
       this.bumpLayers = images.length;
-      this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
+      return this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
     }
 
-    _uploadArray(target, images, internalFormat, edge = 1024) {
+    async _uploadArray(target, images, internalFormat, edge = 1024) {
       const gl = this.gl;
       if (!images.length) { this.dirty = true; return; }
 
       const size = Math.min(edge, gl.getParameter(gl.MAX_TEXTURE_SIZE));
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const context = canvas.getContext('2d');
-
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
       gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, internalFormat, size, size, images.length,
         0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      images.forEach((image, layer) => {
-        context.clearRect(0, 0, size, size);
-        // FBX texture space has V running upwards; flip once here rather than
-        // in the shader so the UVs stay as the file wrote them.
-        context.save();
-        context.translate(0, size);
-        context.scale(1, -1);
-        context.drawImage(image, 0, 0, size, size);
-        context.restore();
+
+      /* Resized by the decoder rather than drawn through a 2D canvas.
+       *
+       * A canvas holds its pixels premultiplied, and unmultiplying at zero
+       * alpha is a division by nothing: a texel that is fully transparent
+       * comes back black and takes its colour with it. That is only a texel
+       * nobody sees — until the material wearing it never asked for alpha at
+       * all, and then it is the whole picture. A `.dds` written out of this
+       * game routinely carries an alpha channel of nothing beside a colour
+       * that matters: one Renault 5 Turbo has twenty-four of them, its seats,
+       * its carpet, its dashboard and its interior plastic among them, and
+       * every one drew as a black panel.
+       *
+       * `createImageBitmap` resizes without that, so long as it is told not to
+       * premultiply — at every step, since one default anywhere in the chain
+       * has already thrown the colour away by the time the next is asked.
+       */
+      for (let layer = 0; layer < images.length; layer++) {
+        // eslint-disable-next-line no-await-in-loop -- one square at a time,
+        // rather than every texture of a car resident at once.
+        const bitmap = await createImageBitmap(images[layer], {
+          resizeWidth: size,
+          resizeHeight: size,
+          resizeQuality: 'high',
+          premultiplyAlpha: 'none',
+          /* FBX texture space has V running upwards; turn the picture over
+           * here rather than in the shader so the UVs stay as the file wrote
+           * them.
+           *
+           * It has to be asked for *of the bitmap*. `UNPACK_FLIP_Y_WEBGL` is
+           * what a canvas or an ImageData upload obeys, and an ImageBitmap
+           * ignores it without a word — no error, no warning, every texture on
+           * the car quietly upside down. */
+          imageOrientation: 'flipY',
+        });
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
         gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, size, size, 1,
-          gl.RGBA, gl.UNSIGNED_BYTE, canvas);
-      });
+          gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+        bitmap.close();
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
       gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);

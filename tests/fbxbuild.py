@@ -9,6 +9,7 @@ shapes a plain exporter never produces — not general-purpose exporters.
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import re
 import gzip
@@ -2430,3 +2431,261 @@ def build_finish_glb() -> bytes:
     out += struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
     out += struct.pack("<II", len(binary), 0x004E4942) + binary
     return bytes(out)
+
+
+# ------------------------------------------------- DirectDraw Surface (.dds)
+
+#: Header flags: caps, height, width, pixel format, mip count.
+_DDS_FLAGS = 0x1007
+_DDPF_ALPHAPIXELS = 0x1
+_DDPF_FOURCC = 0x4
+_DDPF_RGB = 0x40
+_DDPF_LUMINANCE = 0x20000
+
+
+def _dds_header(width: int, height: int, *, fourcc: bytes = b"",
+                bits: int = 0, masks=(0, 0, 0, 0), pixel_flags: int = 0) -> bytes:
+    """The 128 bytes in front of every DDS surface."""
+    flags = _DDPF_FOURCC if fourcc else pixel_flags
+    pixel_format = struct.pack("<II4sIIIII", 32, flags, fourcc or b"\x00" * 4,
+                               bits, *masks)
+    return (b"DDS " + struct.pack("<IIIIIII", 124, _DDS_FLAGS, height, width, 0, 0, 1)
+            + b"\x00" * 44 + pixel_format + struct.pack("<IIIII", 0x1000, 0, 0, 0, 0))
+
+
+def rgb565(red: int, green: int, blue: int) -> int:
+    """One 8-bit colour as the 16-bit endpoint a block format stores."""
+    return ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)
+
+
+def dds_bc1(colours=(0xF800, 0x001F), selectors=(0, 1, 2, 3)) -> bytes:
+    """One 4x4 BC1 tile: two endpoints and sixteen two-bit selectors.
+
+    The first four selectors are *selectors*; the rest pick endpoint zero. With
+    the endpoints in descending order the tile is in its four-colour mode,
+    which is what a plain opaque texture uses.
+    """
+    bits = 0
+    for at, pick in enumerate(selectors):
+        bits |= (pick & 3) << (2 * at)
+    return _dds_header(4, 4, fourcc=b"DXT1") + struct.pack("<HHI", *colours, bits)
+
+
+def dds_bc3(alpha=(255, 0), colours=(0xF800, 0x001F)) -> bytes:
+    """One 4x4 BC3 tile whose sixteen alpha selectors count 0..7 twice.
+
+    With the alpha endpoints in descending order the block interpolates eight
+    values, which is the mode a real texture is written in.
+    """
+    selectors = 0
+    for at in range(16):
+        selectors |= (at % 8) << (3 * at)
+    block = bytes(alpha) + selectors.to_bytes(6, "little")
+    return (_dds_header(4, 4, fourcc=b"DXT5") + block
+            + struct.pack("<HHI", *colours, 0))
+
+
+def dds_bgra(width: int, height: int, pixels: bytes) -> bytes:
+    """An uncompressed B8G8R8A8 surface — *pixels* is BGRA, as stored."""
+    return _dds_header(width, height, bits=32,
+                       masks=(0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000),
+                       pixel_flags=_DDPF_RGB | _DDPF_ALPHAPIXELS) + pixels
+
+
+def dds_luminance(width: int, height: int, pixels: bytes) -> bytes:
+    """An eight-bit greyscale surface, one byte a pixel."""
+    return _dds_header(width, height, bits=8, masks=(0xFF, 0, 0, 0),
+                       pixel_flags=_DDPF_LUMINANCE) + pixels
+
+
+# --------------------------------------------------- Assetto Corsa (.kn5)
+
+KN5_MAGIC = b"sc6969"
+
+
+def _kn5_text(value: str) -> bytes:
+    raw = value.encode("utf-8")
+    return struct.pack("<I", len(raw)) + raw
+
+
+def kn5_property(name: str, a: float = 0.0, b=(0.0, 0.0), c=(0.0, 0.0, 0.0),
+                 d=(0.0, 0.0, 0.0, 0.0)) -> bytes:
+    """One shader parameter: a name and four value groups, all written."""
+    return (_kn5_text(name) + struct.pack("<f", a) + struct.pack("<2f", *b)
+            + struct.pack("<3f", *c) + struct.pack("<4f", *d))
+
+
+def kn5_material(name: str, shader: str = "ksPerPixel", *, blend: int = 0,
+                 alpha_tested: bool = False, depth_mode: int = 0,
+                 properties: bytes = b"", property_count: int = 0,
+                 slots=()) -> bytes:
+    """One material: its shader, how it blends, its parameters and its maps."""
+    out = bytearray(_kn5_text(name) + _kn5_text(shader))
+    out += struct.pack("<BBi", blend, 1 if alpha_tested else 0, depth_mode)
+    out += struct.pack("<i", property_count) + properties
+    out += struct.pack("<i", len(slots))
+    for slot, number, texture in slots:
+        out += _kn5_text(slot) + struct.pack("<i", number) + _kn5_text(texture)
+    return bytes(out)
+
+
+def kn5_dummy(name: str, matrix, children: bytes = b"", child_count: int = 0,
+              active: bool = True) -> bytes:
+    """A node that places what hangs off it — Direct3D's row-major 4x4."""
+    return (struct.pack("<i", 1) + _kn5_text(name)
+            + struct.pack("<i", child_count) + bytes((1 if active else 0,))
+            + struct.pack("<16f", *matrix) + children)
+
+
+def kn5_mesh(name: str, vertices, indices, material: int = 0, *,
+             visible: bool = True, renderable: bool = True, layer: int = 0,
+             lod=(0.0, 0.0), radius: float = 1.0) -> bytes:
+    """A mesh node: interleaved vertices, ushort indices, then the tail.
+
+    *vertices* is a list of ``(position, normal, uv, tangent)``; the game
+    writes all four for every vertex, 44 bytes apiece.
+    """
+    out = bytearray(struct.pack("<i", 2) + _kn5_text(name)
+                    + struct.pack("<i", 0) + b"\x01")
+    out += bytes((1, 1 if visible else 0, 0))
+    out += struct.pack("<I", len(vertices))
+    for position, normal, uv, tangent in vertices:
+        out += struct.pack("<3f3f2f3f", *position, *normal, *uv, *tangent)
+    out += struct.pack("<I", len(indices))
+    out += struct.pack(f"<{len(indices)}H", *indices)
+    out += struct.pack("<iI", material, layer)
+    out += struct.pack("<2f", *lod)
+    out += struct.pack("<3f", 0.0, 0.0, 0.0) + struct.pack("<f", radius)
+    out += bytes((1 if renderable else 0,))
+    return bytes(out)
+
+
+def build_kn5(version: int = 6, *, textures=(), materials=(), tree: bytes = b"") -> bytes:
+    """An Assetto Corsa model file from the parts above.
+
+    *textures* is ``(name, bytes)`` pairs, written as the game writes them —
+    a kind, a name, a length and the payload — and *materials* is already
+    encoded by :func:`kn5_material`.
+    """
+    out = bytearray(KN5_MAGIC + struct.pack("<i", version))
+    if version > 5:
+        out += struct.pack("<i", 0)
+    out += struct.pack("<i", len(textures))
+    for name, payload in textures:
+        out += struct.pack("<i", 1) + _kn5_text(name)
+        out += struct.pack("<I", len(payload)) + payload
+    out += struct.pack("<i", len(materials))
+    for material in materials:
+        out += material
+    out += tree
+    return bytes(out)
+
+#: A cube's eight corners for the kn5 fixtures, the near face then the far one.
+#: Named apart from the `.blend` builder's own cube above, which is six quads
+#: rather than twelve triangles and is read through the SDNA.
+_KN5_CUBE_CORNERS = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+                     (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+
+#: Twelve triangles, wound anticlockwise seen from outside the cube.
+_KN5_CUBE_FACES = [
+    (4, 5, 6), (4, 6, 7),        # +Z
+    (0, 3, 2), (0, 2, 1),        # -Z
+    (1, 2, 6), (1, 6, 5),        # +X
+    (0, 4, 7), (0, 7, 3),        # -X
+    (3, 7, 6), (3, 6, 2),        # +Y
+    (0, 1, 5), (0, 5, 4),        # -Y
+]
+
+
+def kn5_cube(size: float = 1.0):
+    """A cube as ``(vertices, indices)`` for :func:`kn5_mesh`.
+
+    Normals point out from the centre, so the shading reads as a rounded box
+    rather than a flat one — which is beside the point here, but a vertex the
+    game's layout has no room to leave out has to hold something true.
+    """
+    vertices = []
+    for corner in _KN5_CUBE_CORNERS:
+        length = math.sqrt(3.0)
+        normal = tuple(v / length for v in corner)
+        vertices.append((tuple(v * size for v in corner), normal, (0.5, 0.5),
+                         (1.0, 0.0, 0.0)))
+    indices = [index for face in _KN5_CUBE_FACES for index in face]
+    # A face wound the wrong way is culled, and a fixture that draws nothing
+    # reads exactly like the thing it was written to catch.
+    for at in range(0, len(indices), 3):
+        a, b, c = (vertices[indices[at + k]][0] for k in range(3))
+        edge1 = [b[k] - a[k] for k in range(3)]
+        edge2 = [c[k] - a[k] for k in range(3)]
+        cross = (edge1[1] * edge2[2] - edge1[2] * edge2[1],
+                 edge1[2] * edge2[0] - edge1[0] * edge2[2],
+                 edge1[0] * edge2[1] - edge1[1] * edge2[0])
+        outward = [(a[k] + b[k] + c[k]) / 3 for k in range(3)]
+        assert sum(cross[k] * outward[k] for k in range(3)) > 0, "face wound inwards"
+    return vertices, indices
+
+
+#: What Custom Shaders Patch writes at the very end of a car it has encrypted.
+KN5_ENCRYPTED_MARKER = b"__AC_SHADERS_PATCH_KN5ENC_v1__"
+
+
+def kn5_encrypted(model: bytes, blocks=(("ver.body.x", 64),)) -> bytes:
+    """A car with its real model held back, as a protected one is published.
+
+    *model* is the spoiled copy left in front — a whole, readable kn5 — then
+    the named blocks that stand for the encrypted section, then the trailer
+    that says in plain text what has been done and where it starts.
+    """
+    out = bytearray(model)
+    start = len(out)
+    for name, size in blocks:
+        raw = name.encode("ascii")
+        out += struct.pack("<I", len(raw)) + raw
+        out += struct.pack("<I", size) + bytes((at * 37 + 11) % 256 for at in range(size))
+    out += struct.pack("<I", len(KN5_ENCRYPTED_MARKER)) + KN5_ENCRYPTED_MARKER
+    out += struct.pack("<II", start, 1)
+    return bytes(out)
+
+
+def kn5_scrambled(vertices, indices):
+    """The same triangles with every other one turned round.
+
+    Which is what a spoiled file looks like from the outside: the counts are
+    right, the normals are unit vectors, every index is in range, and half the
+    triangles face the other way from the surface their corners describe.
+    """
+    out = list(indices)
+    for at in range(0, len(out) - 2, 6):
+        out[at + 1], out[at + 2] = out[at + 2], out[at + 1]
+    return vertices, out
+
+
+def kn5_shell_and_core(*, blend: int = 1, alpha_tested: bool = False,
+                       cutoff: float = 0.5, shell_alpha: int = 64) -> bytes:
+    """A solid red cube inside a larger blue one whose texture is see-through.
+
+    Only the blue material's blending changes between fixtures, so what the
+    middle of the viewport comes back as is answering one question.
+    """
+    red = dds_bgra(4, 4, bytes([0, 0, 255, 255]) * 16)
+    blue = dds_bgra(4, 4, bytes([255, 0, 0, shell_alpha]) * 16)
+    # No Fresnel at all, so what is seen is the two colours and not a reflection.
+    core = kn5_material("core", "ksPerPixel",
+                        properties=kn5_property("fresnelC", 0.0), property_count=1,
+                        slots=(("txDiffuse", 0, "red.dds"),))
+    shell = kn5_material("shell", "ksPerPixelAlpha", blend=blend,
+                         alpha_tested=alpha_tested,
+                         properties=(kn5_property("fresnelC", 0.0)
+                                     + kn5_property("ksAlphaRef", cutoff)),
+                         property_count=2,
+                         slots=(("txDiffuse", 0, "blue.dds"),))
+    inner_v, inner_i = kn5_cube(0.4)
+    outer_v, outer_i = kn5_cube(1.0)
+    tree = kn5_dummy(
+        "scene",
+        (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        kn5_mesh("core", inner_v, inner_i, material=0)
+        + kn5_mesh("shell", outer_v, outer_i, material=1),
+        2)
+    return build_kn5(6, textures=[("red.dds", red), ("blue.dds", blue)],
+                     materials=[core, shell], tree=tree)

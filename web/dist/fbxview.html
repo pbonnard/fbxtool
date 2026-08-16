@@ -615,7 +615,7 @@ ul.record-tree .count { color: var(--muted); }
     <button id="picker-folder" type="button" title="Open a model with the images beside it">
       Open folder</button>
     <input id="file-input" type="file"
-           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.max,.bin,.json,.ktx2,.psd,image/*" multiple hidden>
+           accept=".fbx,.obj,.mtl,.blend,.gltf,.glb,.max,.kn5,.bin,.json,.ktx2,.psd,.dds,image/*" multiple hidden>
     <!-- A model downloaded as a folder keeps its images in a subfolder and
          names them by relative path. A file picker cannot reach them; a
          directory picker hands over everything under the folder at once. -->
@@ -5077,6 +5077,812 @@ const FbxMax = (function () {
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxMax;
 
+// ---- kn5.js ------------------------------------------------------------
+/* Read Assetto Corsa's `.kn5` into the record tree every other reader
+ * produces, so the report, the viewer, the material list and the exporter all
+ * work on it unchanged.
+ *
+ * A `.kn5` is what ksEditor writes out of 3ds Max for the game to load: one
+ * binary file holding the whole car, textures included.  Nothing in it is
+ * addressed by name at run time, so the file is a plain forward walk — a
+ * texture table, a material table, then a node tree whose meshes name their
+ * material by index.
+ *
+ *   kn5                               here
+ *   ------------------------------    ------------------------------------
+ *   a texture                         Texture + Video, bytes on the clip
+ *   a material                        Material, shader parameters and all
+ *   txDiffuse / txNormal              an OP link naming DiffuseColor / NormalMap
+ *   a dummy node                      Model (Null) with its transform
+ *   a mesh node                       Model (Mesh) and a Geometry
+ *   interleaved vertices              Vertices, LayerElementNormal, …UV
+ *   ushort indices                    a polygon run, every third index negated
+ *   Y up, metres, +Z to the front     declared as such in GlobalSettings
+ *
+ * Two things are turned round on the way in.  The game measures V downwards
+ * from the top of a texture, as Direct3D does and FBX does not, so V is
+ * flipped.  And the transforms are Direct3D's row-major 4x4 with the
+ * translation in the last row — which is the same sixteen numbers in the same
+ * order as a column-major matrix acting on column vectors, so they decompose
+ * as they stand.
+ *
+ * Nothing else is moved.  The game's axes are right-handed with Y up and +Z
+ * towards the front of the car, which leaves +X pointing at its left-hand
+ * side; that is what GlobalSettings is made to say, rather than mirroring a
+ * car to make it look like something else.
+ */
+'use strict';
+
+const FbxKn5 = (function () {
+  const CLASS_SEP = '\u0000\u0001';
+  //: "sc6969", the six bytes every kn5 begins with.
+  const MAGIC = [0x73, 0x63, 0x36, 0x39, 0x36, 0x39];
+
+  const NODE_CLASSES = { 1: 'Node', 2: 'Mesh', 3: 'SkinnedMesh' };
+  const BLEND_MODES = { 0: 'OPAQUE', 1: 'BLEND', 2: 'MASK' };
+  const VERTEX = 44;
+  const SKINNED_VERTEX = 76;
+
+  /* The kn5 slots that mean something to an FBX material. */
+  const SLOT_PROPERTIES = {
+    txDiffuse: 'DiffuseColor',
+    txNormal: 'NormalMap',
+    txGlow: 'EmissiveColor',
+  };
+
+  /**
+   * The FBX property a kn5 texture slot fills, under this shader.
+   *
+   * A slot with no FBX meaning keeps the name the game gives it: `txMaps` is
+   * not a metallic-roughness map however much it looks like one — its channels
+   * drive the game's own shader — and a map drawn from the wrong end is worse
+   * than one not drawn.
+   *
+   * On the shaders that model a car being crashed, `txNormal` is not the
+   * surface's own relief either — it is the dents, blended in as damage
+   * accumulates. A car as saved has none, so drawing it puts creases down the
+   * whole of a bonnet that has never been hit: the Mercedes' body names a
+   * 1024-square of dents there, and taken at face value every panel comes out
+   * beaten in, with the sun catching each crease pink.
+   */
+  function slotProperty(slot, shader) {
+    if (slot === 'txNormal' && /damage/i.test(shader)) return slot;
+    return SLOT_PROPERTIES[slot] || slot;
+  }
+
+  /* The most a dielectric reflects facing you: diamond, at an index of
+   * refraction of 2.42. Glass and plastic sit near 0.04, and an artist writing
+   * 0.15 for a windscreen is still describing one. Above this, nothing but a
+   * conductor reflects that much — and below half, no conductor does. */
+  const DIELECTRIC_CEILING = 0.17;
+  const METAL_FLOOR = 0.5;
+
+  /**
+   * How much of a conductor a surface reflecting this much must be.
+   *
+   * A kn5 states no metalness. The game shades a car with a Blinn-Phong
+   * highlight and a Schlick Fresnel over it, and chrome is simply a material
+   * whose `fresnelC` an artist set high. But `fresnelC` is a reflectance at
+   * normal incidence, and that is the one number where the two kinds of
+   * surface cannot be confused.
+   *
+   * Nothing is read from a surface the file also says is see-through — light
+   * passes through a dielectric and not through a conductor, so a windscreen
+   * with a strong reflection is a windscreen.
+   *
+   * Where an artist stated nothing this reads zero, rather than guessing from
+   * a material's name. Some cars are modelled entirely through the grazing
+   * level, which is what paint does too: an Alfa Brera's chrome and its body
+   * are the same numbers to three decimal places, and the difference between
+   * them is in the picture each one wears.
+   */
+  function metalness(facing, blended) {
+    if (blended || facing <= DIELECTRIC_CEILING) return 0;
+    return Math.min(1, (facing - DIELECTRIC_CEILING)
+      / (METAL_FLOOR - DIELECTRIC_CEILING));
+  }
+
+  const node = (name, props = [], children = []) => ({ name, props, children });
+  const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
+  const I = (value) => ({ code: 'I', typeName: 'int32', value: value | 0 });
+  const L = (value) => ({ code: 'L', typeName: 'int64', value });
+  const D = (value) => ({ code: 'D', typeName: 'float64', value: Number(value) });
+  const R = (value) => ({ code: 'R', typeName: 'raw', value });
+
+  const p70 = (name, kind, ...values) =>
+    node('P', [S(name), S(kind), S(''), S('A'), ...values]);
+
+  function array(code, values, length) {
+    const size = code === 'd' ? 8 : 4;
+    return {
+      code,
+      typeName: `${code === 'd' ? 'float64' : 'int32'}[]`,
+      array: { length, encoding: 0, byteLength: length * size, dataOffset: 0 },
+      values,
+      value: null,
+    };
+  }
+
+  /**
+   * A node's translation, rotation in degrees, and scale.
+   *
+   * The sixteen numbers are Direct3D's: rows are the basis vectors and the
+   * translation is the last of them.  Read as `m[col * 4 + row]` that is the
+   * same element order as a column-major matrix acting on column vectors,
+   * which is what the rest of the page works in.
+   *
+   * A mirrored node has a negative determinant and no rotation can produce
+   * one, so the flip is kept where it belongs — as a negative scale on X.
+   */
+  function placementOf(m) {
+    const basis = [0, 1, 2].map((row) => [0, 1, 2].map((col) => m[col * 4 + row]));
+    const scale = [0, 1, 2].map((col) => Math.hypot(basis[0][col], basis[1][col], basis[2][col]));
+    const determinant =
+      basis[0][0] * (basis[1][1] * basis[2][2] - basis[1][2] * basis[2][1])
+      - basis[0][1] * (basis[1][0] * basis[2][2] - basis[1][2] * basis[2][0])
+      + basis[0][2] * (basis[1][0] * basis[2][1] - basis[1][1] * basis[2][0]);
+    if (determinant < 0) scale[0] = -scale[0];
+    const r = [0, 1, 2].map((row) => [0, 1, 2].map(
+      (col) => (scale[col] ? basis[row][col] / scale[col] : 0)));
+    // R = Rz · Ry · Rx, FBX's XYZ order.
+    const clamped = Math.min(1, Math.max(-1, -r[2][0]));
+    const y = Math.asin(clamped);
+    let x;
+    let z;
+    if (Math.abs(r[2][0]) < 0.99999) {
+      x = Math.atan2(r[2][1], r[2][2]);
+      z = Math.atan2(r[1][0], r[0][0]);
+    } else {                       // looking straight up or down
+      x = Math.atan2(-r[1][2], r[1][1]);
+      z = 0;
+    }
+    const degrees = 180 / Math.PI;
+    return {
+      translation: [m[12], m[13], m[14]],
+      rotation: [x * degrees, y * degrees, z * degrees],
+      scale,
+    };
+  }
+
+  /* How many triangles of any one mesh are held against its normals, the share
+   * that has to agree, and how many must have been looked at before saying so.
+   * Twelve sound cars sit between 95% and 100%; a scrambled one is a coin toss. */
+  const WINDING_SAMPLE = 24;
+  const WINDING_FLOOR = 0.75;
+  const WINDING_MINIMUM = 200;
+
+  //: What Custom Shaders Patch writes at the very end of a car it has encrypted.
+  const ENCRYPTED_MARKER = '__AC_SHADERS_PATCH_KN5ENC_v1__';
+
+  /**
+   * Where a Custom Shaders Patch encrypted section starts, if there is one.
+   *
+   * A protected car is a whole kn5 with the model deliberately spoiled — the
+   * vertex stream scrambled, every texture replaced by one stand-in — followed
+   * by the real thing in named, encrypted blocks, and then a trailer saying so
+   * in plain text: this marker, the offset the encrypted part begins at, and a
+   * version. The game decrypts it. Nothing here does, and nothing here tries;
+   * what it can do is say which kind of file it has been given, so a shattered
+   * car is a fact about the file rather than a mystery about the reader.
+   */
+  function encryptedFrom(bytes) {
+    if (bytes.length < 64) return null;
+    const tail = bytes.subarray(bytes.length - 64);
+    const text = String.fromCharCode(...tail);
+    const at = text.lastIndexOf(ENCRYPTED_MARKER);
+    if (at < 0) return null;
+    const after = bytes.length - 64 + at + ENCRYPTED_MARKER.length;
+    if (after + 8 > bytes.length) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const start = view.getUint32(after, true);
+    return start > 0 && start <= bytes.length ? start : null;
+  }
+
+  /**
+   * Count triangles wound the way their own vertex normals point.
+   *
+   * A triangle's corners in order give it a facing, and every vertex of it
+   * carries a normal that should agree. In a sound file they always do — the
+   * exporter wrote both from the same surface — so the two are a check on each
+   * other that needs nothing outside the mesh.
+   *
+   * Cars are published deliberately spoiled, with the vertex stream scrambled
+   * so that anything but the game draws a shattered model. Nothing in the
+   * header says so: the counts are right, the normals are unit vectors, and
+   * every index is in range. This is what tells the difference.
+   */
+  function winding(view, mesh, tally) {
+    const triangles = Math.floor(mesh.indices.count / 3);
+    const take = Math.min(triangles, WINDING_SAMPLE);
+    if (!take || !mesh.vertices.count) return;
+    const step = Math.max(1, Math.floor(triangles / take)) * 3;
+    const { positions, normals } = mesh.vertices;
+    const idx = mesh.indices.raw;
+    for (let at = 0; at + 2 < idx.length; at += step) {
+      const i = idx[at], j = idx[at + 1], k = idx[at + 2];
+      const ax = positions[i * 3], ay = positions[i * 3 + 1], az = positions[i * 3 + 2];
+      const e1x = positions[j * 3] - ax;
+      const e1y = positions[j * 3 + 1] - ay;
+      const e1z = positions[j * 3 + 2] - az;
+      const e2x = positions[k * 3] - ax;
+      const e2y = positions[k * 3 + 1] - ay;
+      const e2z = positions[k * 3 + 2] - az;
+      const cx = e1y * e2z - e1z * e2y;
+      const cy = e1z * e2x - e1x * e2z;
+      const cz = e1x * e2y - e1y * e2x;
+      const scale = Math.hypot(cx, cy, cz);
+      if (scale < 1e-12) continue;             // a degenerate triangle faces nowhere
+      const nx = normals[i * 3] + normals[j * 3] + normals[k * 3];
+      const ny = normals[i * 3 + 1] + normals[j * 3 + 1] + normals[k * 3 + 1];
+      const nz = normals[i * 3 + 2] + normals[j * 3 + 2] + normals[k * 3 + 2];
+      const facing = cx * nx + cy * ny + cz * nz;
+      if (facing > 0.02 * scale) tally[0] += 1;
+      else if (facing < -0.02 * scale) tally[1] += 1;
+    }
+  }
+
+  /** True when these bytes are an Assetto Corsa model file. */
+  function looksLikeKn5(bytes) {
+    if (!bytes || bytes.length < 10) return false;
+    return MAGIC.every((byte, i) => bytes[i] === byte);
+  }
+
+  /** A forward walk over the file, which is all the format ever needs. */
+  class Cursor {
+    constructor(bytes) {
+      this.bytes = bytes;
+      this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      this.at = 0;
+      this.decoder = new TextDecoder('utf-8');
+    }
+
+    take(count) {
+      const start = this.at;
+      this.at += count;
+      if (this.at > this.bytes.length) {
+        throw new Error(`the file ends inside a record at byte ${start}`);
+      }
+      return start;
+    }
+
+    u8() { return this.bytes[this.take(1)]; }
+
+    i32() { return this.view.getInt32(this.take(4), true); }
+
+    u32() { return this.view.getUint32(this.take(4), true); }
+
+    f32() { return this.view.getFloat32(this.take(4), true); }
+
+    floats(count) {
+      const start = this.take(4 * count);
+      const out = new Array(count);
+      for (let i = 0; i < count; i++) out[i] = this.view.getFloat32(start + 4 * i, true);
+      return out;
+    }
+
+    text() {
+      const length = this.u32();
+      if (length > this.bytes.length - this.at) {
+        throw new Error(`a ${length}-byte name at ${this.at} runs past the file`);
+      }
+      const start = this.take(length);
+      return this.decoder.decode(this.bytes.subarray(start, start + length));
+    }
+
+    blob(length) {
+      const start = this.take(length);
+      return this.bytes.subarray(start, start + length);
+    }
+
+    skip(count) { this.take(count); }
+  }
+
+  /* ---------------------------------------------------------------- tables */
+
+  function readTextures(cursor) {
+    const count = cursor.i32();
+    if (count < 0) throw new Error(`the texture table claims ${count} entries`);
+    const textures = [];
+    for (let i = 0; i < count; i++) {
+      const kind = cursor.i32();
+      const name = cursor.text();
+      const size = cursor.u32();
+      // A slot marked inactive still carries its bytes; the game just does not
+      // load it. Dropping the payload would move the cursor off the next record.
+      textures.push({ kind, name, size, data: cursor.blob(size) });
+    }
+    return textures;
+  }
+
+  function readMaterials(cursor) {
+    const count = cursor.i32();
+    if (count < 0) throw new Error(`the material table claims ${count} entries`);
+    const materials = [];
+    for (let i = 0; i < count; i++) {
+      const name = cursor.text();
+      const shader = cursor.text();
+      const blend = cursor.u8();
+      const alphaTested = cursor.u8() !== 0;
+      const depthMode = cursor.i32();
+      const props = new Map();
+      const propCount = cursor.i32();
+      for (let k = 0; k < propCount; k++) {
+        const key = cursor.text();
+        props.set(key, [cursor.f32(), cursor.floats(2), cursor.floats(3), cursor.floats(4)]);
+      }
+      const slots = [];
+      const slotCount = cursor.i32();
+      for (let k = 0; k < slotCount; k++) {
+        slots.push({ slot: cursor.text(), number: cursor.i32(), texture: cursor.text() });
+      }
+      materials.push({ name, shader, blend, alphaTested, depthMode, props, slots });
+    }
+    return materials;
+  }
+
+  const scalarOf = (material, key, fallback) => (material.props.has(key)
+    ? material.props.get(key)[0] : fallback);
+
+  /* A payload every texture in the file shares is not a texture — and no real
+   * one is this small. 4 KiB is roomy for a 1x1 placeholder and far under a
+   * 16x16 swatch a car actually uses, of which several are genuinely repeated. */
+  const PLACEHOLDER_LIMIT = 4096;
+
+  /**
+   * True when the texture table holds one stand-in image over and over.
+   *
+   * Cars are published with their textures stripped out and something else put
+   * in the file after the node tree: every entry in the table is then the same
+   * seventy-byte PNG of a single blue pixel, under the name of the picture that
+   * used to be there. Drawn, that paints the whole car one translucent blue;
+   * read for what it is, the car comes back in its own material colours with
+   * every texture listed as one to go and find.
+   */
+  function placeholders(textures) {
+    if (textures.length < 2) return false;
+    const first = textures[0].data;
+    if (!first.length || first.length > PLACEHOLDER_LIMIT) return false;
+    return textures.every((texture) => texture.data.length === first.length
+      && texture.data.every((byte, at) => byte === first[at]));
+  }
+
+  /* -------------------------------------------------------------- geometry */
+
+  /** Unpack the interleaved vertex stream into the three layers FBX wants. */
+  function readVertices(cursor, stride) {
+    const count = cursor.u32();
+    const start = cursor.at;
+    cursor.skip(count * stride);
+    const positions = new Float64Array(count * 3);
+    const normals = new Float64Array(count * 3);
+    const uvs = new Float64Array(count * 2);
+    const { view } = cursor;
+    for (let i = 0; i < count; i++) {
+      const at = start + i * stride;
+      positions[i * 3] = view.getFloat32(at, true);
+      positions[i * 3 + 1] = view.getFloat32(at + 4, true);
+      positions[i * 3 + 2] = view.getFloat32(at + 8, true);
+      normals[i * 3] = view.getFloat32(at + 12, true);
+      normals[i * 3 + 1] = view.getFloat32(at + 16, true);
+      normals[i * 3 + 2] = view.getFloat32(at + 20, true);
+      uvs[i * 2] = view.getFloat32(at + 24, true);
+      // The game measures V down from the top of the texture; FBX up.
+      uvs[i * 2 + 1] = 1 - view.getFloat32(at + 28, true);
+    }
+    return { count, positions, normals, uvs };
+  }
+
+  function readIndices(cursor) {
+    const count = cursor.u32();
+    const start = cursor.at;
+    cursor.skip(count * 2);
+    const polygons = new Int32Array(count);
+    const { view } = cursor;
+    for (let i = 0; i < count; i++) polygons[i] = view.getUint16(start + i * 2, true);
+    // Kept before the run is written, since the check on the geometry wants the
+    // corners as the file gave them.
+    const raw = Int32Array.from(polygons);
+    // A polygon run, as FBX writes it: the last corner of each triangle is
+    // stored as its complement.
+    for (let i = 2; i < count; i += 3) polygons[i] = ~polygons[i];
+    return { count, polygons, raw };
+  }
+
+  function readMesh(cursor, skinned) {
+    const mesh = {
+      castShadows: cursor.u8() !== 0,
+      visible: cursor.u8() !== 0,
+      transparent: cursor.u8() !== 0,
+      bones: 0,
+      renderable: true,
+    };
+    if (skinned) {
+      const bones = cursor.i32();
+      for (let i = 0; i < bones; i++) { cursor.text(); cursor.skip(64); }
+      mesh.bones = bones;
+    }
+    const vertices = readVertices(cursor, skinned ? SKINNED_VERTEX : VERTEX);
+    const indices = readIndices(cursor);
+    mesh.vertices = vertices;
+    mesh.indices = indices;
+    mesh.material = cursor.i32();
+    mesh.layer = cursor.u32();
+    mesh.lodIn = cursor.f32();
+    mesh.lodOut = cursor.f32();
+    if (!skinned) {
+      // A bounding sphere, then whether the game draws it at all. A skinned
+      // mesh moves, so it carries neither.
+      cursor.skip(12);
+      mesh.radius = cursor.f32();
+      mesh.renderable = cursor.u8() !== 0;
+    }
+    return mesh;
+  }
+
+  /* ------------------------------------------------------------------ read */
+
+  function parse(bytes) {
+    const warnings = [];
+    const cursor = new Cursor(bytes);
+    cursor.skip(6);
+    const version = cursor.i32();
+    // From version 6 the header carries one more number, which every file seen
+    // writes as zero and nothing reads. It has to be stepped over all the same.
+    if (version > 5) cursor.i32();
+    if (version !== 5 && version !== 6) {
+      warnings.push(`kn5 version ${version} — this reads 5 and 6`);
+    }
+
+    const textures = readTextures(cursor);
+    const materials = readMaterials(cursor);
+
+    const objects = [];
+    const connections = [];
+    let next = 1000;
+    const uid = () => { next += 1; return next; };
+    const connect = (kind, source, target, ...extra) => {
+      connections.push(node('C', [S(kind), L(source), L(target), ...extra.map(S)]));
+    };
+
+    /* ---- textures: one Texture and one Video per distinct image
+     *
+     * Shared rather than made afresh per material. A car's paint, its detail
+     * map and its normal map are worn by dozens of materials each, and copying
+     * sixty megabytes of DDS once per slot is not a description of anything.
+     */
+    // A stripped file names its textures and holds none of them. Carrying the
+    // stand-in would paint the whole car with it.
+    const stripped = placeholders(textures);
+    const carried = new Map(stripped ? []
+      : textures.map((texture) => [texture.name, texture]));
+    const named = [];
+    for (const material of materials) {
+      for (const entry of material.slots) named.push(entry.texture);
+    }
+    const textureUids = new Map();
+    for (const name of [...carried.keys(), ...named]) {
+      if (!name || textureUids.has(name)) continue;
+      const textureUid = uid();
+      const videoUid = uid();
+      textureUids.set(name, textureUid);
+      objects.push(node('Texture', [L(textureUid), S(`${name}${CLASS_SEP}Texture`), S('')], [
+        node('Type', [S('TextureVideoClip')]),
+        node('Version', [I(202)]),
+        node('FileName', [S(name)]),
+        node('RelativeFilename', [S(name)]),
+        node('Properties70', [], [
+          // The game wraps every texture; nothing in the file says otherwise,
+          // and a tread that came back clamped would show.
+          p70('WrapModeU', 'enum', I(0)),
+          p70('WrapModeV', 'enum', I(0)),
+        ]),
+      ]));
+      const clip = [
+        node('Type', [S('Clip')]),
+        node('FileName', [S(name)]),
+        node('RelativeFilename', [S(name)]),
+      ];
+      const held = carried.get(name);
+      if (held && held.data.length) clip.push(node('Content', [R(held.data)]));
+      objects.push(node('Video', [L(videoUid), S(`${name}${CLASS_SEP}Video`), S('Clip')], clip));
+      connect('OO', videoUid, textureUid);
+    }
+
+    /* ---- materials */
+    let metals = 0;
+    const materialUids = materials.map((material) => {
+      const id = uid();
+      /* What comes back facing you. The game's shaders spell a Schlick Fresnel
+       * out in full: `fresnelC` at normal incidence rising to `fresnelMaxLevel`
+       * at grazing, over `fresnelEXP`. The first of those is a reflectance, and
+       * it is written as one. */
+      const facing = Math.min(Math.max(scalarOf(material, 'fresnelC', 0.05), 0), 1);
+      const alphaMode = material.alphaTested ? 'MASK'
+        : (BLEND_MODES[material.blend] || 'OPAQUE');
+      const metal = metalness(facing, alphaMode === 'BLEND');
+      if (metal) metals += 1;
+      /* Split between the two halves of the surface the way every importer
+       * here does: what is left of the diffuse once the metal has taken its
+       * share, and a reflectance that is the dielectric's on that share and the
+       * conductor's own on the rest. A kn5 material has no colour of its own —
+       * `txDiffuse` is the albedo, and `ksAmbient`/`ksDiffuse` weight the
+       * ambient and direct halves of the game's own lighting rather than
+       * tinting anything — so the colour being split is white. */
+      const diffuse = 1 - metal;
+      const specular = facing * (1 - metal) + metal;
+      const props = [
+        p70('DiffuseColor', 'Color', D(diffuse), D(diffuse), D(diffuse)),
+        p70('SpecularColor', 'Color', D(specular), D(specular), D(specular)),
+        p70('Metallic', 'Number', D(metal)),
+      ];
+      props.push(p70('ShininessExponent', 'Number',
+        D(Math.max(scalarOf(material, 'ksSpecularEXP', 20), 0))));
+      props.push(p70('Opacity', 'Number', D(1)));
+      props.push(p70('AlphaMode', 'KString', S(alphaMode)));
+      props.push(p70('ShaderName', 'KString', S(material.shader)));
+      if (material.alphaTested) {
+        props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
+      }
+      // What the surface gives off on its own. `ksEmissive` is written as a
+      // colour when it is one and as a single number when it is not.
+      const emissive = material.props.get('ksEmissive');
+      if (emissive) {
+        const colour = emissive[2].some((v) => v) ? emissive[2]
+          : [emissive[0], emissive[0], emissive[0]];
+        props.push(p70('EmissiveColor', 'Color', ...colour.map(D)));
+        props.push(p70('EmissiveFactor', 'Number', D(1)));
+      }
+      // Then everything the file said, under the name it said it with, so that
+      // a shader parameter with no FBX spelling is still there to be read. A
+      // parameter that happens to be spelt like one of the properties above is
+      // left alone rather than allowed to overwrite what was read from it.
+      const written = new Set(props.map((entry) => entry.props[0].value));
+      for (const [key, [a, b, c, d]] of material.props) {
+        if (written.has(key)) continue;
+        if (d.some((v) => v)) props.push(p70(key, 'Vector4D', ...d.map(D)));
+        else if (c.some((v) => v)) props.push(p70(key, 'Color', ...c.map(D)));
+        else if (b.some((v) => v)) props.push(p70(key, 'Vector2D', ...b.map(D)));
+        else props.push(p70(key, 'Number', D(a)));
+      }
+      objects.push(node('Material',
+        [L(id), S(`${material.name}${CLASS_SEP}Material`), S('')], [
+          node('Version', [I(102)]),
+          node('ShadingModel', [S('phong')]),
+          node('Properties70', [], props),
+        ]));
+      const seen = new Set();
+      for (const entry of material.slots) {
+        const target = textureUids.get(entry.texture);
+        if (target === undefined || seen.has(entry.slot)) continue;
+        seen.add(entry.slot);
+        connect('OP', target, id, slotProperty(entry.slot, material.shader));
+      }
+      return id;
+    });
+
+    /* ---- the node tree */
+    const scene = {
+      nodes: 0, meshes: 0, skinned: 0, bones: 0, vertices: 0, triangles: 0,
+      inactive: 0, hidden: 0, depth: 0, lods: [], used: new Set(),
+      //: Triangles wound with their own normals, and against them.
+      winding: [0, 0],
+    };
+
+    function walk(parent, depth) {
+      if (depth > 256) throw new Error('the node tree nests deeper than 256 levels');
+      if (depth > scene.depth) scene.depth = depth;
+      const classId = cursor.i32();
+      if (!NODE_CLASSES[classId]) {
+        throw new Error(`node class ${classId} at byte ${cursor.at - 4} is not one `
+          + 'this reader knows');
+      }
+      const name = cursor.text();
+      const children = cursor.i32();
+      if (children < 0) throw new Error(`${name || 'a node'} claims ${children} children`);
+      const active = cursor.u8() !== 0;
+      scene.nodes += 1;
+      if (!active) scene.inactive += 1;
+
+      const id = uid();
+      const props = [];
+      let mesh = null;
+
+      if (classId === 1) {
+        const place = placementOf(cursor.floats(16));
+        if (place.translation.some((v) => v)) {
+          props.push(p70('Lcl Translation', 'Lcl Translation', ...place.translation.map(D)));
+        }
+        if (place.rotation.some((v) => v)) {
+          props.push(p70('Lcl Rotation', 'Lcl Rotation', ...place.rotation.map(D)));
+        }
+        if (place.scale.some((v) => v !== 1)) {
+          props.push(p70('Lcl Scaling', 'Lcl Scaling', ...place.scale.map(D)));
+        }
+        if (/^LOD_/i.test(name)) scene.lods.push(name);
+      } else {
+        // A mesh sits where its parent puts it: the format gives it no
+        // transform of its own.
+        mesh = readMesh(cursor, classId === 3);
+        winding(cursor.view, mesh, scene.winding);
+        scene.meshes += 1;
+        scene.vertices += mesh.vertices.count;
+        scene.triangles += Math.floor(mesh.indices.count / 3);
+        scene.bones += mesh.bones;
+        if (classId === 3) scene.skinned += 1;
+        if (!mesh.visible || !mesh.renderable) scene.hidden += 1;
+        props.push(p70('Visibility', 'Visibility',
+          D(mesh.visible && mesh.renderable ? 1 : 0)));
+      }
+      if (!active) props.push(p70('Visibility', 'Visibility', D(0)));
+
+      const label = name || `node${id}`;
+      objects.push(node('Model', [L(id), S(`${label}${CLASS_SEP}Model`),
+        S(mesh ? 'Mesh' : 'Null')], [
+        node('Version', [I(232)]),
+        node('Properties70', [], props),
+      ]));
+      connect('OO', id, parent);
+
+      if (mesh) {
+        const geometryUid = uid();
+        objects.push(node('Geometry',
+          [L(geometryUid), S(`${label}${CLASS_SEP}Geometry`), S('Mesh')], [
+            node('Vertices', [array('d', mesh.vertices.positions, mesh.vertices.count * 3)]),
+            node('PolygonVertexIndex', [array('i', mesh.indices.polygons, mesh.indices.count)]),
+            node('GeometryVersion', [I(124)]),
+            node('LayerElementNormal', [I(0)], [
+              node('Version', [I(101)]),
+              node('MappingInformationType', [S('ByVertice')]),
+              node('ReferenceInformationType', [S('Direct')]),
+              node('Normals', [array('d', mesh.vertices.normals, mesh.vertices.count * 3)]),
+            ]),
+            node('LayerElementUV', [I(0)], [
+              node('Version', [I(101)]),
+              node('Name', [S('map1')]),
+              node('MappingInformationType', [S('ByVertice')]),
+              node('ReferenceInformationType', [S('Direct')]),
+              node('UV', [array('d', mesh.vertices.uvs, mesh.vertices.count * 2)]),
+            ]),
+            // One mesh wears one material, which is the whole of what the game
+            // allows: a part that needs two is two parts.
+            node('LayerElementMaterial', [I(0)], [
+              node('Version', [I(101)]),
+              node('MappingInformationType', [S('AllSame')]),
+              node('ReferenceInformationType', [S('IndexToDirect')]),
+              node('Materials', [array('i', new Int32Array([0]), 1)]),
+            ]),
+            node('Layer', [I(0)], [node('Version', [I(100)])]),
+          ]));
+        connect('OO', geometryUid, id);
+        if (mesh.material >= 0 && mesh.material < materialUids.length) {
+          scene.used.add(mesh.material);
+          connect('OO', materialUids[mesh.material], id);
+        } else if (materialUids.length) {
+          warnings.push(`${label} names material ${mesh.material}, which is not in `
+            + 'the material table');
+        }
+      }
+
+      for (let i = 0; i < children; i++) walk(id, depth + 1);
+    }
+
+    walk(0, 0);
+
+    // Whether the geometry describes the surface its own normals describe.
+    const [sound, against] = scene.winding;
+    const sampled = sound + against;
+    const agreement = sampled ? sound / sampled : 1;
+    const scrambled = sampled >= WINDING_MINIMUM && agreement < WINDING_FLOOR;
+    const encrypted = encryptedFrom(bytes);
+    const percent = `${Math.round(agreement * 100)}%`;
+    if (encrypted === null && cursor.at !== bytes.length) {
+      warnings.push(`${bytes.length - cursor.at} byte(s) past the end of the node `
+        + 'tree were not read');
+    }
+
+    const missing = [...new Set(named.filter((name) => name && !carried.has(name)))].sort();
+    if (encrypted !== null) {
+      warnings.push("this car is protected: it ends with Custom Shaders Patch's "
+        + `${ENCRYPTED_MARKER} marker, and the ${bytes.length - encrypted} bytes `
+        + 'before it are the model, encrypted. What is in front of that has been '
+        + `spoiled to match — ${percent} of its triangles are wound against their `
+        + 'own normals and every texture is one stand-in image. The game decrypts '
+        + 'it; nothing here does. What is drawn is not the shape that was modelled');
+    } else if (scrambled) {
+      warnings.push(`only ${percent} of this car's triangles are wound the way their `
+        + "own normals point, where a sound one is all of them — this car's "
+        + 'geometry was spoiled before it was published, and what is drawn from it '
+        + 'is not the shape that was modelled');
+    }
+    if (stripped && encrypted === null) {
+      warnings.push(`every one of the ${textures.length} entries in the texture `
+        + 'table is the same stand-in image — this car was published with its '
+        + 'textures stripped out, and they are not in the file under any name '
+        + 'it gives');
+    } else if (missing.length && !stripped) {
+      warnings.push(`${missing.length} texture(s) are named by a material but not in `
+        + "this file — a LOD or a skin reads them from the car's main .kn5");
+    }
+    if (!scene.meshes) warnings.push('no meshes in this file');
+
+    /* ---- the document */
+    const creator = `Assetto Corsa kn5 version ${version}`;
+    const root = { name: '', props: [], children: [] };
+    root.children.push(node('FBXHeaderExtension', [], [
+      node('FBXVersion', [I(7400)]),
+      node('Creator', [S(creator)]),
+    ]));
+    root.children.push(node('Creator', [S(creator)]));
+    root.children.push(node('GlobalSettings', [], [
+      node('Version', [I(1000)]),
+      node('Properties70', [], [
+        // Right handed, Y up, in metres, with +Z towards the front of the car
+        // — which leaves the third axis pointing at its left side.
+        node('P', [S('UpAxis'), S('int'), S('Integer'), S(''), I(1)]),
+        node('P', [S('UpAxisSign'), S('int'), S('Integer'), S(''), I(1)]),
+        node('P', [S('FrontAxis'), S('int'), S('Integer'), S(''), I(2)]),
+        node('P', [S('FrontAxisSign'), S('int'), S('Integer'), S(''), I(1)]),
+        node('P', [S('CoordAxis'), S('int'), S('Integer'), S(''), I(0)]),
+        node('P', [S('CoordAxisSign'), S('int'), S('Integer'), S(''), I(-1)]),
+        node('P', [S('UnitScaleFactor'), S('double'), S('Number'), S(''), D(100)]),
+      ]),
+    ]));
+
+    const counts = new Map();
+    for (const entry of objects) counts.set(entry.name, (counts.get(entry.name) || 0) + 1);
+    root.children.push(node('Definitions', [], [
+      node('Version', [I(100)]),
+      node('Count', [I(objects.length)]),
+      ...[...counts].map(([name, count]) =>
+        node('ObjectType', [S(name)], [node('Count', [I(count)])])),
+    ]));
+    root.children.push(node('Objects', [], objects));
+    root.children.push(node('Connections', [], connections));
+
+    return {
+      root,
+      format: 'kn5',
+      encoding: 'binary',
+      version: null,
+      versionSource: null,
+      wideOffsets: false,
+      hasFooter: false,
+      footerVersion: null,
+      warnings,
+      extra: {
+        kn5Version: version,
+        textures: textures.length,
+        placeholderTextures: stripped ? textures.length : 0,
+        textureBytes: stripped ? 0
+          : textures.reduce((sum, texture) => sum + texture.size, 0),
+        missingTextures: missing,
+        materials: materials.length,
+        materialsUsed: scene.used.size,
+        metals,
+        shaders: [...new Set(materials.map((m) => m.shader))].sort(),
+        nodes: scene.nodes,
+        meshes: scene.meshes,
+        skinnedMeshes: scene.skinned,
+        bones: scene.bones,
+        inactiveNodes: scene.inactive,
+        hiddenMeshes: scene.hidden,
+        vertices: scene.vertices,
+        triangles: scene.triangles,
+        treeDepth: scene.depth,
+        lods: scene.lods,
+        encrypted: encrypted !== null,
+        encryptedFrom: encrypted,
+        windingAgreement: sampled ? Math.round(agreement * 1e4) / 1e4 : null,
+        scrambled,
+      },
+    };
+  }
+
+  return { looksLikeKn5, parse, placementOf, NODE_CLASSES };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxKn5;
+
 // ---- psd.js ------------------------------------------------------------
 /* Reader for the flattened image inside a Photoshop document — `.psd`.
  *
@@ -5241,6 +6047,343 @@ const FbxPsd = (function () {
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxPsd;
+
+// ---- dds.js ------------------------------------------------------------
+/* Reader for a DirectDraw Surface — `.dds`.
+ *
+ * A `.dds` is not a picture as far as a browser is concerned: `createImageBitmap`
+ * refuses one, the way it refuses a KTX2 or a `.psd`, so a texture saved as one
+ * loads as nothing and the surface wearing it falls back to a flat colour.
+ * Assetto Corsa stores almost every texture this way — 111 of the 135 in one
+ * car — so without this a `.kn5` opens as a grey model with its paint, its
+ * badges and its dials all missing.
+ *
+ * What is read is the top mip level, decoded to RGBA.  The smaller levels
+ * follow it in the file and are not needed: the renderer builds its own.
+ *
+ * The layout
+ * ==========
+ *
+ * Everything is little-endian:
+ *
+ *   'DDS ' uint32 headerSize(124) uint32 flags uint32 height uint32 width
+ *   uint32 pitchOrLinearSize uint32 depth uint32 mipCount uint32[11] reserved
+ *   -- DDS_PIXELFORMAT at byte 76 --
+ *   uint32 size(32) uint32 flags uint32 fourCC
+ *   uint32 rgbBitCount uint32 rMask uint32 gMask uint32 bMask uint32 aMask
+ *   uint32 caps[4] uint32 reserved
+ *   -- and, only when fourCC is 'DX10', twenty more bytes --
+ *   uint32 dxgiFormat uint32 dimension uint32 miscFlag uint32 arraySize uint32 miscFlags2
+ *
+ * The block formats
+ * =================
+ *
+ * BC1 (`DXT1`) packs a 4x4 tile into eight bytes: two 16-bit endpoint colours
+ * and sixteen two-bit selectors.  When the first endpoint is not greater than
+ * the second the tile is in its one-bit-alpha mode, and the fourth selector
+ * means transparent rather than a third of the way along.
+ *
+ * BC2 (`DXT3`) and BC3 (`DXT5`) put eight bytes of alpha in front of that
+ * tile: BC2 four bits a pixel, straight; BC3 the same interpolated scheme the
+ * colour uses, two endpoints and three-bit selectors.
+ *
+ * BC4 and BC5 are the alpha block on its own — one channel, or two — which is
+ * how a normal map is stored when only two of its channels are kept.  The
+ * third is rebuilt from them, since a normal is a unit vector.
+ *
+ * Uncompressed surfaces are read by their channel masks rather than by a list
+ * of layouts: a mask says which bits of each pixel are which channel, and
+ * shifting by the lowest set bit and scaling by the width covers every
+ * arrangement a file may use, B8G8R8A8 and R5G6B5 alike.
+ */
+'use strict';
+
+const FbxDds = (function () {
+  const MAGIC = 0x20534444;                    // "DDS "
+  const FOURCC = 0x00000004;                   // DDPF_FOURCC
+  const RGB = 0x00000040;                      // DDPF_RGB
+  const LUMINANCE = 0x00020000;                // DDPF_LUMINANCE
+  const ALPHAPIXELS = 0x00000001;
+
+  const code = (text) => text.charCodeAt(0) | (text.charCodeAt(1) << 8)
+    | (text.charCodeAt(2) << 16) | (text.charCodeAt(3) << 24);
+
+  const DXT1 = code('DXT1');
+  const DXT2 = code('DXT2');
+  const DXT3 = code('DXT3');
+  const DXT4 = code('DXT4');
+  const DXT5 = code('DXT5');
+  const ATI1 = code('ATI1');
+  const BC4U = code('BC4U');
+  const ATI2 = code('ATI2');
+  const BC5U = code('BC5U');
+  const DX10 = code('DX10');
+
+  //: The DXGI formats that are one of the block layouts read here.
+  const DXGI = {
+    70: DXT1, 71: DXT1, 72: DXT1,              // BC1 typeless / unorm / sRGB
+    73: DXT3, 74: DXT3, 75: DXT3,              // BC2
+    76: DXT5, 77: DXT5, 78: DXT5,              // BC3
+    79: ATI1, 80: ATI1,                        // BC4 typeless / unorm
+    82: ATI2, 83: ATI2,                        // BC5 typeless / unorm
+    87: 'bgra8', 88: 'bgra8', 91: 'bgra8',
+    28: 'rgba8', 29: 'rgba8',
+  };
+
+  /** True when these bytes are a DirectDraw Surface. */
+  function looksLikeDds(bytes) {
+    if (!bytes || bytes.length < 128) return false;
+    return bytes[0] === 0x44 && bytes[1] === 0x44 && bytes[2] === 0x53 && bytes[3] === 0x20;
+  }
+
+  /** Where the lowest set bit of a mask is, and how wide the field is. */
+  function field(mask) {
+    if (!mask) return null;
+    let shift = 0;
+    while (!((mask >>> shift) & 1)) shift += 1;
+    let width = 0;
+    while ((mask >>> (shift + width)) & 1) width += 1;
+    return { shift, width, max: (1 << width) - 1 };
+  }
+
+  const expand = (value, spec) => (spec.max ? Math.round((value * 255) / spec.max) : 0);
+
+  /** One 16-bit endpoint as three 8-bit channels. */
+  function unpack565(value, out) {
+    const r = (value >> 11) & 0x1f;
+    const g = (value >> 5) & 0x3f;
+    const b = value & 0x1f;
+    out[0] = (r << 3) | (r >> 2);
+    out[1] = (g << 2) | (g >> 4);
+    out[2] = (b << 3) | (b >> 2);
+  }
+
+  /**
+   * The colour half of a BC1/BC2/BC3 tile, written into *rgba*.
+   *
+   * `punchThrough` is BC1's own mode, taken from the endpoint order; BC2 and
+   * BC3 carry their alpha separately and always use four opaque colours.
+   */
+  function colourBlock(view, at, rgba, width, height, x0, y0, punchThrough) {
+    const c0 = view.getUint16(at, true);
+    const c1 = view.getUint16(at + 2, true);
+    const bits = view.getUint32(at + 4, true);
+    const palette = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    const alpha = [255, 255, 255, 255];
+    unpack565(c0, palette[0]);
+    unpack565(c1, palette[1]);
+    if (!punchThrough || c0 > c1) {
+      for (let k = 0; k < 3; k++) {
+        palette[2][k] = (2 * palette[0][k] + palette[1][k] + 1) / 3 | 0;
+        palette[3][k] = (palette[0][k] + 2 * palette[1][k] + 1) / 3 | 0;
+      }
+    } else {
+      for (let k = 0; k < 3; k++) {
+        palette[2][k] = (palette[0][k] + palette[1][k]) >> 1;
+        palette[3][k] = 0;
+      }
+      alpha[3] = 0;
+    }
+    for (let y = 0; y < 4; y++) {
+      const row = y0 + y;
+      if (row >= height) break;
+      for (let x = 0; x < 4; x++) {
+        const column = x0 + x;
+        if (column >= width) continue;
+        const pick = (bits >>> (2 * (4 * y + x))) & 3;
+        const to = 4 * (row * width + column);
+        rgba[to] = palette[pick][0];
+        rgba[to + 1] = palette[pick][1];
+        rgba[to + 2] = palette[pick][2];
+        rgba[to + 3] = alpha[pick];
+      }
+    }
+  }
+
+  /**
+   * The eight-byte interpolated block BC3 uses for alpha and BC4/BC5 for a
+   * channel of their own, written into *channel* of *rgba*.
+   */
+  function interpolatedBlock(view, at, rgba, width, height, x0, y0, channel) {
+    const a0 = view.getUint8(at);
+    const a1 = view.getUint8(at + 1);
+    const values = [a0, a1, 0, 0, 0, 0, 0, 0];
+    if (a0 > a1) {
+      for (let k = 1; k < 7; k++) values[k + 1] = ((7 - k) * a0 + k * a1) / 7 | 0;
+    } else {
+      for (let k = 1; k < 5; k++) values[k + 1] = ((5 - k) * a0 + k * a1) / 5 | 0;
+      values[6] = 0;
+      values[7] = 255;
+    }
+    // Sixteen three-bit selectors over six bytes, read as two 24-bit halves so
+    // no selector straddles the read.
+    const low = view.getUint8(at + 2) | (view.getUint8(at + 3) << 8)
+      | (view.getUint8(at + 4) << 16);
+    const high = view.getUint8(at + 5) | (view.getUint8(at + 6) << 8)
+      | (view.getUint8(at + 7) << 16);
+    for (let i = 0; i < 16; i++) {
+      const y = y0 + (i >> 2);
+      const x = x0 + (i & 3);
+      if (y >= height || x >= width) continue;
+      const pick = i < 8 ? (low >>> (3 * i)) & 7 : (high >>> (3 * (i - 8))) & 7;
+      rgba[4 * (y * width + x) + channel] = values[pick];
+    }
+  }
+
+  /** The four-bit-a-pixel alpha BC2 puts in front of its colour tile. */
+  function explicitAlphaBlock(view, at, rgba, width, height, x0, y0) {
+    for (let y = 0; y < 4; y++) {
+      const row = y0 + y;
+      const pair = view.getUint16(at + 2 * y, true);
+      if (row >= height) break;
+      for (let x = 0; x < 4; x++) {
+        const column = x0 + x;
+        if (column >= width) continue;
+        const value = (pair >> (4 * x)) & 0xf;
+        rgba[4 * (row * width + column) + 3] = value * 17;
+      }
+    }
+  }
+
+  /** A normal map stored as two channels has the third rebuilt from them. */
+  function rebuildBlue(rgba) {
+    for (let i = 0; i < rgba.length; i += 4) {
+      const x = (rgba[i] / 127.5) - 1;
+      const y = (rgba[i + 1] / 127.5) - 1;
+      const z = Math.sqrt(Math.max(0, 1 - x * x - y * y));
+      rgba[i + 2] = Math.round((z + 1) * 127.5);
+      rgba[i + 3] = 255;
+    }
+  }
+
+  function decodeBlocks(view, at, width, height, fourCC, rgba) {
+    const wide = Math.max(1, Math.ceil(width / 4));
+    const tall = Math.max(1, Math.ceil(height / 4));
+    const stride = fourCC === DXT1 || fourCC === ATI1 ? 8 : 16;
+    if (at + wide * tall * stride > view.byteLength) return false;
+    for (let ty = 0; ty < tall; ty++) {
+      for (let tx = 0; tx < wide; tx++) {
+        const block = at + (ty * wide + tx) * stride;
+        const x0 = tx * 4;
+        const y0 = ty * 4;
+        if (fourCC === DXT1) {
+          colourBlock(view, block, rgba, width, height, x0, y0, true);
+        } else if (fourCC === DXT2 || fourCC === DXT3) {
+          explicitAlphaBlock(view, block, rgba, width, height, x0, y0);
+          colourBlock(view, block + 8, rgba, width, height, x0, y0, false);
+        } else if (fourCC === DXT4 || fourCC === DXT5) {
+          colourBlock(view, block + 8, rgba, width, height, x0, y0, false);
+          interpolatedBlock(view, block, rgba, width, height, x0, y0, 3);
+        } else if (fourCC === ATI1) {
+          interpolatedBlock(view, block, rgba, width, height, x0, y0, 0);
+        } else {                                       // ATI2 / BC5: red, green
+          interpolatedBlock(view, block, rgba, width, height, x0, y0, 0);
+          interpolatedBlock(view, block + 8, rgba, width, height, x0, y0, 1);
+        }
+      }
+    }
+    if (fourCC === ATI1) {
+      // One channel is the picture, not the red of a picture missing two.
+      for (let i = 0; i < rgba.length; i += 4) {
+        rgba[i + 1] = rgba[i];
+        rgba[i + 2] = rgba[i];
+        rgba[i + 3] = 255;
+      }
+    } else if (fourCC === ATI2) {
+      rebuildBlue(rgba);
+    }
+    return true;
+  }
+
+  function decodePlain(view, at, width, height, format, rgba) {
+    const bytes = format.bits / 8;
+    if (at + width * height * bytes > view.byteLength) return false;
+    const red = field(format.rMask);
+    const green = field(format.gMask);
+    const blue = field(format.bMask);
+    const alpha = field(format.aMask);
+    // A luminance surface has one channel and means it for all three.
+    const grey = format.luminance && !green && !blue;
+    for (let i = 0; i < width * height; i++) {
+      const to = at + i * bytes;
+      let pixel = 0;
+      for (let k = 0; k < bytes; k++) pixel |= view.getUint8(to + k) << (8 * k);
+      pixel >>>= 0;
+      const r = red ? expand((pixel >>> red.shift) & red.max, red) : 0;
+      rgba[4 * i] = r;
+      rgba[4 * i + 1] = grey ? r
+        : (green ? expand((pixel >>> green.shift) & green.max, green) : 0);
+      rgba[4 * i + 2] = grey ? r
+        : (blue ? expand((pixel >>> blue.shift) & blue.max, blue) : 0);
+      rgba[4 * i + 3] = alpha ? expand((pixel >>> alpha.shift) & alpha.max, alpha) : 255;
+    }
+    return true;
+  }
+
+  /**
+   * The top mip level of a DDS, as RGBA pixels.
+   *
+   * Returns null for anything this does not decode — a cube map's later faces,
+   * a floating-point surface, BC6H or BC7 — rather than a guess.  A texture
+   * nobody can tell is wrong is one nobody fixes.
+   */
+  function decode(bytes) {
+    if (!looksLikeDds(bytes)) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (view.getUint32(0, true) !== MAGIC || view.getUint32(4, true) !== 124) return null;
+    const height = view.getUint32(12, true);
+    const width = view.getUint32(16, true);
+    if (!width || !height || width > 16384 || height > 16384) return null;
+
+    const flags = view.getUint32(80, true);
+    let fourCC = (flags & FOURCC) ? view.getUint32(84, true) : 0;
+    const bits = view.getUint32(88, true);
+    const format = {
+      bits,
+      rMask: view.getUint32(92, true),
+      gMask: view.getUint32(96, true),
+      bMask: view.getUint32(100, true),
+      aMask: (flags & ALPHAPIXELS) ? view.getUint32(104, true) : 0,
+      luminance: (flags & LUMINANCE) !== 0,
+    };
+    let at = 128;
+    if (fourCC === DX10) {
+      if (bytes.length < 148) return null;
+      const dxgi = DXGI[view.getUint32(128, true)];
+      at = 148;
+      if (dxgi === undefined) return null;
+      if (dxgi === 'bgra8' || dxgi === 'rgba8') {
+        fourCC = 0;
+        format.bits = 32;
+        format.rMask = dxgi === 'bgra8' ? 0x00ff0000 : 0x000000ff;
+        format.gMask = 0x0000ff00;
+        format.bMask = dxgi === 'bgra8' ? 0x000000ff : 0x00ff0000;
+        format.aMask = 0xff000000;
+      } else {
+        fourCC = dxgi;
+      }
+    }
+
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    let done;
+    if (fourCC === BC4U) done = decodeBlocks(view, at, width, height, ATI1, rgba);
+    else if (fourCC === BC5U) done = decodeBlocks(view, at, width, height, ATI2, rgba);
+    else if (fourCC) {
+      if (fourCC !== DXT1 && fourCC !== DXT2 && fourCC !== DXT3 && fourCC !== DXT4
+        && fourCC !== DXT5 && fourCC !== ATI1 && fourCC !== ATI2) return null;
+      done = decodeBlocks(view, at, width, height, fourCC, rgba);
+    } else if ((flags & (RGB | LUMINANCE)) && bits >= 8 && bits <= 32 && bits % 8 === 0) {
+      done = decodePlain(view, at, width, height, format, rgba);
+    } else {
+      return null;
+    }
+    return done ? { width, height, rgba } : null;
+  }
+
+  return { decode, looksLikeDds };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxDds;
 
 // ---- transform.js ------------------------------------------------------
 /* FBX node transforms.
@@ -7513,7 +8656,7 @@ const FbxReport = (function () {
 
   const FORMAT_NAMES = {
     fbx: 'Autodesk FBX', obj: 'Wavefront OBJ', blend: 'Blender', gltf: 'glTF 2.0',
-    max: 'Autodesk 3ds Max',
+    max: 'Autodesk 3ds Max', kn5: 'Assetto Corsa kn5',
   };
 
   function objRows(doc, pairs) {
@@ -7567,6 +8710,59 @@ const FbxReport = (function () {
     }
   }
 
+  function kn5Rows(doc, pairs) {
+    const e = doc.extra || {};
+    pairs.push(['Encoding', 'binary']);
+    pairs.push(['kn5 version', e.kn5Version === undefined ? 'unknown' : e.kn5Version]);
+    if (e.encrypted) {
+      pairs.push(['Protected', 'Custom Shaders Patch kn5 encryption — the model '
+        + 'below is the spoiled copy left in front of it']);
+    }
+    pairs.push(['Scene', `${number(e.nodes || 0)} nodes, ${number(e.meshes || 0)} `
+      + `mesh${e.meshes === 1 ? '' : 'es'}, ${e.treeDepth || 0} deep`]);
+    let geometry = `${number(e.vertices || 0)} vertices, `
+      + `${number(e.triangles || 0)} triangles`;
+    if (e.scrambled) {
+      geometry += ` — but only ${Math.round((e.windingAgreement || 0) * 100)}% of them `
+        + 'are wound the way their own normals point, so this is not the shape '
+        + 'that was modelled';
+    }
+    pairs.push(['Geometry', geometry]);
+    if (e.skinnedMeshes) {
+      pairs.push(['Skinned', `${number(e.skinnedMeshes)} mesh(es) over `
+        + `${number(e.bones || 0)} bones`]);
+    }
+    if ((e.lods || []).length) pairs.push(['LOD groups', e.lods.slice(0, 6).join(', ')]);
+    if (e.inactiveNodes || e.hiddenMeshes) {
+      pairs.push(['Not drawn', `${number(e.inactiveNodes || 0)} inactive node(s), `
+        + `${number(e.hiddenMeshes || 0)} hidden mesh(es)`]);
+    }
+    pairs.push(['Materials', `${number(e.materials || 0)} `
+      + `(${number(e.materialsUsed || 0)} worn by a mesh)`]);
+    if (e.metals) {
+      pairs.push(['Metals', `${number(e.metals)} reflect more facing you than a `
+        + 'dielectric can']);
+    }
+    if ((e.shaders || []).length) {
+      pairs.push(['Shaders', e.shaders.slice(0, 6).join(', ')
+        + (e.shaders.length > 6 ? ' …' : '')]);
+    }
+    if (e.placeholderTextures) {
+      pairs.push(['Textures', `${number(e.placeholderTextures)} named, every one of `
+        + 'them the same stand-in — ' + (e.encrypted
+          ? 'held back with the rest of the car'
+          : 'this car was published with its textures stripped out')]);
+    } else {
+      pairs.push(['Textures', `${number(e.textures || 0)} embedded, `
+        + formatSize(e.textureBytes || 0)]);
+    }
+    if ((e.missingTextures || []).length) {
+      pairs.push(['Named but absent', `${number(e.missingTextures.length)}: `
+        + e.missingTextures.slice(0, 4).join(', ')
+        + (e.missingTextures.length > 4 ? ' …' : '')]);
+    }
+  }
+
   function gltfRows(doc, pairs) {
     const e = doc.extra || {};
     pairs.push(['Container', doc.encoding === 'binary'
@@ -7605,6 +8801,13 @@ const FbxReport = (function () {
     }
     if (doc.format === 'max') {
       maxRows(doc, pairs);
+      if (doc.parseMilliseconds !== undefined) {
+        pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
+      }
+      return section('File', rows(pairs));
+    }
+    if (doc.format === 'kn5') {
+      kn5Rows(doc, pairs);
       if (doc.parseMilliseconds !== undefined) {
         pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
       }
@@ -7917,6 +9120,12 @@ const FbxViewer = (function () {
   /* Below this, a material is drawn in the blended pass. Some exporters write
    * 0.999 for "opaque", which is not worth a second pass. */
   const OPAQUE = 0.996;
+
+  /* What a material says about its own coverage, as the shader numbers it.
+   * `BLEND` takes the alpha of its colour texture as it is; `MASK` cuts the
+   * surface away below the threshold beside it and is solid everywhere else.
+   * Anything the file did not say is opaque. */
+  const ALPHA_MODES = { BLEND: 1, MASK: 2, OPAQUE: 0 };
 
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
@@ -8344,6 +9553,16 @@ ${SHADOW_LOOKUP}
     // is. Zero for everything that has none, which is most things.
     float coatF0 = 0.0;
     float coatRoughness = 0.05;
+    /* How the file asked to be blended: 0 opaque, 1 blended by the alpha of
+     * its own colour texture, 2 cut out against it.
+     *
+     * An opacity factor is not the only place transparency lives, and on a
+     * racing game's cars it is not where any of it lives: a windscreen states
+     * no factor at all and keeps its 26% in the alpha channel of the picture
+     * it wears, a badge keeps its outline there, and a tail lamp its tint.
+     * Read as a factor alone every one of them is a solid panel. */
+    int alphaMode = 0;
+    float alphaCutoff = 0.0;
     // The third row holds opacity and which material group this slot belongs
     // to; the group is wanted in every shading mode, for the highlight.
     vec4 extra = vec4(0.0, -1.0, 0.0, 0.0);
@@ -8354,6 +9573,8 @@ ${SHADOW_LOOKUP}
       vec4 over = texelFetch(uPalette, ivec2(slot, 4), 0);
       coatF0 = clamp(over.r, 0.0, 1.0);
       coatRoughness = clamp(over.g, 0.05, 1.0);
+      alphaMode = int(over.b + 0.5);
+      alphaCutoff = over.a;
     }
     if (uMode == 0 && uPaletteSize > 0) {
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
@@ -8367,7 +9588,21 @@ ${SHADOW_LOOKUP}
       if (uUseTextures == 1 && layer >= 0) {
         // A bound diffuse texture replaces the flat colour, as most DCC tools
         // and viewers treat it. The sampler is sRGB, so this is already linear.
-        albedo = texture(uTextures, vec3(vUv, float(layer))).rgb;
+        vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
+        albedo = painted.rgb;
+        /* …and its fourth channel is how much of the surface is there, for a
+         * material that said that is where its transparency lives.
+         *
+         * Cut out at or below the threshold rather than under it: a file that
+         * states a threshold of zero means "drop what is not there at all",
+         * and taken strictly that would keep every hole in a grille. One
+         * eight-bit step is the floor, because the sampler filters between
+         * mip levels and a badge's transparent surround comes back a hair
+         * above zero a level or two down — kept, it draws as a solid box
+         * around the badge, since a cut-out surface is opaque wherever it is
+         * drawn at all. */
+        if (alphaMode == 2 && painted.a <= max(alphaCutoff, 1.0 / 255.0)) discard;
+        if (alphaMode == 1) opacity *= painted.a;
       }
       /* A metallic-roughness map, where the material has one.
        *
@@ -8396,9 +9631,11 @@ ${SHADOW_LOOKUP}
     } else if (uMode == 1) {
       albedo = indexColour(vMaterial);
       opacity = 1.0;
+      alphaMode = 0;
     } else {
       albedo = uClayColour;
       opacity = 1.0;
+      alphaMode = 0;
     }
 
     // Picking a material out of the list marks where it is on the model.
@@ -8410,8 +9647,15 @@ ${SHADOW_LOOKUP}
       albedo = mix(albedo, vec3(0.15, 0.62, 1.0), 0.55);
     }
 
-    // Each pass takes the half of the scene it is set up to draw.
-    bool blended = opacity < uOpaqueLimit;
+    /* Each pass takes the half of the scene it is set up to draw.
+     *
+     * Which half a triangle belongs to is a property of its material and not
+     * of the pixel: a windscreen whose alpha comes out of a texture is see-
+     * through wherever that texture is, and drawing the sheet in the solid
+     * pass where it happens to be opaque would lay down depth the glass behind
+     * it then fails against. Cut-out materials stay solid — a grille with its
+     * holes dropped is opaque everywhere it is drawn at all. */
+    bool blended = opacity < uOpaqueLimit || alphaMode == 1;
     if (blended != (uPass == 1)) discard;
 
     vec3 viewDir = normalize(-vViewPosition);
@@ -8918,9 +10162,11 @@ ${SHADOW_LOOKUP}
      * group, the metallic-roughness map's layer and the metalness that map
      * scales, then the relief — which map shapes the surface, how strongly and
      * which kind it is — and last the clear coat, which is how much a mirror
-     * laid over the whole reflects and how polished that mirror is. Floats, because the values are linear and eight
-     * bits of a linear ramp bands badly in the darks — the Mercedes' interior
-     * sits at 0.05.
+     * laid over the whole reflects and how polished that mirror is, beside how
+     * the file asked to be blended and the threshold it asked to be cut at.
+     *
+     * Floats, because the values are linear and eight bits of a linear ramp
+     * bands badly in the darks — the Mercedes' interior sits at 0.05.
      */
     setPalette(materials) {
       const gl = this.gl;
@@ -8966,7 +10212,18 @@ ${SHADOW_LOOKUP}
           ? Math.min(1, Math.max(0, material.coat)) : 0;
         data[(width * 4 + i) * 4 + 1] = typeof material.coatRoughness === 'number'
           ? Math.min(1, Math.max(0.05, material.coatRoughness)) : 0.05;
-        if (opacity < OPAQUE) {
+        /* How the file asked to be blended, and against what.
+         *
+         * Only meaningful with a colour texture to read the alpha out of, so a
+         * material that names none is left opaque rather than sent to a pass
+         * that would draw it exactly as the solid one already had.
+         */
+        const painted = Number.isInteger(material.layer) && material.layer >= 0;
+        const mode = painted ? ALPHA_MODES[material.alphaMode] || 0 : 0;
+        data[(width * 4 + i) * 4 + 2] = mode;
+        data[(width * 4 + i) * 4 + 3] = typeof material.alphaCutoff === 'number'
+          ? Math.min(1, Math.max(0, material.alphaCutoff)) : 0.5;
+        if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
         }
@@ -8985,11 +10242,11 @@ ${SHADOW_LOOKUP}
      * common square first. That costs some fidelity on non-square textures but
      * keeps the whole mesh to a single draw call.
      */
-    setTextures(images, edge = 1024) {
+    async setTextures(images, edge = 1024) {
       this.textureLayers = images.length;
       // sRGB storage: image files hold display-encoded colour, and shading has
       // to happen in linear light. The sampler undoes the encoding for free.
-      this._uploadArray(this.textureArray, images, this.gl.SRGB8_ALPHA8, edge);
+      return this._uploadArray(this.textureArray, images, this.gl.SRGB8_ALPHA8, edge);
     }
 
     /**
@@ -8999,9 +10256,9 @@ ${SHADOW_LOOKUP}
      * and its blue a metalness, both already linear. Decoding it as sRGB would
      * bend both curves, so it is stored as it was written.
      */
-    setFinishTextures(images, edge = 1024) {
+    async setFinishTextures(images, edge = 1024) {
       this.finishLayers = images.length;
-      this._uploadArray(this.finishArray, images, this.gl.RGBA8, edge);
+      return this._uploadArray(this.finishArray, images, this.gl.RGBA8, edge);
     }
 
     /**
@@ -9011,36 +10268,62 @@ ${SHADOW_LOOKUP}
      * picture, and decoding either as sRGB would bend what it says. Stored as
      * written, like the metallic-roughness maps beside them.
      */
-    setBumpTextures(images, edge = 1024) {
+    async setBumpTextures(images, edge = 1024) {
       this.bumpLayers = images.length;
-      this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
+      return this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
     }
 
-    _uploadArray(target, images, internalFormat, edge = 1024) {
+    async _uploadArray(target, images, internalFormat, edge = 1024) {
       const gl = this.gl;
       if (!images.length) { this.dirty = true; return; }
 
       const size = Math.min(edge, gl.getParameter(gl.MAX_TEXTURE_SIZE));
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const context = canvas.getContext('2d');
-
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
       gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, internalFormat, size, size, images.length,
         0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      images.forEach((image, layer) => {
-        context.clearRect(0, 0, size, size);
-        // FBX texture space has V running upwards; flip once here rather than
-        // in the shader so the UVs stay as the file wrote them.
-        context.save();
-        context.translate(0, size);
-        context.scale(1, -1);
-        context.drawImage(image, 0, 0, size, size);
-        context.restore();
+
+      /* Resized by the decoder rather than drawn through a 2D canvas.
+       *
+       * A canvas holds its pixels premultiplied, and unmultiplying at zero
+       * alpha is a division by nothing: a texel that is fully transparent
+       * comes back black and takes its colour with it. That is only a texel
+       * nobody sees — until the material wearing it never asked for alpha at
+       * all, and then it is the whole picture. A `.dds` written out of this
+       * game routinely carries an alpha channel of nothing beside a colour
+       * that matters: one Renault 5 Turbo has twenty-four of them, its seats,
+       * its carpet, its dashboard and its interior plastic among them, and
+       * every one drew as a black panel.
+       *
+       * `createImageBitmap` resizes without that, so long as it is told not to
+       * premultiply — at every step, since one default anywhere in the chain
+       * has already thrown the colour away by the time the next is asked.
+       */
+      for (let layer = 0; layer < images.length; layer++) {
+        // eslint-disable-next-line no-await-in-loop -- one square at a time,
+        // rather than every texture of a car resident at once.
+        const bitmap = await createImageBitmap(images[layer], {
+          resizeWidth: size,
+          resizeHeight: size,
+          resizeQuality: 'high',
+          premultiplyAlpha: 'none',
+          /* FBX texture space has V running upwards; turn the picture over
+           * here rather than in the shader so the UVs stay as the file wrote
+           * them.
+           *
+           * It has to be asked for *of the bitmap*. `UNPACK_FLIP_Y_WEBGL` is
+           * what a canvas or an ImageData upload obeys, and an ImageBitmap
+           * ignores it without a word — no error, no warning, every texture on
+           * the car quietly upside down. */
+          imageOrientation: 'flipY',
+        });
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
         gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, size, size, 1,
-          gl.RGBA, gl.UNSIGNED_BYTE, canvas);
-      });
+          gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+        bitmap.close();
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, target);
       gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -9745,7 +11028,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   const DROP_DEPTH = 8;
 
   //: What this reads, for telling the model in a folder from what is beside it.
-  const MODEL_NAMES = /\.(fbx|obj|gltf|glb|blend|max)$/i;
+  const MODEL_NAMES = /\.(fbx|obj|gltf|glb|blend|max|kn5)$/i;
 
   /** The filesystem entries of a drop, taken before the transfer empties. */
   function droppedEntries(transfer) {
@@ -9785,7 +11068,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
   //: What counts as something a model needs rather than something beside it.
-  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|mtl|bin|json)$/i;
+  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds|mtl|bin|json)$/i;
 
   /**
    * As much of a folder as is worth reading, models and their companions first.
@@ -9921,7 +11204,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     // tool decodes, so they arrive the same way as the rest rather than being
     // taken for the model.
     const images = list.filter(
-      (f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd)$/i.test(f.name));
+      (f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds)$/i.test(f.name));
     const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
     // A .gltf keeps its vertices in a .bin beside it, the way an .obj keeps its
     // colours in an .mtl.
@@ -10096,9 +11379,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const textures = await resolveTextures(currentPalette);
     missingTextures = textures.missing;
     unreadableTextures = textures.unreadable;
-    viewer.setTextures(textures.images);
-    viewer.setFinishTextures(textures.finish);
-    viewer.setBumpTextures(textures.bump);
+    await viewer.setTextures(textures.images);
+    await viewer.setFinishTextures(textures.finish);
+    await viewer.setBumpTextures(textures.bump);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
       && textures.finish.length === 0 && textures.bump.length === 0;
@@ -10218,7 +11501,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const started = performance.now();
 
     let doc = null;
-    if (FbxMax.looksLikeMax(buffer)) {
+    if (FbxKn5.looksLikeKn5(buffer)) {
+      // Six bytes at the head say so, and nothing else here begins "sc6969".
+      doc = FbxKn5.parse(buffer);
+    } else if (FbxMax.looksLikeMax(buffer)) {
       // A .max is a compound file, which nothing else here reads, so the
       // eight bytes of its container are enough to know it.
       doc = FbxMax.parse(buffer);
@@ -10237,7 +11523,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       else if (FbxObj.looksLikeObj(text)) {
         doc = FbxObj.parse(text, { materials: suppliedMaterials });
       } else return null;
-    } else if (doc.format !== 'blend' && doc.format !== 'gltf') {
+    } else if (doc.format !== 'blend' && doc.format !== 'gltf' && doc.format !== 'kn5') {
       doc.versionSource = 'header';
     }
     doc.fileName = file.name;
@@ -10253,7 +11539,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const doc = await parseModel(file);
       if (!doc) {
         setStatus(`${file.name} is not a model we recognise — not FBX `
-          + '(binary or ASCII), OBJ, glTF or .blend.', 'error');
+          + '(binary or ASCII), OBJ, glTF, .blend, .max or .kn5.', 'error');
         return;
       }
       pendingDonor = donor;
@@ -10353,7 +11639,56 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const part = target ? parts.get(keyOf(target)) : null;
       if (part && source && source.nodeType === 'Material') part.materials.push(source);
     }
-    return [...parts.values()];
+    const hidden = hiddenModels(info, { keyOf, resolve });
+    return [...parts.values()].filter((part) => !hidden.has(part.key));
+  }
+
+  /**
+   * The models a file says are not to be drawn, and everything under them.
+   *
+   * A scene is not only the geometry it holds: it is the geometry it holds
+   * *switched on*. An Assetto Corsa car ships with its own spares — a shattered
+   * windscreen behind the clear one, a blurred disc inside each wheel, a
+   * low-detail cockpit inside the real one — all of them switched off until the
+   * game wants them. Drawn anyway, the Mercedes comes out with cracked glass in
+   * every window and two cockpits.
+   *
+   * Visibility descends: a node the file switched off takes what hangs below it
+   * with it, which is how the four blurred wheels are turned off by four nodes
+   * rather than by the twelve meshes under them.
+   */
+  function hiddenModels(info, { keyOf, resolve }) {
+    const own = new Map();
+    for (const obj of info.objects) {
+      if (obj.nodeType !== 'Model') continue;
+      const key = keyOf(obj);
+      if (key === null || own.has(key)) continue;
+      const visibility = FbxAnalyze.resolvedProperties(obj, info.templates).Visibility;
+      own.set(key, visibility === 0 || visibility === false);
+    }
+    const parent = new Map();
+    for (const conn of info.connections) {
+      if (conn.kind !== 'OO') continue;
+      const source = resolve(conn.src);
+      const target = resolve(conn.dst);
+      if (!source || !target || source === target) continue;
+      if (source.nodeType !== 'Model' || target.nodeType !== 'Model') continue;
+      const key = keyOf(source);
+      if (key !== null && !parent.has(key)) parent.set(key, keyOf(target));
+    }
+    const answered = new Map();
+    const walk = (key, depth) => {
+      if (key === null || key === undefined || depth > 128) return false;
+      if (answered.has(key)) return answered.get(key);
+      answered.set(key, false);          // a cycle in a malformed file
+      const result = own.get(key) === true
+        || walk(parent.has(key) ? parent.get(key) : null, depth + 1);
+      answered.set(key, result);
+      return result;
+    };
+    const out = new Set();
+    for (const key of own.keys()) if (walk(key, 0)) out.add(key);
+    return out;
   }
 
   /**
@@ -12371,6 +13706,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   /** Decode one image, from embedded bytes or a file the user supplied. */
   const KTX2_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
 
+  /* Every texture is decoded with its colour and its alpha kept apart.
+   *
+   * Multiplied together — which is what a browser does by default, and what a
+   * 2D canvas can only do — a texel at zero alpha loses its colour outright,
+   * since dividing it back out is a division by nothing. That costs nothing on
+   * a texel nobody sees, and everything on a material that never asked for
+   * alpha in the first place: a `.dds` out of this game routinely carries an
+   * alpha channel of nothing beside a picture that matters. One default
+   * anywhere in the chain throws the colour away before the next call can
+   * ask for it back. */
+  const UNMULTIPLIED = { premultiplyAlpha: 'none' };
+
   const looksLikeKtx2 = (bytes) => bytes && bytes.length > 12
     && KTX2_MAGIC.every((byte, i) => bytes[i] === byte);
 
@@ -12385,7 +13732,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const mark = FbxWasm.mark();
     try {
       const image = FbxWasm.decodeKtx2(bytes);
-      return await createImageBitmap(new ImageData(image.rgba, image.width, image.height));
+      return await createImageBitmap(
+        new ImageData(image.rgba, image.width, image.height), UNMULTIPLIED);
     } catch (error) {
       console.warn('KTX2:', error.message);
       return null;
@@ -12405,9 +13753,30 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     try {
       const image = FbxPsd.decode(bytes);
       if (!image) return null;
-      return await createImageBitmap(new ImageData(image.rgba, image.width, image.height));
+      return await createImageBitmap(
+        new ImageData(image.rgba, image.width, image.height), UNMULTIPLIED);
     } catch (error) {
       console.warn('PSD:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * The picture inside a DirectDraw Surface.
+   *
+   * Same case again: no browser will make an image of a `.dds`, and Assetto
+   * Corsa keeps almost every texture in one — 111 of the 135 in a single car —
+   * so a `.kn5` without this opens as a grey model with its paint, its badges
+   * and its dials all missing.
+   */
+  async function decodeDds(bytes) {
+    try {
+      const image = FbxDds.decode(bytes);
+      if (!image) return null;
+      return await createImageBitmap(
+        new ImageData(image.rgba, image.width, image.height), UNMULTIPLIED);
+    } catch (error) {
+      console.warn('DDS:', error.message);
       return null;
     }
   }
@@ -12416,9 +13785,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     if (request.embedded) {
       if (looksLikeKtx2(request.embedded)) return decodeKtx2(request.embedded);
       if (FbxPsd.looksLikePsd(request.embedded)) return decodePsd(request.embedded);
+      if (FbxDds.looksLikeDds(request.embedded)) return decodeDds(request.embedded);
       const blob = new Blob([request.embedded]);
       try {
-        return await createImageBitmap(blob);
+        return await createImageBitmap(blob, UNMULTIPLIED);
       } catch (error) {
         return null;                       // an image format the browser refuses
       }
@@ -12431,8 +13801,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     if (/\.psd$/i.test(file.name)) {
       return decodePsd(new Uint8Array(await file.arrayBuffer()));
     }
+    if (/\.dds$/i.test(file.name)) {
+      return decodeDds(new Uint8Array(await file.arrayBuffer()));
+    }
     try {
-      return await createImageBitmap(file);
+      return await createImageBitmap(file, UNMULTIPLIED);
     } catch (error) {
       return null;
     }
@@ -12756,9 +14129,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       missingTextures = textures.missing;
       unreadableTextures = textures.unreadable;
       installPalette(built.palette, built.mesh);
-      viewer.setTextures(textures.images);
-      viewer.setFinishTextures(textures.finish);
-      viewer.setBumpTextures(textures.bump);
+      await viewer.setTextures(textures.images);
+      await viewer.setFinishTextures(textures.finish);
+      await viewer.setBumpTextures(textures.bump);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0;
@@ -12966,9 +14339,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       // The assembled palette, not the geometry's own: an assignment can add
       // materials to it, and the mesh was put together against that one.
       installPalette(built.palette, mesh);
-      viewer.setTextures(textures.images);
-      viewer.setFinishTextures(textures.finish);
-      viewer.setBumpTextures(textures.bump);
+      await viewer.setTextures(textures.images);
+      await viewer.setFinishTextures(textures.finish);
+      await viewer.setBumpTextures(textures.bump);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0;

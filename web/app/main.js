@@ -148,7 +148,7 @@
   const DROP_DEPTH = 8;
 
   //: What this reads, for telling the model in a folder from what is beside it.
-  const MODEL_NAMES = /\.(fbx|obj|gltf|glb|blend|max)$/i;
+  const MODEL_NAMES = /\.(fbx|obj|gltf|glb|blend|max|kn5)$/i;
 
   /** The filesystem entries of a drop, taken before the transfer empties. */
   function droppedEntries(transfer) {
@@ -188,7 +188,7 @@
   }
 
   //: What counts as something a model needs rather than something beside it.
-  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|mtl|bin|json)$/i;
+  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds|mtl|bin|json)$/i;
 
   /**
    * As much of a folder as is worth reading, models and their companions first.
@@ -324,7 +324,7 @@
     // tool decodes, so they arrive the same way as the rest rather than being
     // taken for the model.
     const images = list.filter(
-      (f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd)$/i.test(f.name));
+      (f) => /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds)$/i.test(f.name));
     const libraries = list.filter((f) => /\.mtl$/i.test(f.name));
     // A .gltf keeps its vertices in a .bin beside it, the way an .obj keeps its
     // colours in an .mtl.
@@ -499,9 +499,9 @@
     const textures = await resolveTextures(currentPalette);
     missingTextures = textures.missing;
     unreadableTextures = textures.unreadable;
-    viewer.setTextures(textures.images);
-    viewer.setFinishTextures(textures.finish);
-    viewer.setBumpTextures(textures.bump);
+    await viewer.setTextures(textures.images);
+    await viewer.setFinishTextures(textures.finish);
+    await viewer.setBumpTextures(textures.bump);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
       && textures.finish.length === 0 && textures.bump.length === 0;
@@ -621,7 +621,10 @@
     const started = performance.now();
 
     let doc = null;
-    if (FbxMax.looksLikeMax(buffer)) {
+    if (FbxKn5.looksLikeKn5(buffer)) {
+      // Six bytes at the head say so, and nothing else here begins "sc6969".
+      doc = FbxKn5.parse(buffer);
+    } else if (FbxMax.looksLikeMax(buffer)) {
       // A .max is a compound file, which nothing else here reads, so the
       // eight bytes of its container are enough to know it.
       doc = FbxMax.parse(buffer);
@@ -640,7 +643,7 @@
       else if (FbxObj.looksLikeObj(text)) {
         doc = FbxObj.parse(text, { materials: suppliedMaterials });
       } else return null;
-    } else if (doc.format !== 'blend' && doc.format !== 'gltf') {
+    } else if (doc.format !== 'blend' && doc.format !== 'gltf' && doc.format !== 'kn5') {
       doc.versionSource = 'header';
     }
     doc.fileName = file.name;
@@ -656,7 +659,7 @@
       const doc = await parseModel(file);
       if (!doc) {
         setStatus(`${file.name} is not a model we recognise — not FBX `
-          + '(binary or ASCII), OBJ, glTF or .blend.', 'error');
+          + '(binary or ASCII), OBJ, glTF, .blend, .max or .kn5.', 'error');
         return;
       }
       pendingDonor = donor;
@@ -756,7 +759,56 @@
       const part = target ? parts.get(keyOf(target)) : null;
       if (part && source && source.nodeType === 'Material') part.materials.push(source);
     }
-    return [...parts.values()];
+    const hidden = hiddenModels(info, { keyOf, resolve });
+    return [...parts.values()].filter((part) => !hidden.has(part.key));
+  }
+
+  /**
+   * The models a file says are not to be drawn, and everything under them.
+   *
+   * A scene is not only the geometry it holds: it is the geometry it holds
+   * *switched on*. An Assetto Corsa car ships with its own spares — a shattered
+   * windscreen behind the clear one, a blurred disc inside each wheel, a
+   * low-detail cockpit inside the real one — all of them switched off until the
+   * game wants them. Drawn anyway, the Mercedes comes out with cracked glass in
+   * every window and two cockpits.
+   *
+   * Visibility descends: a node the file switched off takes what hangs below it
+   * with it, which is how the four blurred wheels are turned off by four nodes
+   * rather than by the twelve meshes under them.
+   */
+  function hiddenModels(info, { keyOf, resolve }) {
+    const own = new Map();
+    for (const obj of info.objects) {
+      if (obj.nodeType !== 'Model') continue;
+      const key = keyOf(obj);
+      if (key === null || own.has(key)) continue;
+      const visibility = FbxAnalyze.resolvedProperties(obj, info.templates).Visibility;
+      own.set(key, visibility === 0 || visibility === false);
+    }
+    const parent = new Map();
+    for (const conn of info.connections) {
+      if (conn.kind !== 'OO') continue;
+      const source = resolve(conn.src);
+      const target = resolve(conn.dst);
+      if (!source || !target || source === target) continue;
+      if (source.nodeType !== 'Model' || target.nodeType !== 'Model') continue;
+      const key = keyOf(source);
+      if (key !== null && !parent.has(key)) parent.set(key, keyOf(target));
+    }
+    const answered = new Map();
+    const walk = (key, depth) => {
+      if (key === null || key === undefined || depth > 128) return false;
+      if (answered.has(key)) return answered.get(key);
+      answered.set(key, false);          // a cycle in a malformed file
+      const result = own.get(key) === true
+        || walk(parent.has(key) ? parent.get(key) : null, depth + 1);
+      answered.set(key, result);
+      return result;
+    };
+    const out = new Set();
+    for (const key of own.keys()) if (walk(key, 0)) out.add(key);
+    return out;
   }
 
   /**
@@ -2774,6 +2826,18 @@
   /** Decode one image, from embedded bytes or a file the user supplied. */
   const KTX2_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
 
+  /* Every texture is decoded with its colour and its alpha kept apart.
+   *
+   * Multiplied together — which is what a browser does by default, and what a
+   * 2D canvas can only do — a texel at zero alpha loses its colour outright,
+   * since dividing it back out is a division by nothing. That costs nothing on
+   * a texel nobody sees, and everything on a material that never asked for
+   * alpha in the first place: a `.dds` out of this game routinely carries an
+   * alpha channel of nothing beside a picture that matters. One default
+   * anywhere in the chain throws the colour away before the next call can
+   * ask for it back. */
+  const UNMULTIPLIED = { premultiplyAlpha: 'none' };
+
   const looksLikeKtx2 = (bytes) => bytes && bytes.length > 12
     && KTX2_MAGIC.every((byte, i) => bytes[i] === byte);
 
@@ -2788,7 +2852,8 @@
     const mark = FbxWasm.mark();
     try {
       const image = FbxWasm.decodeKtx2(bytes);
-      return await createImageBitmap(new ImageData(image.rgba, image.width, image.height));
+      return await createImageBitmap(
+        new ImageData(image.rgba, image.width, image.height), UNMULTIPLIED);
     } catch (error) {
       console.warn('KTX2:', error.message);
       return null;
@@ -2808,9 +2873,30 @@
     try {
       const image = FbxPsd.decode(bytes);
       if (!image) return null;
-      return await createImageBitmap(new ImageData(image.rgba, image.width, image.height));
+      return await createImageBitmap(
+        new ImageData(image.rgba, image.width, image.height), UNMULTIPLIED);
     } catch (error) {
       console.warn('PSD:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * The picture inside a DirectDraw Surface.
+   *
+   * Same case again: no browser will make an image of a `.dds`, and Assetto
+   * Corsa keeps almost every texture in one — 111 of the 135 in a single car —
+   * so a `.kn5` without this opens as a grey model with its paint, its badges
+   * and its dials all missing.
+   */
+  async function decodeDds(bytes) {
+    try {
+      const image = FbxDds.decode(bytes);
+      if (!image) return null;
+      return await createImageBitmap(
+        new ImageData(image.rgba, image.width, image.height), UNMULTIPLIED);
+    } catch (error) {
+      console.warn('DDS:', error.message);
       return null;
     }
   }
@@ -2819,9 +2905,10 @@
     if (request.embedded) {
       if (looksLikeKtx2(request.embedded)) return decodeKtx2(request.embedded);
       if (FbxPsd.looksLikePsd(request.embedded)) return decodePsd(request.embedded);
+      if (FbxDds.looksLikeDds(request.embedded)) return decodeDds(request.embedded);
       const blob = new Blob([request.embedded]);
       try {
-        return await createImageBitmap(blob);
+        return await createImageBitmap(blob, UNMULTIPLIED);
       } catch (error) {
         return null;                       // an image format the browser refuses
       }
@@ -2834,8 +2921,11 @@
     if (/\.psd$/i.test(file.name)) {
       return decodePsd(new Uint8Array(await file.arrayBuffer()));
     }
+    if (/\.dds$/i.test(file.name)) {
+      return decodeDds(new Uint8Array(await file.arrayBuffer()));
+    }
     try {
-      return await createImageBitmap(file);
+      return await createImageBitmap(file, UNMULTIPLIED);
     } catch (error) {
       return null;
     }
@@ -3159,9 +3249,9 @@
       missingTextures = textures.missing;
       unreadableTextures = textures.unreadable;
       installPalette(built.palette, built.mesh);
-      viewer.setTextures(textures.images);
-      viewer.setFinishTextures(textures.finish);
-      viewer.setBumpTextures(textures.bump);
+      await viewer.setTextures(textures.images);
+      await viewer.setFinishTextures(textures.finish);
+      await viewer.setBumpTextures(textures.bump);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0;
@@ -3369,9 +3459,9 @@
       // The assembled palette, not the geometry's own: an assignment can add
       // materials to it, and the mesh was put together against that one.
       installPalette(built.palette, mesh);
-      viewer.setTextures(textures.images);
-      viewer.setFinishTextures(textures.finish);
-      viewer.setBumpTextures(textures.bump);
+      await viewer.setTextures(textures.images);
+      await viewer.setFinishTextures(textures.finish);
+      await viewer.setBumpTextures(textures.bump);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0;

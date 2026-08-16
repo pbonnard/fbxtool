@@ -115,6 +115,7 @@ FORMAT_NAMES = {
     "blend": "Blender",
     "gltf": "glTF 2.0",
     "max": "Autodesk 3ds Max",
+    "kn5": "Assetto Corsa kn5",
 }
 
 
@@ -142,6 +143,10 @@ def _render_file(out: _Out, analysis: Analysis) -> None:
         return
     if doc.format == "max":
         _render_max_rows(rows, doc)
+        out.pairs(rows)
+        return
+    if doc.format == "kn5":
+        _render_kn5_rows(rows, doc)
         out.pairs(rows)
         return
 
@@ -261,6 +266,63 @@ def _render_max_rows(rows: list[tuple[str, Any]], doc) -> None:
                                + (" …" if len(assets) > 4 else "")))
     rows.append(("Streams", ", ".join(name.replace("\x05", "")
                                       for name in extra.get("streams", []))))
+
+
+def _render_kn5_rows(rows: list[tuple[str, Any]], doc) -> None:
+    extra = doc.extra
+    rows.append(("Encoding", "binary"))
+    rows.append(("kn5 version", extra.get("kn5_version", "unknown")))
+    if extra.get("encrypted"):
+        rows.append(("Protected", "Custom Shaders Patch kn5 encryption — the model "
+                                  "below is the spoiled copy left in front of it"))
+    meshes = extra.get("meshes", 0)
+    rows.append(("Scene", f"{extra.get('nodes', 0):,} nodes, "
+                          f"{meshes:,} mesh{'' if meshes == 1 else 'es'}, "
+                          f"{extra.get('tree_depth', 0)} deep"))
+    geometry = (f"{extra.get('vertices', 0):,} vertices, "
+                f"{extra.get('triangles', 0):,} triangles")
+    if extra.get("scrambled"):
+        geometry += (f" — but only {extra.get('winding_agreement', 0):.0%} of them "
+                     "are wound the way their own normals point, so this is not "
+                     "the shape that was modelled")
+    rows.append(("Geometry", geometry))
+    if extra.get("skinned_meshes"):
+        rows.append(("Skinned", f"{extra['skinned_meshes']:,} mesh(es) over "
+                                f"{extra.get('bones', 0):,} bones"))
+    if extra.get("lods"):
+        rows.append(("LOD groups", ", ".join(extra["lods"][:6])
+                     + (" …" if len(extra["lods"]) > 6 else "")))
+    if extra.get("inactive_nodes") or extra.get("hidden_meshes"):
+        rows.append(("Not drawn", f"{extra.get('inactive_nodes', 0):,} inactive node(s), "
+                                  f"{extra.get('hidden_meshes', 0):,} hidden mesh(es)"))
+    used = extra.get("materials_used", 0)
+    rows.append(("Materials", f"{extra.get('materials', 0):,} "
+                              f"({used:,} worn by a mesh)"))
+    metals = extra.get("metals", 0)
+    if metals:
+        rows.append(("Metals", f"{metals:,} reflect more facing you than a "
+                               "dielectric can"))
+    shaders = extra.get("shaders") or []
+    if shaders:
+        rows.append(("Shaders", ", ".join(shaders[:6])
+                     + (" …" if len(shaders) > 6 else "")))
+    placeholders = extra.get("placeholder_textures", 0)
+    if placeholders:
+        why = ("held back with the rest of the car" if extra.get("encrypted")
+               else "this car was published with its textures stripped out")
+        rows.append(("Textures", f"{placeholders:,} named, every one of them the "
+                                 f"same stand-in — {why}"))
+    else:
+        formats = extra.get("texture_formats") or {}
+        detail = ", ".join(f"{count} {name}" for name, count in sorted(formats.items()))
+        rows.append(("Textures", f"{extra.get('textures', 0):,} embedded, "
+                                 f"{format_size(extra.get('texture_bytes', 0))}"
+                                 + (f" — {detail}" if detail else "")))
+    missing = extra.get("missing_textures") or []
+    if missing:
+        rows.append(("Named but absent", f"{len(missing):,}: "
+                                         + ", ".join(missing[:4])
+                                         + (" …" if len(missing) > 4 else "")))
 
 
 def _render_blend_rows(rows: list[tuple[str, Any]], doc) -> None:

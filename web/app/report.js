@@ -43,7 +43,7 @@ const FbxReport = (function () {
 
   const FORMAT_NAMES = {
     fbx: 'Autodesk FBX', obj: 'Wavefront OBJ', blend: 'Blender', gltf: 'glTF 2.0',
-    max: 'Autodesk 3ds Max',
+    max: 'Autodesk 3ds Max', kn5: 'Assetto Corsa kn5',
   };
 
   function objRows(doc, pairs) {
@@ -97,6 +97,59 @@ const FbxReport = (function () {
     }
   }
 
+  function kn5Rows(doc, pairs) {
+    const e = doc.extra || {};
+    pairs.push(['Encoding', 'binary']);
+    pairs.push(['kn5 version', e.kn5Version === undefined ? 'unknown' : e.kn5Version]);
+    if (e.encrypted) {
+      pairs.push(['Protected', 'Custom Shaders Patch kn5 encryption — the model '
+        + 'below is the spoiled copy left in front of it']);
+    }
+    pairs.push(['Scene', `${number(e.nodes || 0)} nodes, ${number(e.meshes || 0)} `
+      + `mesh${e.meshes === 1 ? '' : 'es'}, ${e.treeDepth || 0} deep`]);
+    let geometry = `${number(e.vertices || 0)} vertices, `
+      + `${number(e.triangles || 0)} triangles`;
+    if (e.scrambled) {
+      geometry += ` — but only ${Math.round((e.windingAgreement || 0) * 100)}% of them `
+        + 'are wound the way their own normals point, so this is not the shape '
+        + 'that was modelled';
+    }
+    pairs.push(['Geometry', geometry]);
+    if (e.skinnedMeshes) {
+      pairs.push(['Skinned', `${number(e.skinnedMeshes)} mesh(es) over `
+        + `${number(e.bones || 0)} bones`]);
+    }
+    if ((e.lods || []).length) pairs.push(['LOD groups', e.lods.slice(0, 6).join(', ')]);
+    if (e.inactiveNodes || e.hiddenMeshes) {
+      pairs.push(['Not drawn', `${number(e.inactiveNodes || 0)} inactive node(s), `
+        + `${number(e.hiddenMeshes || 0)} hidden mesh(es)`]);
+    }
+    pairs.push(['Materials', `${number(e.materials || 0)} `
+      + `(${number(e.materialsUsed || 0)} worn by a mesh)`]);
+    if (e.metals) {
+      pairs.push(['Metals', `${number(e.metals)} reflect more facing you than a `
+        + 'dielectric can']);
+    }
+    if ((e.shaders || []).length) {
+      pairs.push(['Shaders', e.shaders.slice(0, 6).join(', ')
+        + (e.shaders.length > 6 ? ' …' : '')]);
+    }
+    if (e.placeholderTextures) {
+      pairs.push(['Textures', `${number(e.placeholderTextures)} named, every one of `
+        + 'them the same stand-in — ' + (e.encrypted
+          ? 'held back with the rest of the car'
+          : 'this car was published with its textures stripped out')]);
+    } else {
+      pairs.push(['Textures', `${number(e.textures || 0)} embedded, `
+        + formatSize(e.textureBytes || 0)]);
+    }
+    if ((e.missingTextures || []).length) {
+      pairs.push(['Named but absent', `${number(e.missingTextures.length)}: `
+        + e.missingTextures.slice(0, 4).join(', ')
+        + (e.missingTextures.length > 4 ? ' …' : '')]);
+    }
+  }
+
   function gltfRows(doc, pairs) {
     const e = doc.extra || {};
     pairs.push(['Container', doc.encoding === 'binary'
@@ -135,6 +188,13 @@ const FbxReport = (function () {
     }
     if (doc.format === 'max') {
       maxRows(doc, pairs);
+      if (doc.parseMilliseconds !== undefined) {
+        pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
+      }
+      return section('File', rows(pairs));
+    }
+    if (doc.format === 'kn5') {
+      kn5Rows(doc, pairs);
       if (doc.parseMilliseconds !== undefined) {
         pairs.push(['Parsed in', `${doc.parseMilliseconds.toFixed(1)} ms`]);
       }
