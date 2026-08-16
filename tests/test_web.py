@@ -325,8 +325,11 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
     {"symmetry": (0, 0.001), "offset": (2.0, 0.0, 0.0)},
     # A Dummy over the node, which both have to write a record for.
     {"under_a_dummy": (10.0, 0.0, 5.0)},
+    # A diffuse slot filled by a colour rather than a picture.
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl", "maps_on": "block",
+     "colour_map": (0.02, 0.04, 0.06)},
 ], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot",
-        "glossiness", "symmetry", "dummy"])
+        "glossiness", "symmetry", "dummy", "colour-map"])
 def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
     """The same cross-check over the shapes a real car scene turns out to use.
 

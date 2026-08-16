@@ -847,14 +847,21 @@ _SHADERS = {
 _SHADERS["coronalegacymtl"] = _SHADERS["coronamtl"]
 
 
-def _appearance_of(params, layout):
+def _appearance_of(params, layout, diffuse=None):
     """What a block of parameters says the surface is, by a shader's layout.
 
     Each value comes from the id that holds it, and nothing is returned for a
     block that has no diffuse where the layout says one is — that block
     belongs to something else the material keeps, not to its surface.
+
+    ``diffuse`` stands in for the colour the block itself holds, for a material
+    whose diffuse slot is filled by a colour rather than a picture: the one
+    beside it is then a placeholder.  It goes in *before* the level is applied,
+    since a diffuse switched off is switched off whichever colour it was given.
     """
     def at(which: str, kind: str):
+        if which == "diffuse" and kind == "colour" and diffuse is not None:
+            return diffuse
         if which not in layout:
             return None
         for param, got, value in params:
@@ -902,6 +909,45 @@ def _asset_of(scene: bytes, entity, assets: dict):
             found = assets.get(block[at:at + 16])
             if found:
                 return found
+    return None
+
+
+#: A CoronaColor is a map that is nothing but a colour, and parameter 52 is
+#: that colour.  Read off a BMW: its tyres come to (0.02, 0.02, 0.02), the
+#: black of rubber, and its ``red`` to (0.114, 0, 0).
+_CORONA_COLOUR_MAP = "coronacolor"
+_CORONA_COLOUR = 52
+
+
+def _colour_under(scene: bytes, entities: list, index, depth: int = 0,
+                  seen: set | None = None):
+    """A colour standing where a picture would, at or below one slot.
+
+    A map slot does not have to hold a picture.  Corona fills one with a
+    CoronaColor — a map that is a flat colour — and where a slot is filled at
+    all the material's own colour beside it is a placeholder that means
+    nothing: white for a tyre, mid grey for a red light.  Left unread, that
+    placeholder is what gets painted.
+    """
+    if seen is None:
+        seen = set()
+    if index is None or index >= len(entities) or index in seen or depth > 4:
+        return None
+    seen.add(index)
+    entity = entities[index]
+    if depth and (entity.cls.get("super_id") or 0) == _MTL_CLASS:
+        return None
+    if (entity.cls.get("name") or "").strip().lower() == _CORONA_COLOUR_MAP:
+        for ref in [index, *entity.refs]:
+            if ref >= len(entities):
+                continue
+            for param, kind, value in _params_of(scene, entities[ref]):
+                if param == _CORONA_COLOUR and kind == "colour":
+                    return value
+    for ref in entity.refs:
+        found = _colour_under(scene, entities, ref, depth + 1, seen)
+        if found:
+            return found
     return None
 
 
@@ -1055,13 +1101,17 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     subs: list[int] = []
 
     bump = None
+    painted = None                  # a colour the diffuse slot holds outright
     slots = _MAP_SLOTS.get((entity.cls.get("name") or "").strip().lower())
     if slots is not None:
         # The slots decide it, including when one is empty: a material with a
         # bump and no diffuse map wears no picture and is bumped all the same.
         keyed = _keyed_maps(entities, entity, slots["on"])
-        texture = _asset_under(scene, entities, keyed.get(slots["diffuse"]), assets)
+        diffuse = keyed.get(slots["diffuse"])
+        texture = _asset_under(scene, entities, diffuse, assets)
         bump = _asset_under(scene, entities, keyed.get(slots["bump"]), assets)
+        if texture is None:
+            painted = _colour_under(scene, entities, diffuse)
 
     queue = [(at, entity.cls.get("name") or "") for at in entity.refs]
     walked = set()
@@ -1084,7 +1134,7 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
         # filter colour that would otherwise pass for the colour of the
         # surface.
         if layout and look is None:
-            look = _appearance_of(params, layout)
+            look = _appearance_of(params, layout, painted)
         if plain is None:
             plain = next((v for _, kind, v in params if kind == "colour"), None)
         if texture is None and slots is None:
@@ -1094,6 +1144,10 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     # said of one is that the first colour in it is the diffuse.
     if look is None:
         look = {"colour": plain, "specular": None, "glossiness": None, "level": None}
+    # Where no shader layout claimed the block, the slot's colour is still
+    # better than the placeholder beside it.
+    if painted is not None and look["colour"] is None:
+        look = dict(look, colour=painted)
     kind = (entity.cls.get("name") or "").strip().lower()
     return _Material(_material_name(scene, entity), look, texture, subs, bump,
                      kind in _LIST_MATERIALS)

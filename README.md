@@ -375,6 +375,16 @@ out with the mask cut into its sunroof painted across the roof in red, its
 windows shaded by their own normal maps, and violet round every light. A class
 whose numbering has not been read off the files keeps the older rule.
 
+And a slot does not have to hold a picture. Corona fills one with a
+**CoronaColor** — a map that is nothing but a colour, kept at parameter 52 —
+and where a slot is filled at all, the colour beside it in the block is a
+placeholder that means nothing. Read that placeholder instead and a BMW's
+tyres come out white, and so does every rubber seal and trim on the car:
+533,856 triangles of it, which is what made a black body look painted in
+patches. The slot's colour goes in *before* the level is applied, since a
+diffuse switched off is switched off whichever colour it was given — read the
+other way round, a car paint with no diffuse at all turns white.
+
 A material that names other materials is two different things and they must not
 be confused. A **Multi/Sub-Object** is a numbered list, and a face's material id
 picks a slot out of it. A **Blend** is a surface of its own, made by mixing

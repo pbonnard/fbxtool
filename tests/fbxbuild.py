@@ -1764,6 +1764,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               materials: "list[int] | None" = None, slots: int = 0,
               child: "tuple[float, float, float] | None" = None,
               maps: "dict[int, str] | None" = None, maps_on: str = "material",
+              colour_map: "tuple[float, float, float] | None" = None,
+              diffuse_level: float = MAX_DIFFUSE_LEVEL,
               blend_slots: "set[int] | None" = None,
               material_class: "str | None" = None,
               param_chunk: int = 0x100E, assets_version: int = 3,
@@ -1805,6 +1807,10 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     ``materials`` gives each face the slot it wears.  ``child`` hangs a second
     node off the first, placed there, which is how a scene says a wheel belongs
     to a body.
+
+    ``colour_map`` fills the diffuse slot with a CoronaColor of that colour —
+    a map that is nothing but a colour, which is what leaves the colour beside
+    it in the block a placeholder.
 
     ``symmetry`` puts a Symmetry modifier over the mesh, as ``(axis,
     threshold)`` — the reader has to mirror the cube itself, since the modifier
@@ -1890,7 +1896,7 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
         block = (_max_param_small_colour(101, MAX_DIFFUSE)
                  + _max_param_small_colour(102, MAX_SPECULAR)
                  + _max_param_small_colour(103, MAX_REFRACTION)
-                 + _max_param_small_float(121, MAX_DIFFUSE_LEVEL)
+                 + _max_param_small_float(121, diffuse_level)
                  + _max_param_small_float(122, MAX_SPECULAR_LEVEL_CORONA)
                  + _max_param_small_float(123, MAX_REFRACTION_LEVEL)
                  + _max_param_texmap(141)
@@ -1933,6 +1939,19 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                             container=True)
         map_refs.append((key, nxt + 2))
         nxt += 3
+
+    # A CoronaColor in the diffuse slot: a map that is nothing but a colour,
+    # which is what Corona fills a slot with when there is no picture. The
+    # colour beside it in the block is then a placeholder.
+    if colour_map is not None:
+        extra += _max_chunk(0x0002,
+                            _max_param_colour(52, colour_map, param_chunk),
+                            container=True)
+        extra += _max_chunk(0x0010,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        map_refs.append((0 if maps_on == "block" else 7, nxt + 1))
+        nxt += 2
 
     # Corona keys its maps on the block rather than on the material, so where
     # the caller asks for that the block is what carries them.
@@ -2169,7 +2188,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                + _max_class("Symmetry", 0x810, 0x00B7)
                # A Dummy is a helper, not geometry: superclass 0x50, which is
                # what keeps it out of the tally of objects with no mesh.
-               + _max_class("Dummy", 0x50, 8872500))
+               + _max_class("Dummy", 0x50, 8872500)
+               + _max_class("CoronaColor", 0xC10, 0x0300))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),

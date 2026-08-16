@@ -812,6 +812,36 @@ def test_a_corona_material_keys_its_maps_on_its_block():
     assert _bound(doc) == {"DiffuseColor": "colour.png", "Bump": "bump.png"}
 
 
+def test_a_slot_filled_by_a_colour_is_read_for_that_colour():
+    """A map slot does not have to hold a picture.
+
+    Corona fills one with a CoronaColor — a map that is nothing but a colour —
+    and the colour beside it in the block is then a placeholder that means
+    nothing.  Read that instead and a BMW's tyres come out white, and so does
+    every rubber seal and trim on the car: 533,856 triangles of it, which is
+    what made the body look painted in patches.
+    """
+    props = _material_props(parse_max(
+        fb.build_max(shader="CoronaMtl", material_class="CoronaMtl", maps_on="block",
+                     colour_map=(0.02, 0.04, 0.06)), load_arrays=True))
+    # Scaled by the level beside it, exactly as the block's own colour would be.
+    assert props["DiffuseColor"] == pytest.approx(
+        [c * fb.MAX_DIFFUSE_LEVEL for c in (0.02, 0.04, 0.06)], abs=1e-6)
+
+
+def test_a_diffuse_that_is_switched_off_stays_off_whatever_fills_it():
+    """The level is the last word.
+
+    A car paint with a diffuse level of zero is pure reflection, and the colour
+    its slot holds is no more the surface than the colour beside it — read
+    without the level, a black car turns white.
+    """
+    props = _material_props(parse_max(
+        fb.build_max(shader="CoronaMtl", material_class="CoronaMtl", maps_on="block",
+                     colour_map=(0.8, 0.8, 0.8), diffuse_level=0.0), load_arrays=True))
+    assert props["DiffuseColor"] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+
+
 def test_a_shader_whose_slots_are_not_known_keeps_the_older_rule():
     """The first picture below the material, which is all that can be said of
     a plugin nobody has read the reference order of."""

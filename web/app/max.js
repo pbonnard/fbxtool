@@ -734,8 +734,14 @@ const FbxMax = (function () {
    * block that has no diffuse where the layout says one is — that block
    * belongs to something else the material keeps, not to its surface.
    */
-  function appearanceOf(params, layout) {
+  function appearanceOf(params, layout, diffuse = null) {
     const at = (which, key) => {
+      // `diffuse` stands in for the colour the block itself holds, for a
+      // material whose diffuse slot is filled by a colour rather than a
+      // picture: the one beside it is then a placeholder. It goes in before
+      // the level is applied, since a diffuse switched off is switched off
+      // whichever colour it was given.
+      if (which === 'diffuse' && key === 'colour' && diffuse) return diffuse;
       if (layout[which] === undefined) return null;
       const found = params.find((p) => p.id === layout[which] && p[key] !== undefined);
       return found ? found[key] : null;
@@ -778,6 +784,43 @@ const FbxMax = (function () {
       return true;
     });
     return found;
+  }
+
+  /* A CoronaColor is a map that is nothing but a colour, and parameter 52 is
+   * that colour. Read off a BMW: its tyres come to (0.02, 0.02, 0.02), the
+   * black of rubber, and its `red` to (0.114, 0, 0). */
+  const CORONA_COLOUR_MAP = 'coronacolor';
+  const CORONA_COLOUR = 52;
+
+  /**
+   * A colour standing where a picture would, at or below one slot.
+   *
+   * A map slot does not have to hold a picture. Corona fills one with a
+   * CoronaColor — a map that is a flat colour — and where a slot is filled at
+   * all the material's own colour beside it is a placeholder that means
+   * nothing: white for a tyre, mid grey for a red light. Left unread, that
+   * placeholder is what gets painted.
+   */
+  function colourUnder(view, entities, index, depth = 0, seen = new Set()) {
+    if (index === undefined || index >= entities.length || seen.has(index) || depth > 4) {
+      return null;
+    }
+    seen.add(index);
+    const entity = entities[index];
+    if (depth && (entity.cls.superId || 0) === MTL_CLASS) return null;
+    if (String(entity.cls.name || '').trim().toLowerCase() === CORONA_COLOUR_MAP) {
+      for (const ref of [index, ...entity.refs]) {
+        if (ref >= entities.length) continue;
+        for (const p of paramsOf(view, entities[ref])) {
+          if (p.id === CORONA_COLOUR && p.colour !== undefined) return p.colour;
+        }
+      }
+    }
+    for (const ref of entity.refs) {
+      const found = colourUnder(view, entities, ref, depth + 1, seen);
+      if (found) return found;
+    }
+    return null;
   }
 
   /**
@@ -886,13 +929,16 @@ const FbxMax = (function () {
     let texture = null;
     const subs = [];
     let bump = null;
+    let painted = null;             // a colour the diffuse slot holds outright
     const slots = MAP_SLOTS[String(entity.cls.name || '').trim().toLowerCase()];
     if (slots) {
       // The slots decide it, including when one is empty: a material with a
       // bump and no diffuse map wears no picture and is bumped all the same.
       const keyed = keyedMaps(entities, entity, slots.on);
-      texture = assetUnder(view, bytes, entities, keyed[slots.diffuse], assets);
+      const diffuse = keyed[slots.diffuse];
+      texture = assetUnder(view, bytes, entities, diffuse, assets);
       bump = assetUnder(view, bytes, entities, keyed[slots.bump], assets);
+      if (!texture) painted = colourUnder(view, entities, diffuse);
     }
     const queue = entity.refs.map((at) => [at, entity.cls.name]);
     const walked = new Set();
@@ -910,7 +956,7 @@ const FbxMax = (function () {
       // A shader's block wins wherever the walk finds it: a Standard material
       // keeps three more blocks of its own, and one of them holds a filter
       // colour that would otherwise pass for the colour of the surface.
-      if (layout && !look) look = appearanceOf(params, layout);
+      if (layout && !look) look = appearanceOf(params, layout, painted);
       if (!plain) {
         const first = params.find((p) => p.colour !== undefined);
         if (first) plain = first.colour;
@@ -923,6 +969,9 @@ const FbxMax = (function () {
     if (!look) {
       look = { colour: plain, specular: null, glossiness: null, level: null, opacity: null };
     }
+    // Where no shader layout claimed the block, the slot's colour is still
+    // better than the placeholder beside it.
+    if (painted && !look.colour) look = { ...look, colour: painted };
     const kind = String(entity.cls.name || '').trim().toLowerCase();
     return {
       name: materialName(view, bytes, entity),
