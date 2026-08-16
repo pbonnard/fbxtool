@@ -1111,6 +1111,105 @@ class _Entity:
         self.typed: dict[int, int] = {}
 
 
+#: What a Symmetry modifier's parameter block holds, by the id of each.
+#:
+#: Read off a Ferrari whose forty-two symmetric parts all agree: 0 is an int
+#: naming the axis, 1 and 2 are the slice and weld switches — on for every one
+#: of them — 3 is the weld threshold, and 4 is the flip, set on exactly one
+#: part in the car.
+_SYM_AXIS = 0
+_SYM_THRESHOLD = 3
+
+
+def _symmetry_of(scene: bytes, entities: list, index: int):
+    """Which way a Symmetry modifier mirrors, and how near the seam welds.
+
+    The whole and half of it: the ints and the bool have to be read straight
+    out of the block, since the reader that serves the shaders throws away
+    every parameter that is not float-valued.
+    """
+    axis, threshold = None, 0.0
+    for ref in [index, *entities[index].refs]:
+        if ref >= len(entities):
+            continue
+        for idn, body, tail, _ in _chunks(scene, entities[ref].start, entities[ref].end):
+            if idn not in _PARAMS or tail - body < 8:
+                continue
+            param, kind = struct.unpack_from("<HH", scene, body)
+            if param == _SYM_AXIS and kind == _PARAM_INT:
+                axis = struct.unpack_from("<i", scene, tail - 4)[0]
+            elif param == _SYM_THRESHOLD and kind not in (_PARAM_INT, _PARAM_BOOL,
+                                                          _PARAM_TEXMAP):
+                threshold = struct.unpack_from("<f", scene, tail - 4)[0]
+    if axis is None or not 0 <= axis <= 2:
+        return None
+    return axis, max(0.0, threshold)
+
+
+def _mirrored(mesh: _Mesh, axis: int, plane: float, threshold: float) -> _Mesh:
+    """The mesh with its own mirror image joined to it.
+
+    Which is what a Symmetry modifier is for, and half of what the artist
+    modelled is what a reader that skips it comes away with — a car whose
+    every mirrored panel is missing down one side.
+
+    A vertex within the threshold of the plane is *on* it: the two halves share
+    it rather than each keeping their own, which is the weld, and it is snapped
+    exactly onto the plane so the seam closes. Everything else is copied across
+    to the other side. A mirror reverses which way round a face is wound, so
+    the copies are wound backwards to keep facing outwards, and a face whose
+    every corner sits on the seam is not copied at all — it would be the same
+    face twice.
+    """
+    count = len(mesh.positions) // 3
+    out = _Mesh()
+    out.positions = list(mesh.positions)
+    out.uvs = list(mesh.uvs)
+
+    #: Where each vertex of the mirrored half lives — itself, where it is on
+    #: the plane and shared.
+    twin = [0] * count
+    for i in range(count):
+        at = i * 3 + axis
+        if abs(out.positions[at] - plane) <= threshold:
+            out.positions[at] = plane
+            twin[i] = i
+        else:
+            twin[i] = len(out.positions) // 3
+            out.positions.extend(mesh.positions[i * 3:i * 3 + 3])
+            out.positions[-3 + axis] = 2.0 * plane - mesh.positions[at]
+
+    out.polygons = list(mesh.polygons)
+    out.face_uvs = list(mesh.face_uvs)
+    out.materials = list(mesh.materials)
+    out.groups = list(mesh.groups)
+    out.faces = mesh.faces
+    out.edges = mesh.edges
+
+    face, start = 0, 0
+    for at, index in enumerate(mesh.polygons):
+        if index >= 0:
+            continue
+        corners = list(mesh.polygons[start:at]) + [~index]
+        mirrored = [twin[c] for c in corners]
+        if mirrored != corners:                 # not a face lying on the seam
+            reversed_corners = mirrored[::-1]
+            out.polygons.extend(reversed_corners[:-1])
+            out.polygons.append(~reversed_corners[-1])
+            if mesh.face_uvs:
+                out.face_uvs.extend(mesh.face_uvs[start:at + 1][::-1])
+            if mesh.materials:
+                out.materials.append(mesh.materials[face])
+            if mesh.groups:
+                out.groups.append(mesh.groups[face])
+            out.faces += 1
+        face += 1
+        start = at + 1
+    if len(out.face_uvs) != len(out.polygons):
+        out.uvs, out.face_uvs = [], []
+    return out
+
+
 def _smoothing_of(scene: bytes, entities: list, index: int) -> int:
     """How many rounds a subdividing modifier asks for.
 
@@ -1388,12 +1487,15 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
     #: How many parts were modelled with a subdividing modifier, and the most
     #: rounds any of them asks for.
     smoothed = [0, 0]
+    #: How many parts the reader mirrored for a Symmetry modifier.
+    mirrored = [0]
     for node in nodes:
         found = _find(scene, node.start, node.end, _NAME)
         name = _text(scene[found[0]:found[1]]) if found else ""
         target = node.typed.get(1)
         mesh = meshes.get(target) if target is not None else None
         smoothing = 0
+        symmetry = None
         if mesh is None and target is not None and target < len(entities):
             # A modifier sits between the node and its mesh; the base object is
             # what it was built from, so follow the references down to it.
@@ -1404,13 +1506,25 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                 if at in seen or at >= len(entities):
                     continue
                 seen.add(at)
-                if "smooth" in (entities[at].cls.get("name") or "").lower():
+                kind = (entities[at].cls.get("name") or "").lower()
+                if "smooth" in kind:
                     smoothing = max(smoothing, _smoothing_of(scene, entities, at))
+                elif kind == "symmetry" and symmetry is None:
+                    symmetry = _symmetry_of(scene, entities, at)
                 mesh = meshes.get(at)
                 if mesh is None:
                     queue.extend(entities[at].refs)
-        if mesh is None:
-            continue
+        offset = _object_offset(scene, node)
+        if mesh is not None and symmetry is not None:
+            # A modifier works about the object's pivot, and the mesh is stored
+            # an object offset away from it — so the plane the artist mirrored
+            # across sits at minus that offset in the mesh's own coordinates.
+            # Checked against 3ds Max's own export of the same car: for all
+            # forty-two of its symmetric parts, that is the plane that gives
+            # back the width the export has.
+            axis, threshold = symmetry
+            mirrored[0] += 1
+            mesh = _mirrored(mesh, axis, -offset["translation"][axis], threshold)
         wearing = node.typed.get(3)
         # Every material below this one, however deep: a slot of a
         # Multi/Sub-Object is often a Blend, and what that Blend is made of is
@@ -1428,8 +1542,12 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         if smoothing:
             smoothed[0] += 1
             smoothed[1] = max(smoothed[1], smoothing)
+        # Every node, and not only the ones that draw something.  A Dummy has
+        # no geometry, and left out it has no record for its children to hang
+        # from — so a Ferrari whose wheels are grouped under one comes out with
+        # all four of them stacked at the origin, inside the car.
         placed.append((node, name, mesh, _node_transform(scene, entities, node),
-                       wearing, _object_offset(scene, node)))
+                       wearing, offset))
 
     _resolve_blends(materials)
 
@@ -1522,15 +1640,17 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
                   for at, (entity, *_) in enumerate(placed)}
 
     for at, (entity, name, mesh, placement, wearing, offset) in enumerate(placed):
+        # Two uids apiece whether or not there is geometry, so that the numbers
+        # a child was promised above are the numbers it gets.
         geometry_uid, model_uid = uid + 1, uid + 2
         uid += 2
         label = name or f"object{at + 1}"
-        geometry_children = [
+        geometry_children = [] if mesh is None else [
             _node("Vertices", [_array("d", mesh.positions, load_arrays)]),
             _node("PolygonVertexIndex", [_array("i", mesh.polygons, load_arrays)]),
             _node("GeometryVersion", [_i(124)]),
         ]
-        if mesh.uvs and mesh.face_uvs:
+        if mesh is not None and mesh.uvs and mesh.face_uvs:
             geometry_children.append(_node("LayerElementUV", [_i(0)], [
                 _node("Version", [_i(101)]),
                 _node("Name", [_s("map1")]),
@@ -1552,7 +1672,9 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         elif wearing in material_uids:
             slots = [material_uids[wearing]]
 
-        if len(slots) > 1 and mesh.materials:
+        if mesh is None:
+            slots = []
+        elif len(slots) > 1 and mesh.materials:
             per_face = [material % len(slots) for material in mesh.materials]
             geometry_children.append(_node("LayerElementMaterial", [_i(0)], [
                 _node("Version", [_i(101)]),
@@ -1570,18 +1692,20 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         # Which faces share a smooth normal, and so where an edge is hard.  A
         # .max stores no normals — only the cage — so without this the mesh can
         # only be shaded flat, and every crease on a car body rounds away.
-        if any(mesh.groups):
+        if mesh is not None and any(mesh.groups):
             geometry_children.append(_node("LayerElementSmoothing", [_i(0)], [
                 _node("Version", [_i(102)]),
                 _node("MappingInformationType", [_s("ByPolygon")]),
                 _node("ReferenceInformationType", [_s("Direct")]),
                 _node("Smoothing", [_array("i", mesh.groups, load_arrays)]),
             ]))
-        geometry_children.append(_node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
-
-        objects_node.children.append(
-            _node("Geometry", [_l(geometry_uid), _s(f"{label}\x00\x01Geometry"), _s("Mesh")],
-                  geometry_children))
+        if mesh is not None:
+            geometry_children.append(
+                _node("Layer", [_i(0)], [_node("Version", [_i(100)])]))
+            objects_node.children.append(
+                _node("Geometry",
+                      [_l(geometry_uid), _s(f"{label}\x00\x01Geometry"), _s("Mesh")],
+                      geometry_children))
 
         model_props = []
         translation = placement["translation"]
@@ -1605,15 +1729,17 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         if offset["scale"] != (1.0, 1.0, 1.0):
             model_props.append(_p70("GeometricScaling", "Vector3D",
                                     *(_d(v) for v in offset["scale"])))
+        # A node with nothing to draw is still a place to hang things from, and
+        # an FBX calls that a Null.
         objects_node.children.append(
-            _node("Model", [_l(model_uid), _s(f"{label}\x00\x01Model"), _s("Mesh")],
+            _node("Model", [_l(model_uid), _s(f"{label}\x00\x01Model"),
+                            _s("Mesh" if mesh is not None else "Null")],
                   [_node("Version", [_i(232)]),
                    _node("Properties70", [], model_props)]))
-        # A parent that carries no geometry of its own has no record to hang
-        # from, so its children hang from the scene as they did before.
         under = model_uids.get(_node_parent(scene, entity), 0)
         connections.append(_node("C", [_s("OO"), _l(model_uid), _l(under)]))
-        connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
+        if mesh is not None:
+            connections.append(_node("C", [_s("OO"), _l(geometry_uid), _l(model_uid)]))
         for slot in slots:
             connections.append(_node("C", [_s("OO"), _l(slot), _l(model_uid)]))
 
@@ -1630,17 +1756,19 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
             _node("P", [_s("UnitScaleFactor"), _s("double"), _s("Number"), _s(""), _d(1.0)]),
         ]),
     ]))
+    # A node that draws nothing is a place to hang things from and not a part.
+    drawn = [row for row in placed if row[2] is not None]
     root.children.append(_node("Definitions", [], [
         _node("Version", [_i(100)]),
         _node("Count", [_i(len(objects_node.children))]),
-        _node("ObjectType", [_s("Geometry")], [_node("Count", [_i(len(placed))])]),
+        _node("ObjectType", [_s("Geometry")], [_node("Count", [_i(len(drawn))])]),
         _node("ObjectType", [_s("Model")], [_node("Count", [_i(len(placed))])]),
         _node("ObjectType", [_s("Material")], [_node("Count", [_i(len(material_uids))])]),
     ]))
     root.children.append(objects_node)
     root.children.append(_node("Connections", [], connections))
 
-    vertices = sum(len(mesh.positions) // 3 for _, _, mesh, _, _, _ in placed)
+    vertices = sum(len(row[2].positions) // 3 for row in drawn)
     doc.extra = {
         "streams": compound.names,
         "sector": compound.sector,
@@ -1651,7 +1779,7 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         "entities": len(entities),
         "nodes": len(nodes),
         "meshes": len(meshes),
-        "placed": len(placed),
+        "placed": len(drawn),
         "vertices": vertices,
         "faces": sum(mesh.faces for mesh in meshes.values()),
         "undecoded": undecoded,
@@ -1659,11 +1787,12 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         "materials": len(material_uids),
         "textures": sorted(texture_uids),
         "smoothed": smoothed[0],
+        "mirrored": mirrored[0],
         "smoothing": smoothed[1],
     }
     if undecoded:
         doc.warn("no geometry read from "
                  + ", ".join(f"{count} {name}" for name, count in sorted(undecoded.items())))
-    if not placed:
+    if not drawn:
         doc.warn("no Editable Poly geometry in this scene")
     return doc

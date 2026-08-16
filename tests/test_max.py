@@ -661,6 +661,102 @@ def test_the_hierarchy_is_reported_as_the_scene_keeps_it():
     assert lines[kid].index("body_child") > lines[body].index("body")
 
 
+# ------------------------------------------------------- what a modifier makes
+
+
+def _vertices(doc):
+    values = doc.root.path("Objects", "Geometry").get("Vertices").props[0].value
+    return [values[i::3] for i in range(3)]
+
+
+def test_a_symmetry_modifier_puts_the_other_half_back():
+    """Half of what the artist modelled is what a reader that skips it gets.
+
+    The modifier mirrors about the object's pivot, and the mesh is stored an
+    object offset away from it — so the plane sits at minus that offset in the
+    mesh's own coordinates.  Here the cube spans -1 to 1 and the pivot is two
+    away, which puts the plane at -2 and its reflection at -5 to -3.
+    """
+    plain = parse_max(fb.build_max(), load_arrays=True)
+    assert len(_vertices(plain)[0]) == 8
+    assert plain.extra["mirrored"] == 0
+
+    doc = parse_max(fb.build_max(symmetry=(0, 0.001), offset=(2.0, 0.0, 0.0)),
+                    load_arrays=True)
+    x, y, z = _vertices(doc)
+    assert len(x) == 16, "the mirror image should double the cube"
+    assert (round(min(x), 3), round(max(x), 3)) == (-5.0, 1.0)
+    # Only the mirrored axis moves; the other two are untouched.
+    assert (round(min(y), 3), round(max(y), 3)) == (-1.0, 1.0)
+    assert (round(min(z), 3), round(max(z), 3)) == (-1.0, 1.0)
+    assert doc.extra["mirrored"] == 1
+    # Twice the faces, and each of them still a quad.
+    polygons = doc.root.path("Objects", "Geometry").get("PolygonVertexIndex").props[0].value
+    assert len(polygons) == 48
+    assert sum(1 for v in polygons if v < 0) == 12
+
+
+def test_the_mirror_goes_on_the_axis_the_modifier_names():
+    """Not always X: the modifier says which, and mirroring the wrong one puts
+    the other half somewhere nobody modelled."""
+    for axis in (0, 1, 2):
+        offset = [0.0, 0.0, 0.0]
+        offset[axis] = 2.0
+        doc = parse_max(fb.build_max(symmetry=(axis, 0.001), offset=tuple(offset)),
+                        load_arrays=True)
+        got = _vertices(doc)
+        assert (round(min(got[axis]), 3), round(max(got[axis]), 3)) == (-5.0, 1.0)
+        for other in (a for a in range(3) if a != axis):
+            assert (round(min(got[other]), 3), round(max(got[other]), 3)) == (-1.0, 1.0)
+
+
+def test_the_seam_of_a_mirror_is_welded_rather_than_doubled():
+    """A vertex on the plane belongs to both halves.
+
+    Kept twice over, the seam is a crack: two faces meeting along an edge that
+    is really two edges, which shades as a hard line down the middle of a
+    panel that has none.
+    """
+    # The pivot one away, so the plane lands exactly on the cube's own face.
+    doc = parse_max(fb.build_max(symmetry=(0, 0.001), offset=(1.0, 0.0, 0.0)),
+                    load_arrays=True)
+    x, _, _ = _vertices(doc)
+    assert len(x) == 12, "four of the eight corners sit on the plane"
+    assert (round(min(x), 3), round(max(x), 3)) == (-3.0, 1.0)
+
+    # And a threshold wide enough to swallow the cube welds all of it flat,
+    # which is what the file would be asking for.
+    flat = parse_max(fb.build_max(symmetry=(0, 4.0), offset=(0.0, 0.0, 0.0)),
+                     load_arrays=True)
+    assert len(_vertices(flat)[0]) == 8
+
+
+def test_a_node_that_draws_nothing_still_places_what_hangs_off_it():
+    """A Dummy is a place to hang things from, and its transform is real.
+
+    Written out only where there is geometry, it has no record for its
+    children to name — so a Ferrari whose four wheels are each grouped under
+    one comes out with all four stacked at the origin, inside the car.
+    """
+    doc = parse_max(fb.build_max(name="wheel", under_a_dummy=(10.0, 0.0, 5.0)),
+                    load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    models = {n.props[1].value.split("\x00")[0]: n
+              for n in objects.children if n.name == "Model"}
+    assert sorted(models) == ["Group001", "wheel"]
+    # The one with nothing to draw is a Null, and it carries the placement.
+    assert models["Group001"].props[2].value == "Null"
+    assert models["wheel"].props[2].value == "Mesh"
+    placement = {q.props[0].value: [round(x.value, 3) for x in q.props[4:7]]
+                 for q in models["Group001"].get("Properties70").children}
+    assert placement["Lcl Translation"] == [10.0, 0.0, 5.0]
+
+    assert _parent_of(doc, models["wheel"].props[0].value) \
+        == models["Group001"].props[0].value
+    # It is a place to hang things from and not a part of the model.
+    assert doc.extra["placed"] == 1 and doc.extra["nodes"] == 2
+
+
 # ------------------------------------------------- which map is the colour one
 
 

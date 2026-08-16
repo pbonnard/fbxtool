@@ -277,6 +277,13 @@ the ground and the body in the air. Read the link and the nine parts of that
 car land where its own `.obj` export puts them, to within the decimal the
 `.obj` rounds to.
 
+Every node gets a record, including the ones that draw nothing. A **Dummy** is
+a helper with no geometry at all, and it exists precisely to place what hangs
+off it — so left out, its children have nothing to name and fall back to the
+scene. A Ferrari that groups each wheel under one came out with all four
+stacked at the origin, inside the car. A node with no mesh is written as a
+`Null`, which is what an FBX calls the same thing.
+
 A scene is usually modelled smooth and stored as its cage: 157 of the Smart's
 164 parts carry a TurboSmooth, ×2, so what the file holds is a fraction of what
 was drawn. The report says so, and the viewer opens on the rounds the modifier
@@ -378,6 +385,30 @@ shifted everything after them and each panel was painted out of the wrong tin.
 A Blend also takes its look and its maps from the base coat it is built on:
 what its own blocks hold is the mask that mixes its ingredients, and read as a
 colour that is a tyre painted with the map that blends its dirt in.
+
+### The one modifier that is run
+
+The stack is not run, with one exception. **TurboSmooth** only changes how
+smooth a thing is, and the viewer's own subdivision covers it. **Symmetry**
+changes what is *there*: the artist models half a car and the modifier mirrors
+it, so a reader that skips it comes away with half of everything. A Ferrari
+250GT was missing 41,531 vertices that way — forty-two of its parts arrived as
+one side of themselves, while the eighty-two without the modifier were exact to
+the vertex against 3ds Max's own export of the same scene.
+
+So Symmetry is applied. It mirrors about the object's pivot, which sits at
+minus the object offset in the mesh's own coordinates — the plane that, for all
+forty-two, gives back exactly the width the export has. A vertex within the
+modifier's threshold of the plane belongs to both halves and is snapped onto
+it, which is the weld; keep two and the seam is a crack that shades as a hard
+line down the middle of a panel that has none. Mirroring reverses which way
+round a face is wound, so the copies are wound backwards, and a face lying
+wholly on the seam is not copied at all.
+
+Two things are still left alone: the **slice** the modifier can take along its
+own plane, which matters only for a part that straddles it — two of that
+Ferrari's forty-two — and **Shell**, which gives a surface thickness and leaves
+six of its parts a single skin.
 
 ### Checked against 3ds Max's own export
 

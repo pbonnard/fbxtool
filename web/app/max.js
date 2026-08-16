@@ -940,6 +940,116 @@ const FbxMax = (function () {
 
   /* ---------------------------------------------------------------- scene */
 
+  /* What a Symmetry modifier's parameter block holds, by the id of each.
+   *
+   * Read off a Ferrari whose forty-two symmetric parts all agree: 0 is an int
+   * naming the axis, 1 and 2 are the slice and weld switches — on for every
+   * one of them — 3 is the weld threshold, and 4 is the flip, set on exactly
+   * one part in the car. */
+  const SYM_AXIS = 0;
+  const SYM_THRESHOLD = 3;
+
+  /**
+   * Which way a Symmetry modifier mirrors, and how near the seam welds.
+   *
+   * The whole and half of it: the ints and the bool have to be read straight
+   * out of the block, since the reader that serves the shaders throws away
+   * every parameter that is not float-valued.
+   */
+  function symmetryOf(view, entities, index) {
+    let axis = null;
+    let threshold = 0;
+    for (const ref of [index, ...entities[index].refs]) {
+      if (ref >= entities.length) continue;
+      chunks(view, entities[ref].start, entities[ref].end, (id, body, tail) => {
+        if (!PARAMS.includes(id) || tail - body < 8) return true;
+        const param = view.getUint16(body, true);
+        const kind = view.getUint16(body + 2, true);
+        if (param === SYM_AXIS && kind === PARAM_INT) {
+          axis = view.getInt32(tail - 4, true);
+        } else if (param === SYM_THRESHOLD
+          && kind !== PARAM_INT && kind !== PARAM_BOOL && kind !== PARAM_TEXMAP) {
+          threshold = view.getFloat32(tail - 4, true);
+        }
+        return true;
+      });
+    }
+    if (axis === null || axis < 0 || axis > 2) return null;
+    return { axis, threshold: Math.max(0, threshold) };
+  }
+
+  /**
+   * The mesh with its own mirror image joined to it.
+   *
+   * Which is what a Symmetry modifier is for, and half of what the artist
+   * modelled is what a reader that skips it comes away with — a car whose
+   * every mirrored panel is missing down one side.
+   *
+   * A vertex within the threshold of the plane is *on* it: the two halves
+   * share it rather than each keeping their own, which is the weld, and it is
+   * snapped exactly onto the plane so the seam closes. Everything else is
+   * copied across. A mirror reverses which way round a face is wound, so the
+   * copies are wound backwards to keep facing outwards, and a face whose every
+   * corner sits on the seam is not copied at all — it would be the same face
+   * twice.
+   */
+  function mirrored(mesh, axis, plane, threshold) {
+    const count = mesh.positions.length / 3;
+    const positions = Array.from(mesh.positions);
+    const twin = new Int32Array(count);
+    for (let i = 0; i < count; i++) {
+      const at = i * 3 + axis;
+      if (Math.abs(positions[at] - plane) <= threshold) {
+        positions[at] = plane;
+        twin[i] = i;
+      } else {
+        twin[i] = positions.length / 3;
+        positions.push(mesh.positions[i * 3], mesh.positions[i * 3 + 1],
+          mesh.positions[i * 3 + 2]);
+        positions[positions.length - 3 + axis] = 2 * plane - mesh.positions[at];
+      }
+    }
+
+    const out = {
+      positions,
+      polygons: Array.from(mesh.polygons),
+      uvs: mesh.uvs ? Array.from(mesh.uvs) : mesh.uvs,
+      faceUvs: mesh.faceUvs ? Array.from(mesh.faceUvs) : mesh.faceUvs,
+      materials: mesh.materials ? Array.from(mesh.materials) : mesh.materials,
+      groups: mesh.groups ? Array.from(mesh.groups) : mesh.groups,
+      faces: mesh.faces,
+      edges: mesh.edges,
+    };
+
+    let face = 0;
+    let start = 0;
+    for (let at = 0; at < mesh.polygons.length; at++) {
+      const index = mesh.polygons[at];
+      if (index >= 0) continue;
+      const corners = mesh.polygons.slice(start, at).concat([~index]);
+      const copy = corners.map((c) => twin[c]);
+      if (copy.some((c, i) => c !== corners[i])) {
+        const back = copy.slice().reverse();
+        for (let k = 0; k < back.length - 1; k++) out.polygons.push(back[k]);
+        out.polygons.push(~back[back.length - 1]);
+        if (mesh.faceUvs && mesh.faceUvs.length) {
+          const slice = Array.from(mesh.faceUvs.slice(start, at + 1)).reverse();
+          for (const u of slice) out.faceUvs.push(u);
+        }
+        if (mesh.materials && mesh.materials.length) out.materials.push(mesh.materials[face]);
+        if (mesh.groups && mesh.groups.length) out.groups.push(mesh.groups[face]);
+        out.faces += 1;
+      }
+      face += 1;
+      start = at + 1;
+    }
+    if (out.faceUvs && out.faceUvs.length !== out.polygons.length) {
+      out.uvs = [];
+      out.faceUvs = [];
+    }
+    return out;
+  }
+
   /**
    * How many rounds a subdividing modifier asks for. Its first parameter is
    * the iteration count, which is the one thing about it worth knowing here:
@@ -1156,6 +1266,7 @@ const FbxMax = (function () {
     // How many parts were modelled with a subdividing modifier, and the most
     // rounds any of them asks for.
     let smoothedParts = 0;
+    let mirroredParts = 0;
     let smoothedRounds = 0;
     for (const nodeEntity of nodes) {
       const found = findChunk(view, nodeEntity.start, nodeEntity.end, NAME);
@@ -1163,6 +1274,7 @@ const FbxMax = (function () {
       const target = nodeEntity.typed[1];
       let mesh = target === undefined ? null : meshes.get(target);
       let smoothing = 0;
+      let symmetry = null;
       if (!mesh && target !== undefined) {
         // A modifier sits between the node and its mesh; the base object is
         // what it was built from, so follow the references down to it.
@@ -1172,14 +1284,28 @@ const FbxMax = (function () {
           const at = queue.shift();
           if (seen.has(at) || at >= entities.length) continue;
           seen.add(at);
-          if ((entities[at].cls.name || '').toLowerCase().includes('smooth')) {
+          const modifier = (entities[at].cls.name || '').toLowerCase();
+          if (modifier.includes('smooth')) {
             smoothing = Math.max(smoothing, smoothingOf(view, entities, at));
+          } else if (modifier === 'symmetry' && !symmetry) {
+            symmetry = symmetryOf(view, entities, at);
           }
           mesh = meshes.get(at);
           if (!mesh) queue.push(...entities[at].refs);
         }
       }
-      if (!mesh) continue;
+      const offset = objectOffset(view, nodeEntity);
+      if (mesh && symmetry) {
+        // A modifier works about the object's pivot, and the mesh is stored an
+        // object offset away from it — so the plane the artist mirrored across
+        // sits at minus that offset in the mesh's own coordinates. Checked
+        // against 3ds Max's own export of the same car: for all forty-two of
+        // its symmetric parts, that is the plane that gives back the width the
+        // export has.
+        mesh = mirrored(mesh, symmetry.axis, -offset.translation[symmetry.axis],
+          symmetry.threshold);
+        mirroredParts += 1;
+      }
       if (smoothing) {
         smoothedParts += 1;
         smoothedRounds = Math.max(smoothedRounds, smoothing);
@@ -1197,6 +1323,10 @@ const FbxMax = (function () {
         materials.set(at, found);
         for (const sub of found.subs) if (!materials.has(sub)) pending.push(sub);
       }
+      // Every node, and not only the ones that draw something. A Dummy has no
+      // geometry, and left out it has no record for its children to hang from
+      // — so a Ferrari whose wheels are grouped under one comes out with all
+      // four of them stacked at the origin, inside the car.
       placed.push({
         name,
         mesh,
@@ -1204,7 +1334,7 @@ const FbxMax = (function () {
         index: nodeEntity.index,
         parent: nodeParent(view, nodeEntity),
         placement: nodeTransform(view, entities, nodeEntity),
-        offset: objectOffset(view, nodeEntity),
+        offset,
       });
     }
 
@@ -1318,16 +1448,18 @@ const FbxMax = (function () {
     const modelUids = new Map(placed.map((entry, at) => [entry.index, uid + 2 * at + 2]));
 
     placed.forEach((entry, index) => {
+      // Two uids apiece whether or not there is geometry, so that the numbers
+      // a child was promised above are the numbers it gets.
       const geometryUid = ++uid;
       const modelUid = ++uid;
       const label = entry.name || `object${index + 1}`;
-      vertices += entry.mesh.positions.length / 3;
-      const children = [
+      if (entry.mesh) vertices += entry.mesh.positions.length / 3;
+      const children = entry.mesh ? [
         node('Vertices', [array('d', entry.mesh.positions)]),
         node('PolygonVertexIndex', [array('i', entry.mesh.polygons)]),
         node('GeometryVersion', [I(124)]),
-      ];
-      if (entry.mesh.uvs && entry.mesh.faceUvs) {
+      ] : [];
+      if (entry.mesh && entry.mesh.uvs && entry.mesh.faceUvs) {
         children.push(node('LayerElementUV', [I(0)], [
           node('Version', [I(101)]),
           node('Name', [S('map1')]),
@@ -1349,7 +1481,8 @@ const FbxMax = (function () {
       } else if (materialUids.has(entry.wearing)) {
         slots = [materialUids.get(entry.wearing)];
       }
-      if (slots.length > 1 && entry.mesh.materials) {
+      if (!entry.mesh) slots = [];
+      else if (slots.length > 1 && entry.mesh.materials) {
         children.push(node('LayerElementMaterial', [I(0)], [
           node('Version', [I(101)]),
           node('MappingInformationType', [S('ByPolygon')]),
@@ -1367,7 +1500,7 @@ const FbxMax = (function () {
       // Which faces share a smooth normal, and so where an edge is hard. A
       // .max stores no normals — only the cage — so without this the mesh can
       // only be shaded flat, and every crease on a car body rounds away.
-      if (entry.mesh.groups && entry.mesh.groups.some((g) => g)) {
+      if (entry.mesh && entry.mesh.groups && entry.mesh.groups.some((g) => g)) {
         children.push(node('LayerElementSmoothing', [I(0)], [
           node('Version', [I(102)]),
           node('MappingInformationType', [S('ByPolygon')]),
@@ -1375,9 +1508,11 @@ const FbxMax = (function () {
           node('Smoothing', [array('i', entry.mesh.groups)]),
         ]));
       }
-      children.push(node('Layer', [I(0)], [node('Version', [I(100)])]));
-      objects.push(node('Geometry',
-        [L(geometryUid), S(`${label}${CLASS_SEP}Geometry`), S('Mesh')], children));
+      if (entry.mesh) {
+        children.push(node('Layer', [I(0)], [node('Version', [I(100)])]));
+        objects.push(node('Geometry',
+          [L(geometryUid), S(`${label}${CLASS_SEP}Geometry`), S('Mesh')], children));
+      }
 
       // Only what the node actually says: most scenes of this kind leave
       // every node at the origin with the geometry already in world space,
@@ -1406,15 +1541,18 @@ const FbxMax = (function () {
       if (offset.scale.some((v) => v !== 1)) {
         placementProps.push(p70('GeometricScaling', 'Vector3D', ...offset.scale.map(D)));
       }
-      objects.push(node('Model', [L(modelUid), S(`${label}${CLASS_SEP}Model`), S('Mesh')], [
-        node('Version', [I(232)]),
-        node('Properties70', [], placementProps),
-      ]));
+      // A node with nothing to draw is still a place to hang things from, and
+      // an FBX calls that a Null.
+      objects.push(node('Model',
+        [L(modelUid), S(`${label}${CLASS_SEP}Model`), S(entry.mesh ? 'Mesh' : 'Null')], [
+          node('Version', [I(232)]),
+          node('Properties70', [], placementProps),
+        ]));
       // A parent that carries no geometry of its own has no record to hang
       // from, so its children hang from the scene as they did before.
       const under = modelUids.get(entry.parent) || 0;
       connections.push(node('C', [S('OO'), L(modelUid), L(under)]));
-      connections.push(node('C', [S('OO'), L(geometryUid), L(modelUid)]));
+      if (entry.mesh) connections.push(node('C', [S('OO'), L(geometryUid), L(modelUid)]));
       for (const slot of slots) {
         connections.push(node('C', [S('OO'), L(slot), L(modelUid)]));
       }
@@ -1436,10 +1574,12 @@ const FbxMax = (function () {
       ]),
     ]));
 
+    // A node that draws nothing is a place to hang things from and not a part.
+    const drawn = placed.filter((entry) => entry.mesh);
     root.children.push(node('Definitions', [], [
       node('Version', [I(100)]),
       node('Count', [I(objects.length)]),
-      node('ObjectType', [S('Geometry')], [node('Count', [I(placed.length)])]),
+      node('ObjectType', [S('Geometry')], [node('Count', [I(drawn.length)])]),
       node('ObjectType', [S('Model')], [node('Count', [I(placed.length)])]),
       node('ObjectType', [S('Material')], [node('Count', [I(materialUids.size)])]),
     ]));
@@ -1450,7 +1590,7 @@ const FbxMax = (function () {
       warnings.push(`no geometry read from ${[...undecoded]
         .map(([name, count]) => `${count} ${name}`).join(', ')}`);
     }
-    if (!placed.length) warnings.push('no Editable Poly geometry in this scene');
+    if (!drawn.length) warnings.push('no Editable Poly geometry in this scene');
 
     let faces = 0;
     for (const mesh of meshes.values()) faces += mesh.faces;
@@ -1475,13 +1615,14 @@ const FbxMax = (function () {
         entities: entities.length,
         nodes: nodes.length,
         meshes: meshes.size,
-        placed: placed.length,
+        placed: drawn.length,
         vertices,
         faces,
         undecoded: [...undecoded].map(([name, count]) => ({ name, count })),
         materials: materialUids.size,
         textures: [...textureUids.keys()].sort(),
         smoothed: smoothedParts,
+        mirrored: mirroredParts,
         smoothing: smoothedRounds,
       },
     };

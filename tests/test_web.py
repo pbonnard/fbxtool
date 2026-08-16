@@ -321,8 +321,12 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
     {"slots": 4, "materials": [0, 1, 2, 3, 1, 0], "blend_slots": {1}},
     # A polished surface, so the exponent the two write has to agree.
     {"shader": "VRayMtl", "glossiness": 0.82},
+    # A Symmetry modifier, which both have to mirror the same way.
+    {"symmetry": (0, 0.001), "offset": (2.0, 0.0, 0.0)},
+    # A Dummy over the node, which both have to write a record for.
+    {"under_a_dummy": (10.0, 0.0, 5.0)},
 ], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot",
-        "glossiness"])
+        "glossiness", "symmetry", "dummy"])
 def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
     """The same cross-check over the shapes a real car scene turns out to use.
 

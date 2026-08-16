@@ -1767,7 +1767,9 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               blend_slots: "set[int] | None" = None,
               material_class: "str | None" = None,
               param_chunk: int = 0x100E, assets_version: int = 3,
-              glossiness: float = MAX_GLOSSINESS) -> bytes:
+              glossiness: float = MAX_GLOSSINESS,
+              symmetry: "tuple[int, float] | None" = None,
+              under_a_dummy: "tuple[float, float, float] | None" = None) -> bytes:
     """A .max holding one cube under one node.
 
     The cube is a unit cube, which is enough to exercise every rule the reader
@@ -1803,6 +1805,12 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     ``materials`` gives each face the slot it wears.  ``child`` hangs a second
     node off the first, placed there, which is how a scene says a wheel belongs
     to a body.
+
+    ``symmetry`` puts a Symmetry modifier over the mesh, as ``(axis,
+    threshold)`` — the reader has to mirror the cube itself, since the modifier
+    stack is never run.  ``under_a_dummy`` hangs the node off a Dummy placed
+    there, which is how a car keeps its wheels: the Dummy draws nothing, and a
+    reader that writes no record for it leaves the wheels at the origin.
 
     ``param_chunk`` and ``assets_version`` write the two things a 3ds Max 2012
     file writes differently: its parameters under 0x000E rather than 0x100E,
@@ -2084,6 +2092,54 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                             container=True)
         nxt += 1
 
+    # A Symmetry modifier over the mesh. What the node points at for its object
+    # becomes the modifier, and the modifier points down at the mesh, which is
+    # the stack a reader has to walk.
+    if symmetry is not None:
+        axis, threshold = symmetry
+        extra += _max_chunk(0x0002,
+                            _max_chunk(0x100E,
+                                       struct.pack("<HHIIIBi", 0, 1, 0, 0, 0, 0, axis))
+                            + _max_chunk(0x100E,
+                                         struct.pack("<HHIIIBf", 3, 0, 0, 0, 0, 0,
+                                                     threshold)),
+                            container=True)
+        extra += _max_chunk(0x000E,
+                            _max_chunk(0x2034, struct.pack("<2I", nxt, holds)),
+                            container=True)
+        holds = nxt + 1
+        nxt += 2
+        node_refs = [(key, target) for key, target in node_refs if key != 1]
+        node_refs.append((1, holds))
+
+    # A Dummy standing over the node: it draws nothing and exists only to place
+    # what hangs off it, which is how a car keeps its four wheels together.
+    if under_a_dummy is not None:
+        axes = nxt
+        extra += b"".join(_max_float_controller(v) for v in under_a_dummy)
+        nxt += 3
+        extra += _max_chunk(0x0005,
+                            _max_chunk(0x2034, struct.pack("<3I", axes, axes + 1, axes + 2)),
+                            container=True)
+        extra += _max_chunk(0x0006,
+                            _max_chunk(0x2034, struct.pack("<I", nxt)),
+                            container=True)
+        controller = nxt + 1
+        nxt += 2
+        extra += _max_chunk(0x000F,
+                            _max_chunk(0x0962, _max_utf16("dummy object")),
+                            container=True)
+        dummy_object = nxt
+        nxt += 1
+        dummy_words = [0x10, 0, controller, 1, dummy_object]
+        extra += _max_chunk(0x0001,
+                            _max_chunk(0x2035,
+                                       struct.pack("<%dI" % len(dummy_words), *dummy_words))
+                            + _max_chunk(0x0962, _max_utf16("Group001")),
+                            container=True)
+        node_parent = _max_chunk(0x0960, struct.pack("<2I", nxt, 0x1000))
+        nxt += 1
+
     words = [0x10]
     for key, target in sorted(node_refs):
         words += [key, target]
@@ -2109,7 +2165,11 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                + _max_class("RootNode", 0x01, 0x02)
                + _max_class("Output", 0xC40, 0x0280)
                + _max_class("Bitmap", 0xC10, 0x0240)
-               + _max_class("Blend", 0xC00, 0x0210))
+               + _max_class("Blend", 0xC00, 0x0210)
+               + _max_class("Symmetry", 0x810, 0x00B7)
+               # A Dummy is a helper, not geometry: superclass 0x50, which is
+               # what keeps it out of the tally of objects with no mesh.
+               + _max_class("Dummy", 0x50, 8872500))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),
