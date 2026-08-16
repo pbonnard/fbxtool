@@ -796,21 +796,67 @@ const FbxMax = (function () {
   }
 
   /**
-   * Which of a material's references holds which map, for the plugin materials
-   * whose reference order has been read off the files.
+   * Which keyed reference holds which map, for the plugin materials whose
+   * numbering has been read off the files.
    *
    * Without this the rule is the older one — the first picture anywhere below
-   * the material — and for a V-Ray material that is usually the wrong one. A
-   * VRayMtl keeps six parameter blocks and then its maps, and the first map
-   * most of them carry is not the diffuse: across one car's seventeen,
-   * reference 7 holds the diffuse (a suede's colour, a blinker's lens), 8 the
-   * reflection (a Falloff, which is what a V-Ray glass reflects by) and 10 the
-   * bump — where that car keeps `suade_bump.png`, a Noise, and its tyre's
-   * tread. Taken as the colour, a bump map paints a black tyre pale grey and a
-   * leather seat with its own relief; taken as the bump it is what makes the
-   * seat leather.
+   * the material — and for a renderer's own material that is usually the wrong
+   * one, because most of them carry several maps and the diffuse is rarely the
+   * first. Read that way an Audi comes out with a red roof, because the mask
+   * cut into its sunroof is the first picture its material names.
+   *
+   * The two renderers keep the keys in different places, which `on` says. A
+   * VRayMtl keys them on itself, behind its six parameter blocks: 7 is the
+   * diffuse (a suede's colour, a blinker's lens), 8 the reflection (a Falloff,
+   * which is what a V-Ray glass reflects by) and 10 the bump — a Noise, a
+   * tyre's tread, a file called `suade_bump.png`.
+   *
+   * A CoronaMtl keys them on its parameter block instead, and numbers them
+   * from zero in the order the block declares its map slots — 141 upwards,
+   * which is Corona's colour ids with forty added. Across one car's sixty-one:
+   * 0 held every `_color` file, 1 every `_refl`, 3 the glass and the masks cut
+   * into it, 6 all thirteen normal maps and every `CoronaNormal`, and 8 and 9
+   * the two `_aniso`. Nothing else in the file says which is which — the slot
+   * parameters themselves are written byte for byte identical whether they are
+   * filled or not.
    */
-  const MAP_SLOTS = { vraymtl: { diffuse: 7, bump: 10 } };
+  /**
+   * The materials that are a *list* rather than a surface.
+   *
+   * A Multi/Sub-Object is nothing but a numbered list, and a face's material
+   * id picks a slot out of it. Everything else that names other materials — a
+   * Blend, a VRayBlendMtl, a Shellac — is a surface of its own, made by mixing
+   * them, and a face wearing it wears one thing and not a choice of several.
+   *
+   * Treating the second as the first is how an Audi came out with a red roof:
+   * of the forty-four slots its body wears, three held a Blend, each of those
+   * was taken for a list and so written as no material at all, and every slot
+   * behind them shifted down to fill the gap.
+   */
+  const LIST_MATERIALS = new Set(['multi/sub-object', 'multimaterial']);
+
+  const MAP_SLOTS = {
+    vraymtl: { on: 'self', diffuse: 7, bump: 10 },
+    coronamtl: { on: 'block', diffuse: 0, bump: 6 },
+  };
+  // Corona renamed its material when the newer one arrived; the block did not
+  // change, and a scene saved by either keys its maps the same way.
+  MAP_SLOTS.coronalegacymtl = MAP_SLOTS.coronamtl;
+
+  /**
+   * Where a material's maps hang, which is not the same for every renderer.
+   *
+   * V-Ray keys them on the material; Corona keys them on the parameter block
+   * the material holds, so the block is what is asked.
+   */
+  function keyedMaps(entities, entity, where) {
+    if (where !== 'block') return entity.typed;
+    for (const ref of entity.refs) {
+      if (ref >= entities.length) continue;
+      if (/^parambloc/i.test(String(entities[ref].cls.name || ''))) return entities[ref].typed;
+    }
+    return {};
+  }
 
   /**
    * A material, and whatever its references say it is made of. The walk stops
@@ -836,8 +882,9 @@ const FbxMax = (function () {
     if (slots) {
       // The slots decide it, including when one is empty: a material with a
       // bump and no diffuse map wears no picture and is bumped all the same.
-      texture = assetUnder(view, bytes, entities, entity.typed[slots.diffuse], assets);
-      bump = assetUnder(view, bytes, entities, entity.typed[slots.bump], assets);
+      const keyed = keyedMaps(entities, entity, slots.on);
+      texture = assetUnder(view, bytes, entities, keyed[slots.diffuse], assets);
+      bump = assetUnder(view, bytes, entities, keyed[slots.bump], assets);
     }
     const queue = entity.refs.map((at) => [at, entity.cls.name]);
     const walked = new Set();
@@ -868,7 +915,19 @@ const FbxMax = (function () {
     if (!look) {
       look = { colour: plain, specular: null, glossiness: null, level: null, opacity: null };
     }
-    return { name: materialName(view, bytes, entity), look, texture, bump, subs };
+    const kind = String(entity.cls.name || '').trim().toLowerCase();
+    return {
+      name: materialName(view, bytes, entity),
+      look,
+      texture,
+      bump,
+      // The materials this one names. For a Multi/Sub-Object they are its
+      // slots, and a face picks between them; for anything else — a Blend, a
+      // VRayBlendMtl — they are what this surface is made of, and it is a
+      // surface in its own right.
+      subs,
+      isList: LIST_MATERIALS.has(kind),
+    };
   }
 
   /* ---------------------------------------------------------------- scene */
@@ -1118,17 +1177,17 @@ const FbxMax = (function () {
         smoothedRounds = Math.max(smoothedRounds, smoothing);
       }
       const wearing = nodeEntity.typed[3];
-      if (wearing !== undefined && !materials.has(wearing)) {
-        const found = readMaterial(view, scene, entities, wearing, byId);
-        if (found) {
-          materials.set(wearing, found);
-          for (const sub of found.subs) {
-            if (!materials.has(sub)) {
-              const under = readMaterial(view, scene, entities, sub, byId);
-              if (under) materials.set(sub, under);
-            }
-          }
-        }
+      // Every material below this one, however deep: a slot of a
+      // Multi/Sub-Object is often a Blend, and what that Blend is made of is a
+      // level further down again.
+      const pending = wearing === undefined ? [] : [wearing];
+      while (pending.length) {
+        const at = pending.shift();
+        if (at === undefined || materials.has(at)) continue;
+        const found = readMaterial(view, scene, entities, at, byId);
+        if (!found) continue;
+        materials.set(at, found);
+        for (const sub of found.subs) if (!materials.has(sub)) pending.push(sub);
       }
       placed.push({
         name,
@@ -1154,9 +1213,39 @@ const FbxMax = (function () {
     // One record per material, written before the parts that wear them.
     const materialUids = new Map();
     const textureUids = new Map();
+    /* Give a surface made of other materials the look of its base coat.
+     *
+     * A Blend is not a surface anybody described — it is two or three that
+     * are, with a mask saying where each shows. What its own blocks hold is
+     * that mask, so a reader that takes the first picture below it paints a
+     * tyre with the map that mixes its dirt in. What it looks like is its
+     * first ingredient: the base coat, with the rest laid over. */
+    const resolved = new Set();
+    const resolveBlend = (index, chain = new Set()) => {
+      const material = materials.get(index);
+      if (!material || resolved.has(index) || chain.has(index)
+        || material.isList || !material.subs.length) return material;
+      const base = resolveBlend(material.subs[0], new Set([...chain, index]));
+      resolved.add(index);
+      if (!base) return material;
+      if (!material.look.colour) material.look = base.look;
+      material.texture = base.texture;
+      material.bump = base.bump;
+      return material;
+    };
+    for (const index of [...materials.keys()]) resolveBlend(index);
+
+    // A slot must keep its number, so anything a list names gets a record even
+    // where it is a list itself: leave one out and every slot behind it moves
+    // up, and the whole car is painted out of the wrong tins.
+    const inASlot = new Set();
+    for (const material of materials.values()) {
+      if (material.isList) for (const sub of material.subs) inASlot.add(sub);
+    }
     for (const index of [...materials.keys()].sort((a, b) => a - b)) {
       const material = materials.get(index);
-      if (material.subs.length) continue;      // a Multi/Sub-Object is a list
+      // A list is a list of slots, not a surface.
+      if (material.isList && !inASlot.has(index)) continue;
       uid += 1;
       materialUids.set(index, uid);
       const look = material.look;
@@ -1238,7 +1327,9 @@ const FbxMax = (function () {
       // Multi/Sub-Object holds, which is what a face's material id picks from.
       const worn = entry.wearing === undefined ? null : materials.get(entry.wearing);
       let slots = [];
-      if (worn && worn.subs.length) {
+      if (worn && worn.isList) {
+        // Positionally, and with nothing left out: the numbers are what a
+        // face's material id picks by.
         slots = worn.subs.filter((sub) => materialUids.has(sub))
           .map((sub) => materialUids.get(sub));
       } else if (materialUids.has(entry.wearing)) {

@@ -705,14 +705,19 @@ class _Material:
     threw its relief away.
     """
 
-    __slots__ = ("name", "look", "texture", "bump", "subs")
+    __slots__ = ("name", "look", "texture", "bump", "subs", "is_list")
 
-    def __init__(self, name: str, look, texture, subs, bump=None):
+    def __init__(self, name: str, look, texture, subs, bump=None, is_list=False):
         self.name = name
         self.look = look
         self.texture = texture
         self.bump = bump
+        #: The materials this one names.  For a Multi/Sub-Object they are its
+        #: slots, and a face picks between them; for anything else — a Blend, a
+        #: VRayBlendMtl — they are what this surface is made of, and it is a
+        #: surface in its own right.
         self.subs = subs
+        self.is_list = is_list
 
 
 def _material_name(scene: bytes, entity) -> str:
@@ -913,19 +918,99 @@ def _asset_under(scene: bytes, entities: list, index, assets: dict,
     return None
 
 
-#: Which of a material's references holds which map, for the plugin materials
-#: whose reference order has been read off the files.
+#: Which keyed reference holds which map, for the plugin materials whose
+#: numbering has been read off the files.
 #:
 #: Without this the rule is the older one — the first picture anywhere below
-#: the material — and for a V-Ray material that is usually the wrong one.  A
-#: VRayMtl keeps six parameter blocks and then its maps, and the first map most
-#: of them carry is not the diffuse: across one car's seventeen, reference 7
-#: holds the diffuse (a suede's colour, a blinker's lens), 8 the reflection (a
-#: Falloff, which is what a V-Ray glass reflects by) and 10 the bump — where
-#: that car keeps ``suade_bump.png``, a Noise, and its tyre's tread.  Taken as
-#: the colour, a bump map paints a black tyre pale grey and a leather seat
-#: with its own relief; taken as the bump it is what makes the seat leather.
-_MAP_SLOTS = {"vraymtl": {"diffuse": 7, "bump": 10}}
+#: the material — and for a renderer's own material that is usually the wrong
+#: one, because most of them carry several maps and the diffuse is rarely the
+#: first.  Read that way an Audi comes out with a red roof, because the mask
+#: cut into its sunroof is the first picture its material names.
+#:
+#: The two renderers keep the keys in different places, which ``on`` says.  A
+#: **VRayMtl** keys them on itself, behind its six parameter blocks: 7 is the
+#: diffuse (a suede's colour, a blinker's lens), 8 the reflection (a Falloff,
+#: which is what a V-Ray glass reflects by) and 10 the bump — a Noise, a tyre's
+#: tread, a file called ``suade_bump.png``.
+#:
+#: A **CoronaMtl** keys them on its parameter block instead, and numbers them
+#: from zero in the order the block declares its map slots — 141 upwards, which
+#: is Corona's colour ids with forty added.  Across one car's sixty-one: 0 held
+#: every ``_color`` file, 1 every ``_refl``, 3 the glass and the masks cut into
+#: it, 6 all thirteen normal maps and every ``CoronaNormal``, and 8 and 9 the
+#: two ``_aniso``.  Nothing else in the file says which is which — the slot
+#: parameters themselves are written byte for byte identical whether they are
+#: filled or not.
+_MAP_SLOTS = {
+    "vraymtl": {"on": "self", "diffuse": 7, "bump": 10},
+    "coronamtl": {"on": "block", "diffuse": 0, "bump": 6},
+}
+#: Corona renamed its material when the newer one arrived; the block did not
+#: change, and a scene saved by either keys its maps the same way.
+_MAP_SLOTS["coronalegacymtl"] = _MAP_SLOTS["coronamtl"]
+
+
+#: The materials that are a *list* rather than a surface.
+#:
+#: The distinction decides how the materials one names are treated.  A
+#: Multi/Sub-Object is nothing but a numbered list, and a face's material id
+#: picks a slot out of it.  Everything else that names other materials — a
+#: Blend, a VRayBlendMtl, a Shellac — is a surface of its own, made by mixing
+#: them, and a face wearing it wears one thing and not a choice of several.
+#:
+#: Treating the second as the first is how an Audi came out with a red roof: of
+#: the forty-four slots its body wears, three held a Blend, each of those was
+#: taken for a list and so written as no material at all, and every slot behind
+#: them shifted down to fill the gap.  Every panel of the car was then painted
+#: out of the wrong tin — glass where the grille should be, and the red of a
+#: logo across the sunroof.
+_LIST_MATERIALS = {"multi/sub-object", "multimaterial"}
+
+
+def _resolve_blends(materials: dict) -> None:
+    """Give a surface made of other materials the look of its base coat.
+
+    A Blend is not a surface anybody described — it is two or three that are,
+    with a mask saying where each shows.  What its own blocks hold is that
+    mask, so a reader that takes the first picture below it paints a tyre with
+    the map that mixes its dirt in.  What it looks like is its first
+    ingredient: the base coat, with the rest laid over.
+    """
+    done: set = set()
+
+    def resolve(index, chain=()):
+        material = materials.get(index)
+        if (material is None or index in done or index in chain
+                or material.is_list or not material.subs):
+            return material
+        base = resolve(material.subs[0], chain + (index,))
+        done.add(index)
+        if base is None:
+            return material
+        if material.look["colour"] is None:
+            material.look = base.look
+        material.texture = base.texture
+        material.bump = base.bump
+        return material
+
+    for index in list(materials):
+        resolve(index)
+
+
+def _keyed_maps(entities: list, entity: _Entity, where: str) -> dict:
+    """Where a material's maps hang, which is not the same for every renderer.
+
+    V-Ray keys them on the material; Corona keys them on the parameter block
+    the material holds, so the block is what is asked.
+    """
+    if where != "block":
+        return entity.typed
+    for ref in entity.refs:
+        if ref >= len(entities):
+            continue
+        if (entities[ref].cls.get("name") or "").lower().startswith("parambloc"):
+            return entities[ref].typed
+    return {}
 
 
 def _read_material(scene: bytes, entities: list, index: int, assets: dict):
@@ -956,8 +1041,9 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     if slots is not None:
         # The slots decide it, including when one is empty: a material with a
         # bump and no diffuse map wears no picture and is bumped all the same.
-        texture = _asset_under(scene, entities, entity.typed.get(slots["diffuse"]), assets)
-        bump = _asset_under(scene, entities, entity.typed.get(slots["bump"]), assets)
+        keyed = _keyed_maps(entities, entity, slots["on"])
+        texture = _asset_under(scene, entities, keyed.get(slots["diffuse"]), assets)
+        bump = _asset_under(scene, entities, keyed.get(slots["bump"]), assets)
 
     queue = [(at, entity.cls.get("name") or "") for at in entity.refs]
     walked = set()
@@ -990,7 +1076,9 @@ def _read_material(scene: bytes, entities: list, index: int, assets: dict):
     # said of one is that the first colour in it is the diffuse.
     if look is None:
         look = {"colour": plain, "specular": None, "glossiness": None, "level": None}
-    return _Material(_material_name(scene, entity), look, texture, subs, bump)
+    kind = (entity.cls.get("name") or "").strip().lower()
+    return _Material(_material_name(scene, entity), look, texture, subs, bump,
+                     kind in _LIST_MATERIALS)
 
 
 class _Entity:
@@ -1306,20 +1394,26 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         if mesh is None:
             continue
         wearing = node.typed.get(3)
-        if wearing is not None and wearing not in materials:
-            found = _read_material(scene, entities, wearing, by_id)
-            if found is not None:
-                materials[wearing] = found
-                for sub in found.subs:
-                    if sub not in materials:
-                        under = _read_material(scene, entities, sub, by_id)
-                        if under is not None:
-                            materials[sub] = under
+        # Every material below this one, however deep: a slot of a
+        # Multi/Sub-Object is often a Blend, and what that Blend is made of is
+        # a level further down again.
+        queue = [wearing] if wearing is not None else []
+        while queue:
+            at = queue.pop(0)
+            if at is None or at in materials:
+                continue
+            found = _read_material(scene, entities, at, by_id)
+            if found is None:
+                continue
+            materials[at] = found
+            queue.extend(sub for sub in found.subs if sub not in materials)
         if smoothing:
             smoothed[0] += 1
             smoothed[1] = max(smoothed[1], smoothing)
         placed.append((node, name, mesh, _node_transform(scene, entities, node),
                        wearing, _object_offset(scene, node)))
+
+    _resolve_blends(materials)
 
     # ---- the record tree
     creator = summary.get("application") or "Autodesk 3ds Max"
@@ -1334,10 +1428,15 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
     # part can be connected as it is written.
     material_uids: dict[int, int] = {}
     texture_uids: dict[str, int] = {}
+    # A slot must keep its number, so anything a list names gets a record even
+    # where it is a list itself: leave one out and every slot behind it moves
+    # up, and the whole car is painted out of the wrong tins.
+    in_a_slot = {sub for material in materials.values() if material.is_list
+                 for sub in material.subs}
     for index in sorted(materials):
         material = materials[index]
-        if material.subs:
-            continue                    # a Multi/Sub-Object is its parts' list
+        if material.is_list and index not in in_a_slot:
+            continue                    # a list is a list of slots, not a surface
         uid += 1
         material_uids[index] = uid
         look = material.look
@@ -1424,7 +1523,9 @@ def parse_max(data: bytes, path: str | None = None, *, load_arrays: bool = True
         # onto the slots this part actually has.
         worn = materials.get(wearing) if wearing is not None else None
         slots = []
-        if worn is not None and worn.subs:
+        if worn is not None and worn.is_list:
+            # Positionally, and with nothing left out: the numbers are what a
+            # face's material id picks by.
             slots = [material_uids[sub] for sub in worn.subs if sub in material_uids]
         elif wearing in material_uids:
             slots = [material_uids[wearing]]

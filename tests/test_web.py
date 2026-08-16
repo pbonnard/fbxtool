@@ -313,7 +313,12 @@ def test_the_two_max_readers_agree(built, tmp_path, shader):
     # A V-Ray material's diffuse and its bump, which must not be swapped.
     {"shader": "VRayMtl", "material_class": "VRayMtl",
      "maps": {7: "colour.png", 10: "bump.png"}},
-], ids=["hierarchy", "slots", "max2012", "vray-maps"])
+    # The same for Corona, which keys them on the block rather than itself.
+    {"shader": "CoronaMtl", "material_class": "CoronaMtl", "maps_on": "block",
+     "maps": {0: "colour.png", 6: "bump.png"}},
+    # A Blend in a slot, which must not shift the slots behind it.
+    {"slots": 4, "materials": [0, 1, 2, 3, 1, 0], "blend_slots": {1}},
+], ids=["hierarchy", "slots", "max2012", "vray-maps", "corona-maps", "blend-slot"])
 def test_the_two_max_readers_agree_on_what_a_car_needs(built, tmp_path, scene):
     """The same cross-check over the shapes a real car scene turns out to use.
 

@@ -527,6 +527,58 @@ def test_a_part_with_one_material_says_so_once():
     assert layer.get("MappingInformationType").props[0].value == "AllSame"
 
 
+def _worn(doc):
+    """The materials a part wears, in the order its face ids pick by."""
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    names = {n.props[0].value: n.props[1].value.split("\x00")[0]
+             for n in objects.children if n.name == "Material"}
+    model = next(n for n in objects.children if n.name == "Model")
+    connections = next(n for n in doc.root.children if n.name == "Connections")
+    return [names[c.props[1].value] for c in connections.children
+            if c.props[0].value == "OO" and c.props[2].value == model.props[0].value
+            and c.props[1].value in names]
+
+
+def test_a_slot_holding_a_blend_still_takes_up_its_slot():
+    """A Blend is a surface made of materials, not a list of them.
+
+    Taken for a list it is written as no material at all, and every slot
+    behind it moves up to fill the gap — which is how an Audi came out with
+    glass where its grille should be and the red of a logo across its sunroof.
+    Only a Multi/Sub-Object is a list.
+    """
+    plain = parse_max(fb.build_max(slots=4, materials=[0, 1, 2, 3, 1, 0]),
+                      load_arrays=True)
+    assert _worn(plain) == ["slot0", "slot1", "slot2", "slot3"]
+
+    # The same list with a Blend in the second slot: the names either side of
+    # it must not move.
+    blended = parse_max(fb.build_max(slots=4, materials=[0, 1, 2, 3, 1, 0],
+                                     blend_slots={1}), load_arrays=True)
+    assert _worn(blended) == ["slot0", "blend1", "slot2", "slot3"]
+    layer = blended.root.path("Objects", "Geometry").get("LayerElementMaterial")
+    assert layer.get("Materials").props[0].value == [0, 1, 2, 3, 1, 0]
+
+
+def test_a_blend_looks_like_the_coat_it_is_built_on():
+    """And wears its pictures.
+
+    What a Blend's own blocks hold is the mask that mixes its ingredients, so
+    a reader that takes the first picture below it paints a tyre with the map
+    that blends its dirt in rather than with its tread.
+    """
+    doc = parse_max(fb.build_max(slots=2, materials=[0, 1, 0, 1, 0, 1],
+                                 blend_slots={0}), load_arrays=True)
+    objects = next(n for n in doc.root.children if n.name == "Objects")
+    colours = {n.props[1].value.split("\x00")[0]:
+               [round(p.value, 3) for p in n.get("Properties70").children[0].props[4:7]]
+               for n in objects.children if n.name == "Material"}
+    # slot0 is the base the blend is built on, and blend0 takes its colour.
+    assert colours["blend0"] == colours["slot0"]
+    # Not the coat laid over it, which is a different colour entirely.
+    assert colours["blend0"] != colours["coat0"]
+
+
 # ---------------------------------------------------------- the node it hangs
 #                                                             off
 
@@ -615,6 +667,21 @@ def test_a_vray_material_with_only_a_bump_is_bumped_and_not_painted():
     """An empty diffuse slot is an answer, not a reason to keep looking — and
     the map that is there is still worth having, in the slot it belongs to."""
     assert _bound(_vray(maps={10: "bump.png"})) == {"Bump": "bump.png"}
+
+
+def test_a_corona_material_keys_its_maps_on_its_block():
+    """Corona numbers them from zero on the parameter block, where V-Ray keys
+    them on the material itself.
+
+    Looked for in the wrong place there is nothing to find, and the rule falls
+    back to the first picture anywhere below the material — which for an Audi
+    is the mask cut into its sunroof, painted across the roof in red.
+    """
+    doc = parse_max(fb.build_max(shader="CoronaMtl", material_class="CoronaMtl",
+                                 maps_on="block",
+                                 maps={0: "colour.png", 6: "bump.png"}),
+                    load_arrays=True)
+    assert _bound(doc) == {"DiffuseColor": "colour.png", "Bump": "bump.png"}
 
 
 def test_a_shader_whose_slots_are_not_known_keeps_the_older_rule():

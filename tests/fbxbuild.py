@@ -1752,7 +1752,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
               groups: "list[int] | None" = None,
               materials: "list[int] | None" = None, slots: int = 0,
               child: "tuple[float, float, float] | None" = None,
-              maps: "dict[int, str] | None" = None,
+              maps: "dict[int, str] | None" = None, maps_on: str = "material",
+              blend_slots: "set[int] | None" = None,
               material_class: "str | None" = None,
               param_chunk: int = 0x100E, assets_version: int = 3) -> bytes:
     """A .max holding one cube under one node.
@@ -1784,6 +1785,9 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     that renderer's rather than ``Standard``.
 
     ``slots`` puts a Multi/Sub-Object of that many materials on the node, and
+    ``blend_slots`` names the ones that hold a Blend of two rather than a plain
+    material — a surface of its own, which must still take up its own slot.
+    
     ``materials`` gives each face the slot it wears.  ``child`` hangs a second
     node off the first, placed there, which is how a scene says a wheel belongs
     to a body.
@@ -1878,34 +1882,20 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                  + _max_param_float(6, MAX_SPECULAR_LEVEL, param_chunk))
     else:
         block = _max_param_colour(1, MAX_DIFFUSE, param_chunk)
-    params = _max_chunk(0x0002,
-                        block
-                        + _max_chunk(0x0003, bytes(8) + _max_asset_id() + bytes(8)),
-                        container=True)
     # The mesh is entity 0, the node 1, its material's parameters 2 and the
-    # material itself 3; anything else is numbered from there — the shader
-    # first, so that the material has something to point at.
+    # material itself 3; anything else is numbered from there.
     extra = b""
     nxt = 4
     node_refs = []
     holds = 0                      # what the node points at for its object
     wears = 3                      # and what it points at for its material
 
-    # What the material refers to for its parameters: the block itself, or the
-    # shader that says what the numbers in it are.
-    parameters = 2
-    if shader:
-        parameters = nxt
-        extra += _max_chunk(0x0008,
-                            _max_chunk(0x2034, struct.pack("<I", 2)),
-                            container=True)
-        nxt += 1
-
-    # The maps a material hangs off its own references, under the key each
-    # slot has: for a V-Ray material 7 is the diffuse and 10 the bump, and
-    # which of them a reader picks is the difference between a tyre's colour
-    # and its tread.  Each is a Bitmap behind an Output, as a real one is, so
-    # the slot has to be followed down rather than matched at its first step.
+    # The maps, under the key each slot has: for a V-Ray material 7 is the
+    # diffuse and 10 the bump, and which of them a reader picks is the
+    # difference between a tyre's colour and its tread.  Each is a Bitmap
+    # behind an Output, as a real one is, so the slot has to be followed down
+    # rather than matched at its first step.  These come first so that the
+    # parameter block can name them, which is where Corona keys its own.
     map_refs = []
     map_assets = []
     for at, (key, filename) in enumerate(sorted((maps or {}).items())):
@@ -1922,6 +1912,32 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                             container=True)
         map_refs.append((key, nxt + 2))
         nxt += 3
+
+    # Corona keys its maps on the block rather than on the material, so where
+    # the caller asks for that the block is what carries them.
+    keyed = b""
+    if maps_on == "block" and map_refs:
+        words = [len(map_refs)]
+        for key, target in sorted(map_refs):
+            words += [key, target]
+        keyed = _max_chunk(0x2035, struct.pack("<%dI" % len(words), *words))
+        map_refs = []
+    params = _max_chunk(0x0002,
+                        keyed + block
+                        + _max_chunk(0x0003, bytes(8) + _max_asset_id() + bytes(8)),
+                        container=True)
+
+    # What the material refers to for its parameters. A Standard material
+    # keeps a shader between the two, and it is the shader that says what the
+    # numbers in the block are; a renderer's own material is its own class and
+    # holds the block directly, which is also where it keys its maps.
+    parameters = 2
+    if shader and not material_class:
+        parameters = nxt
+        extra += _max_chunk(0x0008,
+                            _max_chunk(0x2034, struct.pack("<I", 2)),
+                            container=True)
+        nxt += 1
 
     # Every material keeps its name in the same block; a plugin's material
     # keeps that block under an id of its own, which is Corona's whole reason
@@ -1941,24 +1957,48 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
     # A Multi/Sub-Object over materials of its own, which is the list a face's
     # material id picks a slot out of.
     if slots:
-        first = nxt
+        held = []
         for at in range(slots):
             extra += _max_chunk(0x0002,
                                 _max_param_colour(1, (at / 10.0, 0.5, 0.25), param_chunk),
                                 container=True)
             extra += _max_chunk(0x0003,
-                                _max_chunk(0x2035,
-                                           struct.pack("<3I", 0x10, 1, first + 2 * at))
+                                _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, nxt))
                                 + _max_chunk(0x5431,
                                              _max_chunk(0x4001, _max_utf16(f"slot{at}")),
                                              container=True),
                                 container=True)
-        nxt += 2 * slots
+            held.append(nxt + 1)
+            nxt += 2
+            # A slot that holds a Blend rather than a plain material: two
+            # materials mixed, which is a surface of its own and not a list of
+            # two. Read as a list it is written as no material at all, and
+            # every slot behind it moves up to fill the gap.
+            if blend_slots and at in blend_slots:
+                extra += _max_chunk(0x0002,
+                                    _max_param_colour(1, (0.9, 0.1, 0.9), param_chunk),
+                                    container=True)
+                extra += _max_chunk(0x0003,
+                                    _max_chunk(0x2035, struct.pack("<3I", 0x10, 1, nxt))
+                                    + _max_chunk(0x5431,
+                                                 _max_chunk(0x4001,
+                                                            _max_utf16(f"coat{at}")),
+                                                 container=True),
+                                    container=True)
+                extra += _max_chunk(0x000D,
+                                    _max_chunk(0x2034,
+                                               struct.pack("<2I", held[-1], nxt + 1))
+                                    + _max_chunk(0x5431,
+                                                 _max_chunk(0x4001,
+                                                            _max_utf16(f"blend{at}")),
+                                                 container=True),
+                                    container=True)
+                held[-1] = nxt + 2
+                nxt += 3
         wears = nxt
         extra += _max_chunk(0x0009,
                             _max_chunk(0x2034,
-                                       struct.pack("<%dI" % slots,
-                                                   *(first + 2 * a + 1 for a in range(slots))))
+                                       struct.pack("<%dI" % len(held), *held))
                             + _max_chunk(0x5431,
                                          _max_chunk(0x4001, _max_utf16("Multi")),
                                          container=True),
@@ -2052,7 +2092,8 @@ def build_max(*, name: str = "cube001", with_uvs: bool = True,
                + _max_class("Multi/Sub-Object", 0xC00, 0x0200)
                + _max_class("RootNode", 0x01, 0x02)
                + _max_class("Output", 0xC40, 0x0280)
-               + _max_class("Bitmap", 0xC10, 0x0240))
+               + _max_class("Bitmap", 0xC10, 0x0240)
+               + _max_class("Blend", 0xC00, 0x0210))
     dlls = _max_chunk(0x2038,
                       _max_chunk(0x2039, _max_utf16("Editable Poly (Autodesk)"))
                       + _max_chunk(0x2037, _max_utf16("epoly.dlo")),

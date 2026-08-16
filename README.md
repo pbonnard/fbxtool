@@ -355,13 +355,29 @@ reading it by a shader's layout would put the reflection where the colour goes.
 
 The same care applies to which *map* a material wears. A material's pictures
 hang off its references, and taking the first one found is right only until a
-material has more than one: a VRayMtl keeps its diffuse at reference 7, its
-reflection at 8 and its bump at 10, and across one car's seventeen the first
-map most of them carry is the bump. Taken as the colour it paints a black tyre
-pale grey with its own tread and a leather seat with its own relief, so the
-slot is read rather than the order — and both maps come out, each bound to the
-property it drives. A class whose reference order has not been read off the
-files keeps the older rule.
+material has more than one. A **VRayMtl** keys them on itself, behind its six
+parameter blocks: 7 the diffuse, 8 the reflection, 10 the bump — and across one
+car's seventeen the first map most of them carry is the bump, which taken as
+the colour paints a black tyre pale grey with its own tread. A **CoronaMtl**
+keys them on its parameter block instead and numbers them from zero: across
+another car's sixty-one, 0 held every `_color` file, 1 every `_refl`, 3 the
+glass and the masks cut into it, and 6 all thirteen normal maps. Nothing else
+in the file says which is which — the slot parameters are written byte for byte
+identical whether they are filled or not — and read the old way that car came
+out with the mask cut into its sunroof painted across the roof in red, its
+windows shaded by their own normal maps, and violet round every light. A class
+whose numbering has not been read off the files keeps the older rule.
+
+A material that names other materials is two different things and they must not
+be confused. A **Multi/Sub-Object** is a numbered list, and a face's material id
+picks a slot out of it. A **Blend** is a surface of its own, made by mixing
+others, and a face wearing it wears one thing. Read the second as the first and
+it is written as no material at all — and every slot behind it moves up to fill
+the gap, so of the forty-four that Audi's body wears, the three holding a Blend
+shifted everything after them and each panel was painted out of the wrong tin.
+A Blend also takes its look and its maps from the base coat it is built on:
+what its own blocks hold is the mask that mixes its ingredients, and read as a
+colour that is a tyre painted with the map that blends its dirt in.
 
 ### Bump and normal maps
 
