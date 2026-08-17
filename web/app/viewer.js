@@ -606,10 +606,20 @@ ${SHADOW_LOOKUP}
     float coatFacing = coatF0 > 0.0 ? fresnelSchlick(vec3(coatF0), nov).r : 0.0;
     float under = 1.0 - coatFacing;
 
+    /* How much of the sun's highlight this surface takes.
+     *
+     * A game's material states it outright and most other files do not, so a
+     * material that says nothing takes all of it. It weighs the sun's
+     * highlight alone: what the surface returns of the world around it is a
+     * Fresnel term and is stated separately, so chrome told to take no
+     * highlight is still chrome. */
+    float sunSpecular = uPaletteSize > 0 && uMode == 0
+      ? texelFetch(uPalette, ivec2(slot, 5), 0).a : 1.0;
+
     vec3 direct = vec3(0.0);
     if (nol > 0.0) {
       vec3 specular = fresnelSchlick(f0, voh)
-        * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a));
+        * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a) * sunSpecular);
       vec3 beneath = (diffuseColour / PI + specular) * under;
       if (coatF0 > 0.0) {
         float coatSpec = fresnelSchlick(vec3(coatF0), voh).r
@@ -1172,6 +1182,11 @@ ${SHADOW_LOOKUP}
         // and not how bright the car is.
         data[(width * 5 + i) * 4 + 2] = typeof material.detailScale === 'number'
           ? Math.min(8, Math.max(0.1, material.detailScale)) : 1;
+        /* How much of the sun's highlight the surface takes, where the file
+         * says. Nothing states it but a game's material, and one that says
+         * nothing takes all of it. */
+        data[(width * 5 + i) * 4 + 3] = typeof material.specularWeight === 'number'
+          ? Math.min(1, Math.max(0, material.specularWeight)) : 1;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;

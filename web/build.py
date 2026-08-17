@@ -40,6 +40,7 @@ SCRIPTS = [
     "psd.js",
     "dds.js",
     "png.js",
+    "zip.js",
     "transform.js",
     "analyze.js",
     "palette.js",

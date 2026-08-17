@@ -206,11 +206,12 @@ const FbxOut = (function () {
       p70('DiffuseColor', 'Color', ...colour.map(D)),
       p70('SpecularColor', 'Color', ...specular.map(D)),
       p70('Metallic', 'Number', D(typeof entry.metallic === 'number' ? entry.metallic : 0)),
-      // FBX states a Phong exponent, not a roughness. The two are the usual
-      // reciprocal: a mirror is a large exponent and a matte surface a small
-      // one, and 2/r² − 2 is the mapping every importer here reads back.
+/* FBX states a Phong exponent, not a roughness. The two meet through
+       * the microfacet alpha — `alpha = roughness squared` and
+       * `alpha = sqrt(2 / (n + 2))` — so the exponent is two over the fourth
+       * power, which is what every reader here turns back into a roughness. */
       p70('ShininessExponent', 'Number',
-        D(Math.max(2 / Math.max(roughness * roughness, 1e-4) - 2, 0))),
+        D(Math.max(2 / Math.max(roughness ** 4, 1e-6) - 2, 0))),
       p70('Opacity', 'Number', D(typeof entry.opacity === 'number' ? entry.opacity : 1)),
     ];
     const emissive = entry.emissive || [0, 0, 0];

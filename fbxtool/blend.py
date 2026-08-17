@@ -540,7 +540,12 @@ def material_look(base: tuple[float, float, float], *, metallic: float = 0.0,
     return {
         "colour": tuple(c * (1.0 - metallic) for c in base),
         "specular": tuple(dielectric * (1.0 - metallic) + c * metallic for c in base),
-        "shininess": 2.0 / (rough * rough) - 2.0,
+        # A Phong exponent, which is what an FBX material states.  The
+        # relation runs through the microfacet alpha: `alpha = roughness
+        # squared` and `alpha = sqrt(2 / (n + 2))`, so `n` is two over the
+        # fourth power.  Squaring once instead loses the round trip and
+        # hands back a surface far shinier than Blender was showing.
+        "shininess": 2.0 / (rough ** 4) - 2.0,
         "metallic": metallic,
         "opacity": min(max(alpha, 0.0), 1.0),
     }

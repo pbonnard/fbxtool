@@ -218,8 +218,14 @@ def test_material_look_maps_blender_shading_onto_fbx_properties():
     # A dielectric reflects 8% of its specular value, so 0.5 gives the usual 0.04.
     assert plastic["specular"] == pytest.approx((0.04, 0.04, 0.04))
     # The exponent round-trips: sqrt(2 / (e + 2)) gives the roughness back.
-    assert plastic["shininess"] == pytest.approx(2 / 0.4**2 - 2)
-    assert math.sqrt(2 / (plastic["shininess"] + 2)) == pytest.approx(0.4)
+    # An exponent, which is what an FBX material states. The two meet through
+    # the microfacet alpha — `alpha = roughness squared` and
+    # `alpha = sqrt(2 / (n + 2))` — so the exponent is two over the fourth
+    # power, and it is the inverse of what every reader here turns it back
+    # into. Squaring once instead, a Blender roughness of 0.4 comes back as
+    # 0.63 and the material is drawn shinier than Blender was showing it.
+    assert plastic["shininess"] == pytest.approx(2 / 0.4**4 - 2)
+    assert (2 / (plastic["shininess"] + 2)) ** 0.25 == pytest.approx(0.4)
 
     assert plastic["opacity"] == 1.0
     glass = material_look((0.1, 0.2, 0.3), alpha=0.25)
@@ -230,8 +236,11 @@ def test_material_look_maps_blender_shading_onto_fbx_properties():
     assert metal["specular"] == pytest.approx((0.9, 0.8, 0.5))
     assert metal["metallic"] == 1.0
 
-    # Out-of-range values are pulled back rather than producing a mirror.
-    assert material_look((1, 1, 1), roughness=0.0)["shininess"] < 3000
+    # Out-of-range values are pulled back rather than producing a mirror: a
+    # roughness of nothing is held at the floor, and read back it is that floor
+    # rather than a perfect mirror or an infinity.
+    sharpest = material_look((1, 1, 1), roughness=0.0)["shininess"]
+    assert (2 / (sharpest + 2)) ** 0.25 == pytest.approx(0.03, abs=1e-6)
     assert material_look((1, 1, 1), metallic=5)["metallic"] == 1.0
 
 

@@ -20,18 +20,61 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { chromium } = require('playwright');
 const { launch } = require('./chromium');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PAGE = path.join(ROOT, 'web', 'dist', 'fbxview.html');
 
-//: What each one writes, and how many files come back from it.
+//: What each one writes. The readable glTF is two files in an archive, so it
+//: arrives as one download and is taken apart again here.
 const FORMATS = [
   { value: 'glb', files: 1, suffix: '.glb' },
-  { value: 'gltf', files: 2, suffix: '.gltf' },
+  { value: 'gltf', files: 1, suffix: '.zip', unzip: true },
   { value: 'fbx', files: 1, suffix: '.fbx' },
 ];
+
+/**
+ * Take an archive apart, walking its central directory as a reader should.
+ *
+ * Not the writer's own code and not a library: the point of reading it back is
+ * that something else can. The directory is what a reader trusts — a local
+ * header repeats it, so agreeing with both is the check worth making.
+ */
+function unzip(file, into) {
+  const bytes = fs.readFileSync(file);
+  let end = bytes.length - 22;
+  while (end >= 0 && bytes.readUInt32LE(end) !== 0x06054b50) end -= 1;
+  if (end < 0) throw new Error('no end-of-central-directory record');
+  const count = bytes.readUInt16LE(end + 10);
+  let at = bytes.readUInt32LE(end + 16);
+  const written = [];
+  for (let n = 0; n < count; n++) {
+    if (bytes.readUInt32LE(at) !== 0x02014b50) throw new Error('bad directory entry');
+    const method = bytes.readUInt16LE(at + 10);
+    const stored = bytes.readUInt32LE(at + 20);
+    const size = bytes.readUInt32LE(at + 24);
+    const nameLength = bytes.readUInt16LE(at + 28);
+    const extra = bytes.readUInt16LE(at + 30);
+    const comment = bytes.readUInt16LE(at + 32);
+    const offset = bytes.readUInt32LE(at + 42);
+    const name = bytes.toString('utf8', at + 46, at + 46 + nameLength);
+    if (bytes.readUInt32LE(offset) !== 0x04034b50) throw new Error('bad local header');
+    // The local header repeats the name and says how long its own extra field
+    // is, which is where the bytes begin.
+    const from = offset + 30 + bytes.readUInt16LE(offset + 26)
+      + bytes.readUInt16LE(offset + 28);
+    const payload = bytes.subarray(from, from + stored);
+    const content = method === 8 ? zlib.inflateRawSync(payload) : payload;
+    if (content.length !== size) throw new Error(`${name} is ${content.length}, not ${size}`);
+    const to = path.join(into, name);
+    fs.writeFileSync(to, content);
+    written.push(to);
+    at += 46 + nameLength + extra + comment;
+  }
+  return written;
+}
 
 let failures = 0;
 
@@ -113,10 +156,22 @@ async function main() {
           `${written.length} of ${format.files} file(s)`);
         continue;
       }
-      const paths = written.map((name) => path.join(outDir, name));
+      let paths = written.map((name) => path.join(outDir, name));
       const sizes = paths.map((p) => fs.statSync(p).size);
       check(`${format.suffix} was written`, sizes.every((size) => size > 0),
         written.map((name, at) => `${name} ${(sizes[at] / 1024).toFixed(0)} KiB`).join(', '));
+      if (format.unzip) {
+        let members = [];
+        try {
+          members = unzip(paths[0], outDir);
+        } catch (error) {
+          check('the archive can be taken apart', false, String(error.message));
+          continue;
+        }
+        check('the archive holds the pair', members.length === 2,
+          members.map((p) => path.basename(p)).join(' + '));
+        paths = members;
+      }
 
       const back = await open(page, paths);
       // The strict one. Welding and splitting change how a model is stored,

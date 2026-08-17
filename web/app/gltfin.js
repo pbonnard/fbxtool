@@ -472,7 +472,7 @@ const FbxGltfIn = (function () {
         p70('SpecularColor', 'Color', ...specular.map(D)),
         // Roughness back to the exponent an FBX material carries.
         p70('ShininessExponent', 'Number',
-          D(2 / Math.max(roughness * roughness, 1e-4) - 2)),
+          D(2 / Math.max(roughness ** 4, 1e-6) - 2)),
         p70('Metallic', 'Number', D(metallic)),
         p70('Opacity', 'Number', D(opacity)),
         p70('EmissiveColor', 'Color', ...emissive.map(D)),

@@ -385,6 +385,30 @@ const FbxAnalyze = (function () {
    *
    * Colours are linear; that is what exporters write and what the shader wants.
    */
+  /* What a surface stating a plain highlight states. The commonest value by a
+   * wide margin across the cars to hand: 559 of 2006 materials say 0.1, and
+   * the median of the ones saying anything at all is 0.2. */
+  const SPECULAR_REFERENCE = 0.1;
+
+  /**
+   * A Phong exponent as the roughness a microfacet model works in.
+   *
+   * The usual relation is `alpha = sqrt(2 / (n + 2))`, and *alpha* is what a
+   * GGX distribution takes. But the roughness a material carries here is the
+   * one every modern renderer means — Disney's, where `alpha = roughness *
+   * roughness` — so handing the first straight over as the second squares it
+   * twice and the lobe comes out far sharper than the file asked for.
+   *
+   * It is worst where the file is shiniest, which is where it shows least: an
+   * exponent of 20 was being drawn as 240 and one of 650 as 212,000, a
+   * highlight so tight it lands between the pixels. A Renault 5's headlight
+   * glass states 650, and read that way its lens has no highlight at all and
+   * reads as a hole rather than as glass.
+   */
+  function fromShininess(exponent) {
+    return Math.sqrt(Math.sqrt(2 / (Math.max(exponent, 0) + 2)));
+  }
+
   function materialAppearance(props) {
     const source = props || {};
     const vector = (value, fallback) => {
@@ -483,7 +507,31 @@ const FbxAnalyze = (function () {
     const stated = pbr.roughness !== undefined ? scalar(pbr.roughness) : null;
     // Clamped away from a perfect mirror, which no shading model handles well.
     const roughness = clamp(stated !== null ? stated
-      : Math.sqrt(2 / (Math.max(shininess, 0) + 2)), 0.05, 1);
+      : fromShininess(shininess), 0.05, 1);
+
+    /* How much of the sun's highlight the surface takes.
+     *
+     * `ksSpecular` is the peak of the Blinn-Phong highlight a game's shader
+     * adds, and it is the third of a trio: `ksAmbient` and `ksDiffuse` weigh
+     * the two halves of the light a surface takes in, and this weighs what it
+     * throws back. 277 of the 2006 materials across the cars to hand state
+     * zero, and given a highlight anyway a windscreen seal and a rubber gaiter
+     * both come up polished.
+     *
+     * The commonest value by a wide margin is 0.1 — 559 of them — and that is
+     * read as a surface taking the whole of the highlight this renderer's own
+     * energy-conserving lobe gives it. Above that there is nothing more to
+     * give: the peak of an additive Blinn-Phong term is in the game's own
+     * light units and means nothing here, and the 100 that one material states
+     * cannot be honoured by a lobe that conserves energy at all. So this only
+     * ever takes a highlight away and never invents one.
+     *
+     * A file that states nothing — which is every file but a `.kn5` — keeps
+     * the whole of it.
+     */
+    const stray = number(source.ksSpecular, null);
+    const specularWeight = stray === null ? 1
+      : clamp(stray / SPECULAR_REFERENCE, 0, 1);
 
     let opacity;
     if (pbr.opacity !== undefined && scalar(pbr.opacity) !== null) {
@@ -509,7 +557,7 @@ const FbxAnalyze = (function () {
       ? ((coatIor - 1) / (coatIor + 1)) ** 2 : 1;
     const coat = clamp(Math.max(...coatColour) * coatFacing, 0, 1);
     const coatShininess = number(source.CoatShininess, 1024);
-    const coatRoughness = clamp(Math.sqrt(2 / (Math.max(coatShininess, 0) + 2)), 0.05, 1);
+    const coatRoughness = clamp(fromShininess(coatShininess), 0.05, 1);
 
     // What the surface gives off on its own. Nothing here edits it, but a
     // material carrying an emissive map and no colour beside it is a map that
@@ -523,6 +571,7 @@ const FbxAnalyze = (function () {
       specular: specularRgb.map((v) => clamp(v, 0, 1)),
       emissive: emissive.map((v) => clamp(v, 0, 1)),
       roughness,
+      specularWeight,
       coat,
       coatRoughness,
       opacity: clamp(opacity, 0, 1),

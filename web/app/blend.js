@@ -434,7 +434,12 @@ const FbxBlend = (function () {
       return {
         colour: base.map((c) => c * (1 - metallic)),
         specular: base.map((c) => dielectric * (1 - metallic) + c * metallic),
-        shininess: 2 / (roughness * roughness) - 2,
+        /* A Phong exponent, which is what an FBX material states. The
+         * relation runs through the microfacet alpha: `alpha = roughness
+         * squared` and `alpha = sqrt(2 / (n + 2))`, so `n` is two over the
+         * fourth power. Squaring once instead loses the round trip and
+         * hands back a surface far shinier than Blender was showing. */
+        shininess: 2 / (roughness ** 4) - 2,
         metallic,
         // The fourth component of the viewport colour, which is where Blender
         // keeps a material's transparency.

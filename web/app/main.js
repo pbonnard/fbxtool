@@ -2734,12 +2734,31 @@
         }));
         stats = built.stats;
         if (format === 'gltf') {
+          /* Two files, handed over as one.
+           *
+           * A browser downloads one thing at a time, so a pair means it
+           * stopping to ask whether you meant it and then two files that have
+           * to stay together and are easy to part. Zipped, it is one download
+           * and arrives as what it is — and the JSON still names the buffer
+           * beside it, which is where an extraction puts it. */
           const { gltf, bin } = FbxGltf.separate(built, `${stem}.bin`);
           const text = new TextEncoder().encode(gltf);
-          download(new Blob([bin], { type: 'application/octet-stream' }), `${stem}.bin`);
-          download(new Blob([text], { type: 'model/gltf+json' }), `${stem}.gltf`);
-          stats.bytes = text.length + bin.length;
-          stats.files = [`${stem}.gltf`, `${stem}.bin`];
+          const archive = await FbxZip.write([
+            { name: `${stem}.gltf`, bytes: text },
+            { name: `${stem}.bin`, bytes: bin },
+          ]);
+          if (archive) {
+            download(new Blob([archive], { type: 'application/zip' }), `${stem}.zip`);
+            stats.bytes = archive.length;
+            stats.files = [`${stem}.zip`];
+          } else {
+            // Somewhere with no deflate to offer: the two files separately
+            // beats an archive nothing can open.
+            download(new Blob([bin], { type: 'application/octet-stream' }), `${stem}.bin`);
+            download(new Blob([text], { type: 'model/gltf+json' }), `${stem}.gltf`);
+            stats.bytes = text.length + bin.length;
+            stats.files = [`${stem}.gltf`, `${stem}.bin`];
+          }
         } else {
           download(new Blob([built.glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
           stats.files = [`${stem}.glb`];
@@ -2959,6 +2978,8 @@
       detailTiling: props.useDetail === 0 ? 0
         : (typeof props.detailUVMultiplier === 'number'
           ? props.detailUVMultiplier : 1),
+      // How much of the sun's highlight the surface takes, where it says.
+      specularWeight: look.specularWeight,
       /* Whether the colour is read through the picture or replaced by it.
        *
        * Most files mean the second: a flat colour is a stand-in for the map

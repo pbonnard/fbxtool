@@ -459,6 +459,90 @@ def test_the_png_writer_says_when_it_cannot(tmp_path):
     assert json.loads(result.stdout) == [True, True, True],         "no size, too few pixels for the size claimed, and no pixels at all"
 
 
+# ------------------------------------------ putting two files in one
+
+
+def _write_zip(tmp_path, members):
+    """Build an archive with the page's own ``zip.js``, under Node.
+
+    The payloads go through files rather than through the command line, which
+    a fifty-kilobyte member is far too long for.
+    """
+    out = tmp_path / "written.zip"
+    listed = []
+    for at, (name, data) in enumerate(members):
+        source = tmp_path / f"member{at}"
+        source.write_bytes(data)
+        listed.append("{ name: %s, bytes: new Uint8Array(fs.readFileSync(%s)) }"
+                      % (json.dumps(name), json.dumps(str(source))))
+    script = (
+        "const fs=require('fs');"
+        f"global.FbxPng=require({str(WEB / 'app' / 'png.js')!r});"
+        f"const Z=require({str(WEB / 'app' / 'zip.js')!r});"
+        f"Z.write([{', '.join(listed)}]).then((bytes) => {{"
+        f"fs.writeFileSync({str(out)!r}, Buffer.from(bytes));"
+        "console.log(bytes.length); });"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return out
+
+
+@needs_node
+def test_two_files_handed_over_as_one(tmp_path):
+    """A glTF written the readable way is two files — the JSON and the buffer
+    it names — and a browser downloads one thing at a time. A pair means it
+    stopping to ask whether you meant it, and then two files that have to stay
+    together and are easy to part.
+
+    What is written is checked by Python's own `zipfile`, which owes this
+    nothing: `testzip` walks every member and holds it against the CRC stored
+    beside it, so a length or an offset one byte out is caught rather than
+    left to whatever opens the archive next.
+    """
+    import zipfile
+
+    repeated = bytes(at % 7 for at in range(50000))
+    archive = _write_zip(tmp_path, [
+        ("scene.gltf", b'{"asset": {"version": "2.0"}}'),
+        ("scene.bin", repeated),
+        ("tiny.txt", b"x"),
+    ])
+    with zipfile.ZipFile(archive) as held:
+        assert held.testzip() is None, "a member disagreed with its own checksum"
+        assert held.namelist() == ["scene.gltf", "scene.bin", "tiny.txt"]
+        assert held.read("scene.bin") == repeated
+        assert held.read("tiny.txt") == b"x"
+        assert json.loads(held.read("scene.gltf"))["asset"]["version"] == "2.0"
+
+        # Deflated where that makes it smaller, and stored where it does not:
+        # a file written larger than it was is a file nobody wanted zipped.
+        big = held.getinfo("scene.bin")
+        assert big.compress_type == zipfile.ZIP_DEFLATED
+        assert big.compress_size < big.file_size // 10
+        assert held.getinfo("tiny.txt").compress_type == zipfile.ZIP_STORED
+
+
+@needs_node
+def test_what_an_archive_stamps_its_members_with(tmp_path):
+    """MS-DOS counted from 1980 in two-second steps, and a zip still does.
+
+    A date before that cannot be written at all, so it is held at the floor
+    rather than allowed to wrap round into the future.
+    """
+    script = (
+        f"const Z=require({str(WEB / 'app' / 'zip.js')!r});"
+        "const at = (y, m, d, h, mi, s) => Z.dosTime(new Date(y, m - 1, d, h, mi, s));"
+        "console.log(JSON.stringify([at(2026, 8, 17, 14, 30, 44), at(1970, 6, 6, 1, 2, 3)]));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    now, ancient = json.loads(result.stdout)
+    assert now["date"] == ((2026 - 1980) << 9) | (8 << 5) | 17
+    assert now["time"] == (14 << 11) | (30 << 5) | 22, "seconds count in twos"
+    assert ancient["date"] >> 9 == 0, "1970 is held at the year zip counts from"
+
+
 # ------------------------------------------ writing an FBX back out
 
 
@@ -1254,6 +1338,78 @@ def test_the_index_is_found_however_it_is_spelt(spelling):
 
 
 @needs_node
+@pytest.mark.parametrize("exponent,what", [
+    (2, "the bluntest a Phong lobe gets"),
+    (20, "what a material stating no shininess is given"),
+    (25, "a Mercedes' paint"),
+    (100, "a chrome trim"),
+    (650, "a Renault 5's headlight glass"),
+    (1024, "a clear coat"),
+], ids=lambda v: str(v))
+def test_a_phong_exponent_survives_becoming_a_roughness(exponent, what):
+    """An exponent and a roughness meet through the microfacet alpha, and there
+    are two squarings in the way of it.
+
+    `alpha = sqrt(2 / (n + 2))` is the relation between the two lobes, and
+    `alpha = roughness * roughness` is what every modern renderer means by the
+    word — so the roughness is the fourth root. Handing the alpha over as the
+    roughness instead squares it twice, and the file's exponent is drawn far
+    sharper than it asked: 20 as 240, 100 as 5,200, 650 as 212,550.
+
+    It shows least where it matters most. A highlight that sharp lands between
+    the pixels, so a surface that should carry a hard bright glint carries
+    nothing at all — which is how a Renault 5's headlight lens, at 650, came to
+    read as a hole rather than as glass.
+    """
+    roughness = _appearance({"ShininessExponent": exponent})["roughness"]
+    assert roughness == pytest.approx((2 / (exponent + 2)) ** 0.25, abs=1e-6), what
+    # The shader squares it, and what comes out is the exponent that went in.
+    assert 2 / roughness ** 4 - 2 == pytest.approx(exponent, rel=1e-6), what
+
+
+@needs_node
+@pytest.mark.parametrize("roughness", [0.05, 0.2, 0.4, 0.5, 0.8, 1.0])
+def test_a_roughness_written_out_as_an_exponent_comes_back_as_itself(roughness):
+    """Which is the other half of it, and it crosses the two languages.
+
+    A `.blend` states a roughness and an FBX material states an exponent, so
+    the Python reader writes the one as the other and the page reads it back.
+    The two conversions have to be inverses, or a Blender material comes back
+    shinier than Blender was showing it.
+    """
+    from fbxtool.blend import material_look
+
+    written = material_look((0.5, 0.5, 0.5), roughness=roughness)["shininess"]
+    assert _appearance({"ShininessExponent": written})["roughness"] ==         pytest.approx(roughness, abs=1e-6)
+
+
+@needs_node
+@pytest.mark.parametrize("stated,expected,what", [
+    (None, 1, "every file but a game's, which states nothing and keeps it all"),
+    (0.0, 0.0, "277 of 2006 materials say this and were given a highlight anyway"),
+    (0.05, 0.5, "half of what a plain surface takes"),
+    (0.1, 1.0, "the commonest value of all: 559 materials"),
+    (2.0, 1.0, "a Renault 5's headlight glass, which cannot ask for more"),
+    (100.0, 1.0, "nor can the one material that says a hundred"),
+], ids=["silent", "none", "half", "plain", "glass", "absurd"])
+def test_how_much_of_the_suns_highlight_a_surface_takes(stated, expected, what):
+    """`ksSpecular` is the peak of the Blinn-Phong highlight a game's shader
+    adds, and it is the third of a trio: `ksAmbient` and `ksDiffuse` weigh the
+    two halves of the light a surface takes in, and this weighs what it throws
+    back. Given a highlight anyway, a windscreen seal and a rubber gaiter both
+    come up polished.
+
+    It only ever takes a highlight away. The peak of an additive Blinn-Phong
+    term is in the game's own light units and means nothing here, so above the
+    commonest value there is nothing more an energy-conserving lobe can do with
+    it — and what a surface returns of the world around it is a Fresnel term,
+    read separately, so chrome told to take no highlight is still chrome.
+    """
+    props = {} if stated is None else {"ksSpecular": stated}
+    assert _appearance(props)["specularWeight"] == pytest.approx(expected, abs=1e-6), what
+
+
+@needs_node
 def test_a_clear_coat_is_read_as_its_own_surface():
     """How much it reflects and how polished it is, and nothing else.
 
@@ -1266,7 +1422,11 @@ def test_a_clear_coat_is_read_as_its_own_surface():
                         "CoatColor": [0.5, 0.5, 0.5], "CoatIor": 999.0,
                         "CoatShininess": 1024.0})
     assert look["coat"] == pytest.approx(0.498, abs=1e-3)
-    assert look["coatRoughness"] == pytest.approx(0.05, abs=1e-3)
+    # An exponent of 1024 is a very sharp coat but not a perfect one: it is the
+    # fourth root of two over it, since `alpha = roughness squared` is what the
+    # shader means by the word. Read as the alpha itself it came out below the
+    # floor this clamps at, and every clear coat was drawn as a flat mirror.
+    assert look["coatRoughness"] == pytest.approx((2 / 1026) ** 0.25, abs=1e-3)
     # The base underneath is untouched by it.
     assert look["specular"][0] == pytest.approx(0.047 * 0.6049, abs=1e-4)
 

@@ -436,7 +436,11 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
             _p70("DiffuseColor", "Color", *(_d(c) for c in diffuse)),
             _p70("SpecularColor", "Color", *(_d(c) for c in specular)),
             # Roughness back to the exponent an FBX material carries.
-            _p70("ShininessExponent", "Number", _d(2 / max(roughness * roughness, 1e-4) - 2)),
+            # An exponent, which is what an FBX material states.  The two meet
+            # through the microfacet alpha — `alpha = roughness squared` and
+            # `alpha = sqrt(2 / (n + 2))` — so the exponent is two over the
+            # fourth power, and squaring once instead loses the round trip.
+            _p70("ShininessExponent", "Number", _d(2 / max(roughness ** 4, 1e-6) - 2)),
             _p70("Metallic", "Number", _d(metallic)),
             _p70("Opacity", "Number", _d(opacity)),
             _p70("EmissiveColor", "Color", *(_d(c) for c in glow[:3])),

@@ -283,7 +283,13 @@ def test_metallic_roughness_becomes_the_material_fbx_carries(glb):
     assert props["SpecularColor"] == pytest.approx(
         [0.04 * (1 - metallic) + c * metallic for c in base[:3]])
     # Roughness back to the exponent the viewer and the report expect.
-    wanted = 2 / fb.GLTF_ROUGHNESS ** 2 - 2
+    #
+    # Two squarings sit between the two: `alpha = sqrt(2 / (n + 2))` relates
+    # the lobes, and `alpha = roughness squared` is what the word means, so
+    # the exponent is two over the fourth power.  It has to be the inverse of
+    # what the readers turn it back into, or a glTF roughness comes out
+    # shinier than the file wrote it.
+    wanted = 2 / fb.GLTF_ROUGHNESS ** 4 - 2
     assert props["ShininessExponent"] == pytest.approx([wanted])
 
 
@@ -353,7 +359,7 @@ def test_specular_glossiness_is_read_where_a_file_states_it():
     assert props["SpecularColor"] == pytest.approx([0.5, 0.4, 0.3])
     assert props["Metallic"] == pytest.approx([0.0])
     # Glossiness is roughness the other way round.
-    assert props["ShininessExponent"] == pytest.approx([2 / 0.25 ** 2 - 2])
+    assert props["ShininessExponent"] == pytest.approx([2 / 0.25 ** 4 - 2])
 
 
 def test_an_index_of_refraction_sets_what_a_dielectric_reflects():

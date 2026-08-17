@@ -183,9 +183,16 @@ const paint = FbxAnalyze.materialAppearance({
 check('the diffuse colour comes through', nearAll(paint.colour, [0.582, 0.579, 0.563]));
 check('the specular factor scales the specular colour',
   nearAll(paint.specular, [0.1455, 0.14475, 0.14075], 1e-6), show(paint.specular));
-// roughness = sqrt(2 / (25 + 2)) = 0.2722
-check('shininess becomes roughness', near(paint.roughness, Math.sqrt(2 / 27), 1e-9),
+/* An exponent meets a roughness through the microfacet alpha, and there are
+ * two squarings in the way of it: `alpha = sqrt(2 / (n + 2))` is the relation,
+ * and `alpha = roughness * roughness` is what a modern renderer means by the
+ * word. So the roughness is the fourth root — 0.5217 for an exponent of 25.
+ * Handing the alpha over as the roughness instead squares it twice, and 25 is
+ * drawn as 340. */
+check('shininess becomes roughness', near(paint.roughness, (2 / 27) ** 0.25, 1e-9),
   paint.roughness.toFixed(4));
+check('and the exponent survives the round trip',
+  near(2 / paint.roughness ** 4 - 2, 25, 1e-6), (2 / paint.roughness ** 4 - 2).toFixed(4));
 check('an opaque material has full opacity', paint.opacity === 1);
 
 // The Shelby's materials are empty, so this is what its template supplies.
@@ -196,7 +203,7 @@ const template = FbxAnalyze.materialAppearance({
 });
 check('template values give a plausible finish',
   nearAll(template.colour, [0.8, 0.8, 0.8]) && nearAll(template.specular, [0.16, 0.16, 0.16])
-  && near(template.roughness, Math.sqrt(2 / 22), 1e-9), template.roughness.toFixed(4));
+  && near(template.roughness, (2 / 22) ** 0.25, 1e-9), template.roughness.toFixed(4));
 
 check('a diffuse factor scales the colour',
   nearAll(FbxAnalyze.materialAppearance({ DiffuseColor: [1, 0.5, 0], DiffuseFactor: 0.5 })

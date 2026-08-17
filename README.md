@@ -591,9 +591,10 @@ like something else.
 
 **Materials.** A kn5 material states no colour of its own — `txDiffuse` is the
 albedo — so the picture is the pattern and the material's colour is read
-through it rather than replacing it. `ksSpecularEXP` is the shininess exponent,
-and `fresnelC` is a reflectance facing you, so that is what it is written as,
-rather than a Phong highlight that has to be capped before it is believed.
+through it rather than replacing it. `ksSpecularEXP` is the shininess exponent
+and `ksSpecular` the strength of the highlight it sharpens, and `fresnelC` is a
+reflectance facing you, so that is what it is written as, rather than a Phong
+highlight that has to be capped before it is believed.
 Every parameter the file names is also carried under the name it named it with,
 so a shader setting with no FBX spelling is still there to read.
 
@@ -1322,8 +1323,38 @@ that:
 | --- | --- |
 | `DiffuseColor` × `DiffuseFactor` | albedo |
 | `SpecularColor` × `SpecularFactor` | reflectance at normal incidence |
-| `Shininess` / `ShininessExponent` | roughness, `sqrt(2 / (exponent + 2))` |
+| `Shininess` / `ShininessExponent` | roughness, the fourth root of `2 / (exponent + 2)` |
 | `Opacity`, `TransparencyFactor` | how much the surface hides |
+| `ksSpecular` | how much of the sun's highlight the surface takes |
+
+**The exponent has two squarings between it and a roughness**, and getting the
+count wrong is invisible until it is glaring. `alpha = sqrt(2 / (n + 2))`
+relates the two lobes, and `alpha = roughness × roughness` is what every modern
+renderer means by the word — so the roughness is the *fourth* root. Handing the
+alpha straight over as the roughness squares it twice and draws the surface far
+sharper than the file asked: an exponent of 20 as 240, one of 100 as 5,200, one
+of 650 as 212,550.
+
+It shows least where it matters most. A highlight that tight lands between the
+pixels, so a surface meant to carry a hard bright glint carries nothing at all
+— which is how a Renault 5's headlight glass, at 650, came to read as a hole
+rather than as glass, and how every clear coat came out a flat mirror by being
+clamped at the roughness floor. The conversion runs both ways, since a `.blend`
+and a glTF state a roughness and are written out as an exponent, and the tests
+hold a Blender roughness through both languages and back.
+
+**`ksSpecular`** is the third of a trio: `ksAmbient` and `ksDiffuse` weigh the
+two halves of the light a surface takes in, and this weighs what it throws
+back. 277 of the 2006 materials across the cars to hand state zero, and given a
+highlight anyway a windscreen seal and a rubber gaiter both come up polished.
+The commonest value by a wide margin is 0.1 — 559 of them — and that is read as
+a surface taking the whole of the highlight this renderer's own
+energy-conserving lobe gives it. Above that there is nothing more to give: the
+peak of an additive Blinn-Phong term is in the game's own light units and means
+nothing here. So it only ever takes a highlight away and never invents one, and
+it weighs the sun alone — what a surface returns of the world around it is a
+Fresnel term, read separately, so chrome told to take no highlight is still
+chrome.
 
 That mapping is the fallback, not the first choice. A material carries its own
 renderer's parameters beside the Phong ones, under the same vendor prefix the
@@ -1460,7 +1491,7 @@ spellings of the same model, chosen beside the button:
 | | |
 | --- | --- |
 | `.glb` | one self-contained binary file, which is what most things want |
-| `.gltf` + `.bin` | the same document with its JSON out where a person can read it, and the geometry in the file beside it. Two downloads, so a browser will ask whether you meant it |
+| `.gltf` + `.bin`, zipped | the same document with its JSON out where a person can read it, and the geometry in the file beside it — the pair in one `.zip`, since a browser hands over one file at a time |
 | `.fbx` | binary FBX 7.4, which is what the rest of this tool reads, written back out |
 
 Everything below is true of all three unless it says otherwise: they are handed
@@ -1561,6 +1592,23 @@ a merge nobody noticed is a car that can no longer be painted.
 What still does not survive: animation, skins and morph targets; cameras and
 lights; tangents, vertex colours and second UV sets. The geometric offset a
 mesh carries is baked into its vertices, since glTF has no such thing.
+
+**One download for two files.** A glTF written the readable way is a `.gltf`
+naming a `.bin`, and a browser downloads one thing at a time: a pair means it
+stopping to ask whether you meant it, and then two files that have to stay
+together and are easy to part. So they go into a `.zip`, which is one download
+and arrives as what it is. The JSON still names the buffer beside it, which is
+where extracting puts it.
+
+`web/app/zip.js` writes the archive — a local header and its bytes per member,
+a central directory repeating those headers with the offset each began at, and
+a record saying where the directory is. Deflate is the only compression a zip
+has and `CompressionStream('deflate-raw')` is exactly it; a member that does
+not get smaller is stored as it stands rather than written larger than it was.
+A BMW Z3M's 11.8 MiB of glTF comes down as 8.1. What is not written is ZIP64,
+so nothing over four gigabytes, and where the platform offers no deflate at all
+the two files are handed over separately rather than an archive nothing can
+open. Python's own `zipfile` reads what comes out, checksums and all.
 
 **Writing FBX.** Everything else here reads FBX; the export is the one thing
 that writes it, and the record tree it builds is the same one every reader in
