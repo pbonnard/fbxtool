@@ -861,15 +861,6 @@ def _skin_states(folder: str) -> tuple[list[str], list[str]]:
     # Half of them have no `cm_skin.json` at all and say it in their config.
     if not any(colours):
         colours = _config_colours(config, os.path.basename(folder.rstrip("/" + chr(92))))
-    # And last, for the sixty-nine of 189 that state no colour anywhere, the
-    # picture of the paint they all carry.  A picture is weaker evidence than a
-    # setting — where both are there they disagree about a third of the time,
-    # usually because the setting is Content Manager's untouched white — so it
-    # is only read where there is nothing to disagree with.
-    if not any(colours):
-        chip = _read_bytes(os.path.join(folder, "livery.png"))
-        colour = _chip_colour(chip) if chip else ""
-        colours = [colour] if colour else []
     return _paint_materials(config), colours
 
 
@@ -990,7 +981,23 @@ def _lamps(path: str | None) -> dict[str, str]:
     return out
 
 
-def _skins(path: str | None, named: set[str], materials: set[str]) -> list[dict]:
+def _base_pictures(materials: Sequence["_Material"]) -> dict[str, str]:
+    """Which picture each material wears, by name, both lowercased.
+
+    The base colour alone: a skin replacing a material's normal map has not
+    painted it, and a skin replacing the picture the colour is in has.
+    """
+    out: dict[str, str] = {}
+    for material in materials:
+        out[material.name.lower()] = ""
+        for slot, _number, texture in material.slots:
+            if slot == "txDiffuse" and texture:
+                out[material.name.lower()] = texture.lower()
+                break
+    return out
+
+
+def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[dict]:
     """The paint jobs sitting beside a car, and how much of each one it wears.
 
     A kn5 carries one set of textures and the game puts another over the top
@@ -1007,6 +1014,7 @@ def _skins(path: str | None, named: set[str], materials: set[str]) -> list[dict]
     """
     if path is None:
         return []
+    materials = set(pictures)
     beside = os.path.dirname(os.path.abspath(path))
     # Half of them declare which material is the paint once for the whole car
     # rather than once per skin, and that is the file it goes in.
@@ -1026,7 +1034,7 @@ def _skins(path: str | None, named: set[str], materials: set[str]) -> list[dict]
             continue
         stated, colours = _skin_states(inside)
         out.append({"name": name, "replaces": len(files & named),
-                    "stated": stated, "colours": colours})
+                    "stated": stated, "colours": colours, "files": files})
 
     # What the car's paint is called, settled across the whole folder.  Three
     # places say so, in the order they are trusted: the skin's own config; the
@@ -1049,7 +1057,27 @@ def _skins(path: str | None, named: set[str], materials: set[str]) -> list[dict]
         stated = [n for n in skin.pop("stated") if n.lower() in materials]
         if not stated:
             stated = [n for n in fallback if n.lower() in materials] or known
-        skin["paints"] = _pair(stated, skin.pop("colours"), materials)
+        colours = skin.pop("colours")
+        files = skin.pop("files")
+        # And last, for the skins that state no colour anywhere, the picture of
+        # the paint that nearly all of them carry.
+        #
+        # Only where the skin does not bring the paint's own picture.  A skin
+        # that replaces the very texture the paint material wears has put the
+        # colour there already, and painting the chip over the top paints it
+        # twice: a Lancia Beta Montecarlo's seven skins each replace the
+        # `LANCIA_body.dds` that `lancia_body_paint` wears and say nothing
+        # else at all, so read the other way round every one of its liveries
+        # comes out under a flat wash of its own average.
+        #
+        # It is the rule `cm_skin.json` states in words when it switches a
+        # colour off: a slot whose colour is in its texture is not painted. */
+        if not any(colours) and not any(
+                pictures.get(name.lower()) in files for name in stated):
+            chip = _read_bytes(os.path.join(folder, skin["name"], "livery.png"))
+            colour = _chip_colour(chip) if chip else ""
+            colours = [colour] if colour else []
+        skin["paints"] = _pair(stated, colours, materials)
     out.sort(key=lambda skin: (-skin["replaces"], skin["name"]))
     return out
 
@@ -1466,7 +1494,7 @@ def parse_kn5(
         "lods": scene.lods,
         "lenses": len(lit),
         "skins": _skins(path, {name.lower() for name in named if name},
-                        {material.name.lower() for material in materials}),
+                        _base_pictures(materials)),
         "encrypted": encrypted is not None,
         "encrypted_from": encrypted,
         "winding_agreement": round(agreement, 4) if sampled else None,

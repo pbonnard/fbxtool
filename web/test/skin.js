@@ -75,6 +75,33 @@ async function wear(page, name) {
   return sample(page);
 }
 
+/**
+ * The whole viewport as one number.
+ *
+ * The middle of it is the body and says nothing about the trim standing beside
+ * it, and it is the trim that carries the picture only one skin replaces.
+ */
+function frameOf(page) {
+  return page.evaluate(() => {
+    const canvas = document.getElementById('viewport');
+    const gl = canvas.getContext('webgl2');
+    const px = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let hash = 2166136261;
+    for (let at = 0; at < px.length; at += 4) {
+      for (let k = 0; k < 3; k++) hash = Math.imul(hash ^ px[at + k], 16777619) >>> 0;
+    }
+    return hash;
+  });
+}
+
+/** Everything the palette holds, as one string to compare against another. */
+function paletteOf(page) {
+  return page.evaluate(() => window.fbxtool.palette
+    .map((m) => `${m.name}:${FbxPalette.toHex(m.colour)}:${m.layer}:${m.tintTexture}`)
+    .join('|'));
+}
+
 /** What the palette says a material's colour is, as "#rrggbb". */
 function colourOf(page, material) {
   return page.evaluate((name) => {
@@ -113,7 +140,7 @@ async function main() {
   });
   console.log('what the folder brought');
   check('the picker is offered', offered.hidden === false);
-  check('every skin is listed, and what each brings', offered.options.length === 6,
+  check('every skin is listed, and what each brings', offered.options.length === 7,
     offered.options.join(' | '));
   check('the one that states a material in its own config says so',
     offered.options.some((o) => /^Red — 1 texture \+ 1 paint$/.test(o)),
@@ -122,7 +149,7 @@ async function main() {
     offered.options.some((o) => /^Stranger — 1 texture \+ 2 paints$/.test(o)),
     offered.options.join(' | '));
   check('and the one that states no colour is offered for its pictures',
-    offered.options.some((o) => /^Bare — 1 texture$/.test(o)),
+    offered.options.some((o) => /^Bare — 2 textures$/.test(o)),
     offered.options.join(' | '));
   check('the one taking its materials from the car states both',
     offered.options.some((o) => /^Pair — 1 texture \+ 2 paints$/.test(o)),
@@ -163,15 +190,72 @@ async function main() {
   console.log('\nand the one that states no colour at all');
   const unpainted = await wear(page, 'Bare');
   check('nothing is invented for it', Math.min(...unpainted) > 120, `rgb(${unpainted})`);
+  /* But its picture is on, which is the only thing it brings. Nothing else
+   * here can say so: every other skin changes the colour as well, and a
+   * colour that changed is what the eye reads as the skin having changed —
+   * so a switch that never re-read the pictures at all would pass every
+   * check but this one. */
+  check('and the picture it brought is the one being drawn',
+    unpainted[0] < bare[0] - 8 && Math.abs(unpainted[0] - unpainted[2]) < 6,
+    `rgb(${unpainted}) against rgb(${bare})`);
 
   console.log('\nand the one whose colour is only in the picture of it');
   await wear(page, 'Chip');
   const chip = await colourOf(page, 'carpaint');
   check('the chip is read, over the dark band under it', chip === '#2010dd', chip);
+  /* And the one that brings the paint's own picture, whose chip is not
+   * read. The colour is in that picture already, and a chip over the top
+   * paints it twice: a Lancia Beta Montecarlo's seven skins each replace
+   * the `LANCIA_body.dds` its `lancia_body_paint` wears and state nothing
+   * else at all, so read the other way round every one of its liveries
+   * comes out under a flat wash of its own average. */
+  await wear(page, 'Livery');
+  const carried = await colourOf(page, 'carpaint');
+  check('a skin bringing the paint its picture is not painted over it',
+    carried !== '#2010dd', carried);
+  check('and the material is left as the car had it',
+    carried === await colourOf(page, 'trim'),
+    `${carried} against ${await colourOf(page, 'trim')}`);
 
   console.log('\nand taking it off again');
   const off = await wear(page, '');
   check('the car is as it was', Math.abs(off[0] - bare[0]) < 6, `rgb(${off})`);
+
+  /* Switching from one skin to another, which is not the same question.
+   *
+   * Taking a skin off puts the car back; putting a second one on has to put
+   * back everything the first brought that the second does not — and that is
+   * the half nobody looks for, because the colour changes and the eye reads
+   * that as the skin having changed. Only `Red` here brings a paint map that
+   * is not the car's own, so every switch away from it is a chance to leave a
+   * picture behind.
+   *
+   * What is checked is that a skin worn after another is the same as that skin
+   * worn from the bare car: every ordered pair, held against the state it
+   * should always be.
+   */
+  console.log('');
+  console.log('switching from one skin to another');
+  const worn = ['Red', 'Pair', 'Chip', 'Bare'];
+  const alone = {};
+  for (const name of worn) {
+    await wear(page, '');
+    await wear(page, name);
+    alone[name] = { frame: await frameOf(page), palette: await paletteOf(page) };
+  }
+  for (const first of worn) {
+    for (const second of worn) {
+      if (first === second) continue;
+      await wear(page, '');
+      await wear(page, first);
+      await wear(page, second);
+      const frame = await frameOf(page);
+      const palette = await paletteOf(page);
+      const same = frame === alone[second].frame && palette === alone[second].palette;
+      check(`${second} after ${first} is ${second}`, same,
+        same ? '' : `frame ${frame} against ${alone[second].frame}`);
+    }
+  }
 
   console.log('');
   console.log('opening another car over the top of it');

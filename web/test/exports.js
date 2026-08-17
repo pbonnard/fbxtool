@@ -100,13 +100,26 @@ function census(page) {
     drawn: window.fbxtool.materials
       .filter((group) => group.triangles > 0).map((group) => group.name).sort(),
     names: window.fbxtool.materials.map((group) => group.name).sort(),
+    /* And what colour each of them is.
+     *
+     * The colour a car is wearing is the one thing on screen that need not be
+     * in the file it came from: a skin states it beside the model. So an
+     * export built from the file rather than from what is on screen comes out
+     * of a car in Sakhir Orange as the grey it was unpainted, with its
+     * textures orange and its paint not. */
+    colours: Object.fromEntries(window.fbxtool.palette
+      .map((entry) => [entry.name, FbxPalette.toHex(entry.colour)])),
   }));
 }
 
 async function open(page, files) {
   const before = await page.evaluate(() => window.fbxtool.loadCount);
-  await page.setInputFiles('#file-input', []);
-  await page.setInputFiles('#file-input', files);
+  // A folder goes through the folder picker, which is the only way a car's
+  // skins and its lighting come with it.
+  const folder = files.length === 1 && fs.statSync(files[0]).isDirectory();
+  if (!folder) await page.setInputFiles('#file-input', []);
+  await page.setInputFiles(folder ? '#folder-input' : '#file-input',
+    folder ? files[0] : files);
   await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, before,
     { timeout: 300000 });
   await page.waitForTimeout(400);
@@ -140,11 +153,28 @@ async function main() {
   for (const entry of files) {
     const group = entry.split('+').every((f) => fs.existsSync(f)) ? entry.split('+') : [entry];
     console.log(group.map((f) => path.basename(f)).join(' + '));
-    const source = await open(page, group);
+    await open(page, group);
+    /* Wearing a skin, where the folder brought one that paints. It is the case
+     * an export is likeliest to get wrong, since the paint is the one thing on
+     * screen that is not in the model. */
+    const painting = await page.evaluate(() => {
+      const skin = (window.fbxtool.skins || []).find((s) => s.paints.length);
+      return skin ? skin.name : null;
+    });
+    if (painting) {
+      await page.selectOption('#skin-select', painting);
+      await page.waitForTimeout(1200);
+      console.log(`  wearing ${painting}`);
+    }
+    const source = await census(page);
 
     for (const format of FORMATS) {
       written.length = 0;
       await open(page, group);
+      if (painting) {
+        await page.selectOption('#skin-select', painting);
+        await page.waitForTimeout(1200);
+      }
       await page.selectOption('#export-format', format.value);
       await page.click('#export-gltf');
       const until = Date.now() + 300000;
@@ -188,6 +218,24 @@ async function main() {
         ? back.parts === source.parts : back.parts >= source.parts;
       check(`${format.suffix} comes back with every part`, kept,
         `${back.parts} ${format.value === 'fbx' ? 'of' : 'for'} ${source.parts}`);
+      /* By name, and only for the materials that came back at all: one
+       * covering no triangles is dropped by design, and the export says so.
+       * Within a step or two of eight bits, since a colour goes out through a
+       * factor written as a float and comes back through one. */
+      const shifted = Object.keys(back.colours).filter((name) => {
+        const held = source.colours[name];
+        const now = back.colours[name];
+        if (held === undefined || now === undefined) return false;
+        return [1, 3, 5].some((k) =>
+          Math.abs(parseInt(held.slice(k, k + 2), 16)
+            - parseInt(now.slice(k, k + 2), 16)) > 2);
+      });
+      check(`${format.suffix} keeps the colour each material is`,
+        shifted.length === 0,
+        shifted.length
+          ? `${shifted.length} moved, e.g. ${shifted[0]} `
+            + `${source.colours[shifted[0]]} -> ${back.colours[shifted[0]]}`
+          : `${Object.keys(back.colours).length} material(s)`);
       const missing = source.drawn.filter((name) => !back.names.includes(name));
       check(`${format.suffix} keeps every material that covers anything`,
         missing.length === 0,

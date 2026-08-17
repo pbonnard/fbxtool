@@ -780,8 +780,9 @@ def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
         {"name": "colourless", "named": ["carpaint"], "colours": []},
     ]
     settled = _skins(
-        f"S.settle({json.dumps(skins)}, "
-        f"{{materials: new Set(['booody_aooo']), fallback: []}})")
+        f"S.settle({json.dumps(skins)}.map((s) => "
+        "Object.assign(s, { images: new Map() })), "
+        f"{{pictures: new Map([['booody_aooo', 'skin_00.dds']]), fallback: []}})")
     assert [(s["name"], s["paints"]) for s in settled] == [
         ("knows", [{"material": "booody_aooo", "hex": "#111111"}]),
         ("copied", [{"material": "booody_aooo", "hex": "#222222"}]),
@@ -856,23 +857,50 @@ def test_the_colour_of_the_paint_chip_a_skin_carries():
 
 
 @needs_node
-def test_a_chip_does_not_argue_with_a_colour_the_skin_stated():
+def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     """A picture is weaker evidence than a setting, and where both are there
     they disagree about a third of the time — usually because the setting is
-    Content Manager's untouched white and the chip is the paint."""
-    stated = {"name": "Nighthawk", "colours": [
-        {"key": "carPaint", "hex": "#0c0c0c", "enabled": True}]}
-    assert _skins(f"S.fromChip({json.dumps(stated)}, '#941a0a').colours"
-                  )[0]["hex"] == "#0c0c0c"
-    # One that switched its colour off stated none, which is where a chip
-    # comes in: an Audi's Sakhir Orange says #FFFFFF and turns it off.
-    off = {"name": "Sakhir", "colours": [
-        {"key": "carPaint", "hex": "#ffffff", "enabled": False}]}
-    assert _skins(f"S.fromChip({json.dumps(off)}, '#941a0a').colours") == [
-        {"key": "livery", "hex": "#941a0a", "enabled": True,
-         "gloss": None, "reflection": None}]
-    # And an unreadable chip states nothing rather than something.
-    assert _skins(f"S.fromChip({json.dumps(off)}, null).colours") == off["colours"]
+    Content Manager's untouched white and the chip is the paint.
+
+    And it is weaker still than the skin's own pictures. A skin that replaces
+    the very texture the paint material wears has put the colour there already,
+    and the chip over the top paints it twice: a Lancia Beta Montecarlo's seven
+    skins each replace the `LANCIA_body.dds` its `lancia_body_paint` wears and
+    state nothing else at all.
+    """
+    pictures = "new Map([['carpaint', 'body.dds']])"
+
+    def settled(colours, brings, chip=None):
+        """One skin, settled against a car whose paint wears `body.dds`."""
+        skin = json.dumps({"name": "one", "named": ["carpaint"], "colours": colours})
+        images = json.dumps([[name, 1] for name in brings])
+        after = f"S.fromChip(one, {json.dumps(chip)}, {pictures})" if chip else "one"
+        return _skins(
+            "(() => { const one = S.settle("
+            f"[Object.assign({skin}, {{ images: new Map({images}), livery: 1 }})], "
+            f"{{ pictures: {pictures}, fallback: [] }})[0];"
+            f" return {after}; }})()")
+
+    stated = settled([{"key": "carPaint", "hex": "#0c0c0c", "enabled": True}], [])
+    assert stated["wantsChip"] is False, "a colour it stated needs no picture"
+    assert stated["paints"] == [{"material": "carpaint", "hex": "#0c0c0c"}]
+
+    # One that switched its colour off stated none, which is where a chip comes
+    # in: an Audi's Sakhir Orange says #FFFFFF and turns it off.
+    off = settled([{"key": "carPaint", "hex": "#ffffff", "enabled": False}], [])
+    assert off["wantsChip"] is True
+
+    # But not where the skin brought the paint's own picture.
+    livery = settled([], ["body.dds"])
+    assert livery["wantsChip"] is False, "the colour is already in that picture"
+    # A different picture is a different matter: that one paints nothing.
+    other = settled([], ["badge.dds"])
+    assert other["wantsChip"] is True
+
+    # And where it is wanted, the colour lands on the material the car settled.
+    assert settled([], ["badge.dds"], chip="#941a0a")["paints"] == [
+        {"material": "carpaint", "hex": "#941a0a"}]
+    assert settled([], ["body.dds"], chip="#941a0a")["paints"] == [],         "and a chip nobody wanted is not put on anyway"
 
 
 @needs_node
@@ -914,8 +942,20 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
 
     grey = fb.dds_bgra(4, 4, bytes([128, 128, 128, 255]) * 16)
     # A grain dark and light in equal measure, so its own average is the middle
-    # of it and only the green shows.
-    green = fb.dds_bgra(4, 4, (bytes([0, 60, 0, 255]) * 8) + (bytes([0, 200, 0, 255]) * 8))
+    # of it and what shows is its green cast. Held well clear of both ends: a
+    # grain that multiplies through to black or to white lands in the same
+    # place whichever light it was multiplied in, and says nothing about which.
+    green = fb.dds_bgra(4, 4,
+                        (bytes([80, 160, 80, 255]) * 8) + (bytes([120, 200, 120, 255]) * 8))
+    # And one that is nothing but its own average, which must therefore do
+    # nothing at all. It is the strictest thing a grain can be asked: taken in
+    # the light the file is written in rather than the light it is multiplied
+    # in, a flat grain over a grey panel turns it white.
+    flat = fb.dds_bgra(4, 4, bytes([150, 150, 150, 255]) * 16)
+    # And one dark enough that taking it as neutral asks for forty-seven times
+    # the light back, where the viewer allows eight. An Audi S8's paint asks
+    # for ten, so the ceiling is a real one and both sides must hold to it.
+    deep = fb.dds_bgra(4, 4, bytes([40, 40, 40, 255]) * 16)
     identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
     vertices, indices = fb.kn5_cube(1.0)
@@ -924,6 +964,10 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
         ("plain", (("txDiffuse", 0, "grey.dds"),), [("grey.dds", grey)]),
         ("grained", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "green.dds")),
          [("grey.dds", grey), ("green.dds", green)]),
+        ("flat", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "flat.dds")),
+         [("grey.dds", grey), ("flat.dds", flat)]),
+        ("deep", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "deep.dds")),
+         [("grey.dds", grey), ("deep.dds", deep)]),
     ):
         material = fb.kn5_material(
             "panel", "ksPerPixelMultiMap",
@@ -938,7 +982,7 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
                               fb.kn5_mesh("cube", vertices, indices), 1)))
         files.append(str(path))
 
-    result = _run(["node", str(WEB / "test" / "detail.js"), *files],
+    result = _run(["node", str(WEB / "test" / "detail.js"), str(tmp_path), *files],
                   env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
@@ -967,17 +1011,21 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
 
     car = tmp_path / "car"
     (car / "extension").mkdir(parents=True)
-    for name in ("Red", "Stranger", "Pair", "Bare", "Chip"):
+    for name in ("Red", "Stranger", "Pair", "Bare", "Chip", "Livery"):
         (car / "skins" / name).mkdir(parents=True)
     # A paint map is the panels in white, because the colour is what the game
     # multiplies through it.
     white = fb.dds_bgra(4, 4, bytes([255, 255, 255, 255]) * 16)
+    # A second picture, worn by the trim alone. Only the `Bare` skin replaces
+    # it, so switching away from that skin leaves nothing to claim it back —
+    # which is the one arrangement in which a texture left behind can be seen.
+    green = fb.dds_bgra(4, 4, bytes([40, 220, 40, 255]) * 16)
     materials = [
         fb.kn5_material(name, "ksPerPixelMultiMap",
                         properties=fb.kn5_property("fresnelC", 0.05),
                         property_count=1,
-                        slots=(("txDiffuse", 0, "paint.dds"),))
-        for name in ("carpaint", "trim")
+                        slots=(("txDiffuse", 0, picture),))
+        for name, picture in (("carpaint", "paint.dds"), ("trim", "trim.dds"))
     ]
     # And one that takes almost none of the light, which is what an Audi's
     # wheels are: the same white map under it, and black on the screen.
@@ -991,13 +1039,19 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
                 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
     vertices, indices = fb.kn5_cube(1.0)
     small, small_indices = fb.kn5_cube(0.2)
+    beside = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+              0.0, 0.0, 1.0, 0.0, 1.8, 0.0, 0.0, 1.0)
     tree = fb.kn5_dummy(
         "car", identity,
         fb.kn5_mesh("body", vertices, indices, material=0)
-        + fb.kn5_mesh("bumper", small, small_indices, material=1)
+        # Out beside the body rather than inside it: a part nobody can see is a
+        # part no check can speak for.
+        + fb.kn5_dummy("trim", beside,
+                       fb.kn5_mesh("bumper", small, small_indices, material=1), 1)
         + fb.kn5_mesh("sill", small, small_indices, material=2), 3)
     (car / "car.kn5").write_bytes(fb.build_kn5(
-        6, textures=[("paint.dds", white)], materials=materials, tree=tree))
+        6, textures=[("paint.dds", white), ("trim.dds", green)],
+        materials=materials, tree=tree))
 
     # Half of them declare which material is the paint once for the whole car
     # rather than once per skin, and in the other spelling.
@@ -1018,21 +1072,43 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
         # Nor does this one, but it carries a picture of the paint, which is
         # the only thing left saying what colour it is.
         ("Chip", "carpaint", '{"carPaint": {"color": "#FFFFFFFF", "enabled": false}}'),
+        # And this one states nothing either and brings the paint's own
+        # picture, which says the colour is in there already.
+        ("Livery", "carpaint", None),
     ):
         skin = car / "skins" / name
-        (skin / "paint.dds").write_bytes(white)
+        # One of them brings a map that is not the car's own.
+        #
+        # `Bare` states no colour at all, so its picture is the only thing it
+        # changes and the only thing that can prove the picture was changed.
+        # Every other skin here leaves the paint map as it found it, so
+        # switching away from this one has to put the car's own back — and a
+        # texture left behind is a skin still half on, which is the half nobody
+        # looks for: the colour changes, so the eye says the skin changed,
+        # while the picture underneath is still the last one's.
+        # `Chip` brings no paint map at all, so its chip is the only thing
+        # saying what colour it is; `Livery` brings one, so its chip is not.
+        if name != "Chip":
+            (skin / "paint.dds").write_bytes(
+                fb.dds_bgra(4, 4, bytes([200, 200, 200, 255]) * 16)
+                if name == "Bare" else white)
+        if name in ("Bare", "Chip"):
+            (skin / "trim.dds").write_bytes(
+                fb.dds_bgra(4, 4, bytes([220, 40, 220, 255]) * 16))
         if names_it:
             (skin / "ext_config.ini").write_text(
                 "CarPaintMaterial = " + names_it + chr(10), encoding="utf-8")
-        (skin / "cm_skin.json").write_text(meta, encoding="utf-8")
-    # A chip: the paint over the band of dark reflection under it.
-    (car / "skins" / "Chip" / "livery.png").write_bytes(fb.livery_png(
-        [[(0x20, 0x10, 0xdd)] * 8] * 4 + [[(10, 10, 10)] * 8] * 4))
+        if meta:
+            (skin / "cm_skin.json").write_text(meta, encoding="utf-8")
+    # A chip apiece: the paint over the band of dark reflection under it.
+    for name in ("Chip", "Livery"):
+        (car / "skins" / name / "livery.png").write_bytes(fb.livery_png(
+            [[(0x20, 0x10, 0xdd)] * 8] * 4 + [[(10, 10, 10)] * 8] * 4))
 
     # A second car, with nothing beside it, to open over the top of the first.
     other = tmp_path / "other.kn5"
     other.write_bytes(fb.build_kn5(
-        6, textures=[("paint.dds", white)], materials=[materials[0]],
+        6, textures=[("paint.dds", white), ("trim.dds", green)], materials=[materials[0]],
         tree=fb.kn5_dummy("car", identity,
                           fb.kn5_mesh("body", vertices, indices), 1)))
 

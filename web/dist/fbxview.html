@@ -2996,6 +2996,13 @@ const FbxGltfIn = (function () {
 
       const props = [
         p70('DiffuseColor', 'Color', ...diffuse.map(D)),
+        /* And that the factors above are read through the pictures rather
+         * than replaced by them, which is what glTF means: base colour is
+         * `baseColorFactor` times `baseColorTexture`, said in as many words.
+         * Most files state a factor of one and nothing turns on it — but a car
+         * exported wearing a skin states the paint there, and read the other
+         * way round it comes back the grey it was unpainted. */
+        p70('TintsTexture', 'Bool', I(1)),
         p70('SpecularColor', 'Color', ...specular.map(D)),
         // Roughness back to the exponent an FBX material carries.
         p70('ShininessExponent', 'Number',
@@ -6317,14 +6324,11 @@ const FbxSkins = (function () {
       replaces: [...skin.images.keys()].filter((n) => worn.has(n)).length,
       named: config ? paintMaterials(config) : [],
       colours,
-      /* And the picture of the paint, for the ones that state no colour at
-       * all. Sixty-nine of the 189 skins to hand are in that position —
-       * an Audi's Sakhir Orange says `#FFFFFF` and switches it off, and its
-       * Silver Pearl has no `carPaint` section to say anything in — so read
-       * from what they do say, those cars come up white. Handed back rather
-       * than opened here: the pixels are the caller's to fetch. */
-      livery: colours.some((c) => c.enabled)
-        ? null : (skin.images.get('livery.png') || null),
+      /* And the picture of the paint, which nearly all of them carry. Whether
+       * it is worth reading is settled later, once the car has said which of
+       * its materials the paint is: handed back rather than opened here, since
+       * the pixels are the caller's to fetch. */
+      livery: skin.images.get('livery.png') || null,
       paints: [],
     };
   }
@@ -6337,9 +6341,10 @@ const FbxSkins = (function () {
    * about a third of the time — usually because the setting is Content
    * Manager's untouched white and the chip is the paint.
    */
-  function fromChip(skin, hex) {
-    if (!hex || skin.colours.some((c) => c.enabled)) return skin;
+  function fromChip(skin, hex, pictures) {
+    if (!hex || !skin.wantsChip) return skin;
     skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
+    skin.paints = pair(skin.settled || [], skin.colours, new Set(pictures.keys()));
     return skin;
   }
 
@@ -6377,7 +6382,9 @@ const FbxSkins = (function () {
    * that names nothing the car has is answered this way, and only from names
    * its own siblings used.
    */
-  function settle(skins, { materials, fallback }) {
+  function settle(skins, { pictures, fallback }) {
+    //: Material name -> the picture it wears, both lowercased.
+    const materials = new Set(pictures.keys());
     const known = [];
     for (const skin of skins) {
       for (const name of skin.named) {
@@ -6388,7 +6395,26 @@ const FbxSkins = (function () {
       let named = skin.named.filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = (fallback || []).filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = known;
+      skin.settled = named;
       skin.paints = pair(named, skin.colours, materials);
+      /* And whether the picture of the paint is worth reading, for the skins
+       * that state no colour anywhere.
+       *
+       * Only where the skin does not bring the paint's own picture. A skin
+       * that replaces the very texture the paint material wears has put the
+       * colour there already, and painting the chip over the top paints it
+       * twice: a Lancia Beta Montecarlo's seven skins each replace the
+       * `LANCIA_body.dds` that `lancia_body_paint` wears and say nothing else
+       * at all, so read the other way round every one of its liveries comes
+       * out under a flat wash of its own average.
+       *
+       * It is the rule `cm_skin.json` states in words when it switches a
+       * colour off: a slot whose colour is in its texture is not painted. */
+      skin.wantsChip = !!skin.livery && !skin.colours.some((c) => c.enabled)
+        && !named.some((name) => {
+          const picture = pictures.get(name.toLowerCase());
+          return !!picture && skin.images.has(picture);
+        });
     }
     return skins;
   }
@@ -9801,6 +9827,11 @@ const FbxOut = (function () {
       props.push(p70('EmissiveColor', 'Color', ...emissive.map(D)));
       props.push(p70('EmissiveFactor', 'Number', D(1)));
     }
+    /* And whether the colour above is read through the picture or replaced by
+     * it. A game's material means the first and most files mean the second, so
+     * what the material said on the way in is what it says on the way out —
+     * without which a car exported wearing a skin loses its paint. */
+    if (entry.tintTexture) props.push(p70('TintsTexture', 'Bool', I(1)));
     if (entry.alphaMode) props.push(p70('AlphaMode', 'KString', S(entry.alphaMode)));
     if (typeof entry.alphaCutoff === 'number') {
       props.push(p70('AlphaCutoff', 'Number', D(entry.alphaCutoff)));
@@ -10962,6 +10993,16 @@ const FbxViewer = (function () {
    * Anything the file did not say is opaque. */
   const ALPHA_MODES = { BLEND: 1, MASK: 2, OPAQUE: 0 };
 
+  /* How far a grain is allowed to lighten or darken the surface under it.
+   *
+   * A grain is taken as neutral at its own average, which means dividing by
+   * that average — and a map that is almost black, or one whose alpha came
+   * back as nothing, asks to be multiplied by a number with no ceiling. An
+   * Audi S8's paint asks for ten and gets eight. Read from here by the export
+   * as well, since what is written out has to be what was on screen. */
+  const GRAIN_FLOOR = 0.1;
+  const GRAIN_CEILING = 8;
+
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
@@ -11423,6 +11464,8 @@ ${SHADOW_LOOKUP}
     // is. Not the same as the tint flag below, which says whether a
     // material colour is read through its picture.
     float lensFilter = 0.0;
+    // And the picture itself, kept for the metalness split further down.
+    vec3 picture = vec3(1.0);
     if (uMode == 0 && uPaletteSize > 0) {
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
       vec4 finish = texelFetch(uPalette, ivec2(slot, 1), 0);
@@ -11440,6 +11483,7 @@ ${SHADOW_LOOKUP}
         // to be multiplied through it, which is how a car's paint is stated.
         // The sampler is sRGB, so this is already linear.
         vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
+        picture = painted.rgb;
         albedo = tinted ? painted.rgb * albedo : painted.rgb;
         /* …and its fourth channel is how much of the surface is there, for a
          * material that said that is where its transparency lives.
@@ -11513,10 +11557,18 @@ ${SHADOW_LOOKUP}
         // multiplying the factor stated beside it.
         vec3 mr = texture(uFinish, vec3(vUv, float(finishLayer))).rgb;
         float stated = clamp(extra.a, 0.0, 1.0);
-        // The colour before the split: the image itself where there is one,
-        // and otherwise the two halves put back together.
-        vec3 base = layer >= 0 ? albedo
-          : (stated >= 0.999 ? f0 : albedo / max(1.0 - stated, 1e-3));
+        /* The colour before the split, which is what the metalness is applied
+         * to again per pixel.
+         *
+         * The two halves put back together, times the picture where the
+         * material reads its colour through one. Taking the albedo as it
+         * stands instead undoes nothing: a material tinting its texture has
+         * already had the split multiplied into it, and at full metalness that
+         * is zero — and a glTF whose base colour factor multiplies its base
+         * colour image, which is what glTF says it does, would draw black. */
+        vec3 factor = stated >= 0.999 ? f0
+          : entry.rgb / max(1.0 - stated, 1e-3);
+        vec3 base = layer >= 0 ? (tinted ? picture * factor : picture) : factor;
         float m = clamp(stated * mr.b, 0.0, 1.0);
         roughness = clamp(roughness * mr.g, 0.05, 1.0);
         albedo = base * (1.0 - m);
@@ -12175,7 +12227,7 @@ ${SHADOW_LOOKUP}
         // Taken as neutral at its own average, so a grain changes the surface
         // and not how bright the car is.
         data[(width * 5 + i) * 4 + 2] = typeof material.detailScale === 'number'
-          ? Math.min(8, Math.max(0.1, material.detailScale)) : 1;
+          ? Math.min(GRAIN_CEILING, Math.max(GRAIN_FLOOR, material.detailScale)) : 1;
         /* How much of the sun's highlight the surface takes, where the file
          * says. Nothing states it but a game's material, and one that says
          * nothing takes all of it. */
@@ -12843,7 +12895,7 @@ ${SHADOW_LOOKUP}
     }
   }
 
-  return { Viewer };
+  return { Viewer, GRAIN_FLOOR, GRAIN_CEILING };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
@@ -15216,6 +15268,122 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     return false;
   }
 
+  /* sRGB both ways, as tables. A 2048-pixel bake is four million texels and
+   * three transfers each, and the curve is a `pow`: read from a table it is a
+   * second's work rather than a minute's. The way back is quantised to a
+   * sixteen-bit step, which lands within a twentieth of the byte it writes. */
+  let srgbTables = null;
+
+  function srgb() {
+    if (srgbTables) return srgbTables;
+    const linear = new Float32Array(256);
+    for (let i = 0; i < 256; i++) linear[i] = FbxPalette.fromSrgb(i / 255);
+    const encoded = new Uint8Array(65536);
+    for (let i = 0; i < 65536; i++) {
+      encoded[i] = Math.round(FbxPalette.toSrgb(i / 65535) * 255);
+    }
+    srgbTables = { linear, encoded };
+    return srgbTables;
+  }
+
+  /**
+   * A grain resolved down to the size one tile of it will occupy.
+   *
+   * A grain 512 pixels square tiled twenty-five times across a 2048-pixel paint
+   * map has eighty-two pixels to say itself in. Point-sampled it comes out as
+   * noise — five texels in six thrown away — where on screen the card would
+   * have averaged the ones it skipped. So they are averaged here, which is the
+   * same answer by the same means, and a grain finer than the room left for it
+   * arrives as what it averages rather than as speckle.
+   *
+   * In linear light, because that is where the multiply happens.
+   */
+  function resolveGrain(pixels, width, height, wide, tall) {
+    const { linear } = srgb();
+    const out = new Float32Array(wide * tall * 3);
+    const counts = new Float32Array(wide * tall);
+    for (let y = 0; y < height; y++) {
+      const row = Math.min(tall - 1, Math.floor(y * tall / height)) * wide;
+      for (let x = 0; x < width; x++) {
+        const at = (x + y * width) * 4;
+        const cell = row + Math.min(wide - 1, Math.floor(x * wide / width));
+        for (let k = 0; k < 3; k++) out[cell * 3 + k] += linear[pixels[at + k]];
+        counts[cell] += 1;
+      }
+    }
+    for (let cell = 0; cell < counts.length; cell++) {
+      const many = counts[cell] || 1;
+      for (let k = 0; k < 3; k++) out[cell * 3 + k] /= many;
+    }
+    return out;
+  }
+
+  /**
+   * The grain a surface is tiled over with, multiplied into its own picture.
+   *
+   * A game's material wears two: the picture that says where the panels are,
+   * and a grain tiled twenty-five or a hundred times across it that says what
+   * the surface feels like. Neither glTF nor FBX has a second set of
+   * coordinates to tile a map by, so an export carrying only the first is a car
+   * whose leather, carpet and carbon have all come out flat — and baked in is
+   * the only way the second travels at all.
+   *
+   * The two are multiplied here exactly as the shader multiplies them, and in
+   * the same light: both pictures speak sRGB, the card decodes both before it
+   * multiplies, and the grain is taken as neutral at its own average — which is
+   * what `scale` is, and why a paint whose grain averages 0.24 does not turn a
+   * white car graphite.
+   *
+   * What is lost is the tiling, and it cannot be otherwise: having its own
+   * repeat is the whole reason a grain was allowed to be small. So the bake is
+   * done at whichever picture is larger, and one tile of the grain gets the
+   * room that leaves it.
+   */
+  async function bakeGrain(picture, grain, tiling, scale) {
+    const base = pixelsOf(picture);
+    const over = pixelsOf(grain);
+    if (!base || !over) return null;
+    const { linear, encoded } = srgb();
+    const width = Math.min(BAKE_LIMIT, Math.max(picture.width, grain.width));
+    const height = Math.min(BAKE_LIMIT, Math.max(picture.height, grain.height));
+    const repeats = Math.max(tiling, 1e-4);
+    // One tile of the grain, at the size it has room for and no larger.
+    const wide = Math.max(1, Math.min(grain.width, Math.round(width / repeats)));
+    const tall = Math.max(1, Math.min(grain.height, Math.round(height / repeats)));
+    const tile = resolveGrain(over, grain.width, grain.height, wide, tall);
+    /* Held between the same two ends the viewer holds it between, and read
+     * from there rather than repeated here, since what is being written out is
+     * what is on screen. An Audi S8's paint wears a grain averaging a tenth,
+     * which asks for ten and gets eight. */
+    const strength = Math.min(FbxViewer.GRAIN_CEILING,
+      Math.max(FbxViewer.GRAIN_FLOOR, scale));
+    const out = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      const from = Math.min(picture.height - 1,
+        Math.floor(y * picture.height / height)) * picture.width;
+      /* Where in its own tile the grain has got to. Both pictures are read the
+       * same way up, so this is the shader's `vUv * tiling` said in rows and
+       * columns, and no flip enters into it. */
+      const gv = (y + 0.5) / height * repeats;
+      const row = Math.min(tall - 1, Math.floor((gv - Math.floor(gv)) * tall)) * wide;
+      for (let x = 0; x < width; x++) {
+        const at = (from + Math.min(picture.width - 1,
+          Math.floor(x * picture.width / width))) * 4;
+        const gu = (x + 0.5) / width * repeats;
+        const cell = (row + Math.min(wide - 1,
+          Math.floor((gu - Math.floor(gu)) * wide))) * 3;
+        const to = (x + y * width) * 4;
+        for (let k = 0; k < 3; k++) {
+          const lit = linear[base[at + k]] * Math.min(4, tile[cell + k] * strength);
+          out[to + k] = encoded[lit >= 1 ? 65535 : (lit * 65535) | 0];
+        }
+        out[to + 3] = base[at + 3];
+      }
+    }
+    const bytes = await FbxPng.encode(out, width, height);
+    return bytes ? { bytes, hasAlpha: anyAlpha(out) } : null;
+  }
+
   /**
    * Each material's images, ready for a glTF.
    *
@@ -15236,10 +15404,23 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const textures = new Map();
     const read = new Map();
 
+    //: Which picture a request is for, so two materials wearing the same one
+    //: read it once and reach the writer as the same bytes.
+    const keyOf = (request) => `${wearing ? wearing.name : ''}:`
+      + (request.embedded ? `embedded:${request.name}` : `file:${baseName(request.path)}`);
+
     const bytesFor = async (request) => {
-      const key = request.embedded || `file:${baseName(request.path)}`;
+      const key = keyOf(request);
       if (read.has(key)) return read.get(key);
-      let bytes = request.embedded;
+      /* The skin's own picture first, where it has one for this texture.
+       *
+       * A picture already in a format glTF allows is written straight across
+       * below, without being decoded — so taken from the file rather than from
+       * the skin, a car exports wearing whichever of its textures the skin
+       * happened not to replace. Every `.dds` goes the long way round and
+       * picks the skin up there; a `.png` or a `.jpg` would not. */
+      const worn = wearing && wearing.images.get(baseName(request.path || request.name));
+      let bytes = worn ? new Uint8Array(await worn.arrayBuffer()) : request.embedded;
       if (!bytes) {
         const file = suppliedImages.get(baseName(request.path));
         if (file) bytes = new Uint8Array(await file.arrayBuffer());
@@ -15262,6 +15443,36 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       ...image, wrapS: request.wrapS, wrapT: request.wrapT,
     });
 
+    /**
+     * A material's picture with its grain baked into it.
+     *
+     * Held against the two pictures and the tiling rather than against the
+     * material, because that is what the answer depends on: a car's interior
+     * is one atlas with one grain over it worn by thirty-eight materials, and
+     * a bake per material would write that same picture out thirty-eight
+     * times.
+     */
+    const grainedFor = async (entry, request) => {
+      const tiling = entry.detailTiling;
+      const scale = typeof entry.detailScale === 'number' ? entry.detailScale : 1;
+      const key = `grain:${keyOf(entry.texture)}:${keyOf(request)}:${tiling}:${scale}`;
+      if (read.has(key)) return read.get(key);
+      let image = null;
+      const picture = await decodeTexture(entry.texture, suppliedImages);
+      const grain = await decodeTexture(request, suppliedImages);
+      if (picture && grain) {
+        const baked = await bakeGrain(picture, grain, tiling, scale);
+        if (baked) {
+          image = { bytes: baked.bytes, mimeType: 'image/png', hasAlpha: baked.hasAlpha };
+        }
+      }
+      // A grain that will not decode leaves the picture as it was, which is
+      // the picture without it rather than no picture at all.
+      if (!image) image = await bytesFor(entry.texture);
+      read.set(key, image);
+      return image;
+    };
+
     /** A height map as the normal map glTF's normal slot has to hold. */
     const normalsFor = async (request) => {
       const key = `normal:${request.embedded || baseName(request.path)}`;
@@ -15275,16 +15486,27 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     };
 
     for (const entry of palette) {
+      /* Whether this material's grain is going into its picture. Neither glTF
+       * nor FBX has a slot to tile a second map by, so baked in is the only
+       * way it travels — and left out entirely a car's leather, carpet and
+       * carbon all arrive flat. */
+      const grain = entry.textures && entry.textures.detail;
+      const bakes = !!(grain && entry.texture && entry.detailTiling > 0
+        && wanted(entry, 'detail') && wanted(entry, 'baseColor'));
       // An image left out of the palette is left out of the file: that is what
       // dropping it was for.
       if (entry.texture && wanted(entry, 'baseColor') && !images.has(entry.name)) {
-        const image = await bytesFor(entry.texture);
+        const image = bakes ? await grainedFor(entry, grain) : await bytesFor(entry.texture);
         if (image) images.set(entry.name, withWrap(image, entry.texture));
       }
       if (entry.textures && !textures.has(entry.name)) {
         const maps = [];
         for (const [slot, request] of Object.entries(entry.textures)) {
           if (!wanted(entry, slot)) continue;
+          // A grain already multiplied into the picture is not sent a second
+          // time: there is nothing at the far end that would tile it, and sent
+          // twice it is only weight.
+          if (slot === 'detail' && bakes) continue;
           // glTF's normal texture is a direction, and a height map is not one:
           // written straight out it says every surface faces the way its own
           // brightness points. Turned into the normals it stands for, by the
@@ -15396,8 +15618,17 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         // the numbering would mean nothing, so the whole part is written.
         const source = builtPieces && builtPieces.pieces[index];
         const matched = source && source.triangleCount === written.triangleCount;
-        let palette = FbxPalette.apply(part.materials.map((m) => materialEntry(m)),
-          materialOverrides);
+        /* The materials as the file has them, with the skin's paint on and the
+         * assignments over that — which is the order the screen puts them in.
+         *
+         * Painted here rather than taken from the palette on screen because
+         * this one is per part and that one is per scene, and a skin's colour
+         * is the one thing on screen that is not in the file: exported without
+         * it, a car wearing Sakhir Orange comes out the grey it was unpainted
+         * while its textures come out orange. */
+        const fresh = part.materials.map((m) => materialEntry(m));
+        paintFromSkin(fresh);
+        let palette = FbxPalette.apply(fresh, materialOverrides);
 
         // A material given to a part by hand is not one of that part's own, so
         // it goes on the end of its palette and the triangles are pointed at
@@ -16182,6 +16413,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   const BUMP_RELIEF = 4;
 
   /**
+   * How large a picture the grain may be baked into.
+   *
+   * Two thousand and forty-eight is what the paint maps to hand are: a car
+   * whose body is 2048 and whose grain is 512 comes out at 2048, the size it
+   * already was. It is a ceiling rather than a target — a 256-pixel badge with
+   * a 512-pixel grain over it comes out at 512 and no more.
+   */
+  const BAKE_LIMIT = 2048;
+
+  /**
    * The images the viewer draws with: the base colour, the map that says how
    * metallic and how rough the surface is at each texel, and the map that says
    * what shape it is between its own vertices.
@@ -16366,17 +16607,42 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       .filter((entry) => entry.name === type)
       .map((entry) => String(entry.props[1].value).split('\u0000')[0]);
     const worn = new Set(named('Video').map((n) => n.toLowerCase()));
-    const materials = new Set(named('Material').map((n) => n.toLowerCase()));
+    /* Which picture each material wears, which is what says whether a skin has
+     * already painted it. The base colour alone: a skin replacing a normal map
+     * has not painted anything.
+     *
+     * Read from the document rather than from the palette, since the palette is
+     * built later than this and would be the last car's. */
+    const pictures = new Map();
+    for (const name of named('Material')) pictures.set(name.toLowerCase(), '');
+    const info = currentAnalysis;
+    if (info) {
+      const { resolve } = objectIndex;
+      for (const link of info.connections) {
+        if (link.kind !== 'OP' || FbxAnalyze.textureSlot(link.prop) !== 'baseColor') continue;
+        const material = resolve(link.dst);
+        const bound = resolve(link.src);
+        if (!material || !bound || material.nodeType !== 'Material') continue;
+        const key = String(material.displayName || '').toLowerCase();
+        if (pictures.get(key)) continue;
+        pictures.set(key, baseName(String(bound.displayName || '')).toLowerCase());
+      }
+    }
 
     const read = [];
     for (const skin of suppliedSkins.values()) {
-      const state = await FbxSkins.read(skin, { worn });
-      // And where it stated no colour, the colour of the chip it carries a
-      // picture of, which is the only thing left saying what it is.
-      if (state.livery) FbxSkins.fromChip(state, await chipColour(state.livery));
-      read.push(state);
+      read.push(await FbxSkins.read(skin, { worn }));
     }
-    FbxSkins.settle(read, { materials, fallback: carPaintNames });
+    FbxSkins.settle(read, { pictures, fallback: carPaintNames });
+    /* And, for the ones still stating no colour, the chip they carry a picture
+     * of — which is the only thing left saying what colour they are. Settled
+     * first, since whether it is worth reading depends on which material the
+     * car calls its paint and what picture that material wears. */
+    for (const state of read) {
+      if (state.wantsChip) {
+        FbxSkins.fromChip(state, await chipColour(state.livery), pictures);
+      }
+    }
     const offered = read.filter((skin) => skin.replaces > 0)
       .sort((a, b) => b.replaces - a.replaces || a.name.localeCompare(b.name));
     if (!offered.length) {
@@ -17042,6 +17308,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       get palette() { return currentPalette; },
       get parts() { return sceneParts.length; },
       get partTable() { return partTable; },
+      //: The skins the folder brought, and what each paints.
+      get skins() { return skinsOffered.slice(); },
       get selectedPart() { return selectedPart; },
       selectPart: setSelectedPart,
       get edits() { return editSummary(); },

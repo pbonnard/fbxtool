@@ -1100,9 +1100,9 @@ def test_a_skin_that_states_no_colour_is_read_from_its_chip(tmp_path):
         textures=[("paint.dds", fb.dds_bc1())],
         tree=fb.kn5_dummy("car", IDENTITY)))
     skins = tmp_path / "skins"
-    for name in ("Sakhir", "Nighthawk"):
+    for name in ("Sakhir", "Nighthawk", "Livery"):
         (skins / name).mkdir(parents=True)
-        (skins / name / "paint.dds").write_bytes(b"")
+        (skins / name / "badge.dds").write_bytes(b"")
         (skins / name / "ext_config.ini").write_text(
             "CarPaintMaterial = body" + NL, encoding="utf-8")
         (skins / name / "livery.png").write_bytes(
@@ -1113,10 +1113,47 @@ def test_a_skin_that_states_no_colour_is_read_from_its_chip(tmp_path):
     # And the other states one, which the picture does not get to argue with.
     (skins / "Nighthawk" / "cm_skin.json").write_text(
         '{"carPaint": {"color": "#FF0C0C0C"}}', encoding="utf-8")
+    # And the third brings the paint's own picture, which is the whole of what
+    # the chip is for and settles that it is not wanted.
+    (skins / "Livery" / "paint.dds").write_bytes(b"")
 
     painted = {skin["name"]: skin["paints"] for skin in read_fbx(str(path)).extra["skins"]}
     assert painted["Sakhir"] == [{"material": "body", "colour": "#941a0a"}]
     assert painted["Nighthawk"] == [{"material": "body", "colour": "#0c0c0c"}]
+    assert painted["Livery"] == [], "its livery is its picture, not a colour"
+
+
+def test_a_skin_that_brings_the_paint_its_picture_is_not_painted_over(tmp_path):
+    """Which is the rule `cm_skin.json` states in words when it switches a
+    colour off: a slot whose colour is in its texture is not painted.
+
+    A Lancia Beta Montecarlo has seven skins, none of them stating a colour
+    anywhere, and each replaces the `LANCIA_body.dds` that its
+    `lancia_body_paint` wears. Read the other way round every one of its
+    liveries comes out under a flat wash of that livery's own average — the
+    material overtaking the skin it was meant to be showing.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("body", slots=(("txDiffuse", 0, "body.dds"),)),
+                   fb.kn5_material("trim", slots=(("txDiffuse", 0, "trim.dds"),))],
+        textures=[("body.dds", fb.dds_bc1()), ("trim.dds", fb.dds_bc1())],
+        tree=fb.kn5_dummy("car", IDENTITY)))
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "ext_config.ini").write_text(
+        "CarPaintMaterial=body" + NL, encoding="utf-8")
+    skins = tmp_path / "skins"
+    for name, brings in (("Livery", "body.dds"), ("Badge", "trim.dds")):
+        (skins / name).mkdir(parents=True)
+        (skins / name / brings).write_bytes(b"")
+        (skins / name / "livery.png").write_bytes(
+            fb.livery_png([[(0xed, 0x11, 0x14)] * 8] * 8))
+
+    painted = {skin["name"]: skin["paints"] for skin in read_fbx(str(path)).extra["skins"]}
+    assert painted["Livery"] == [], "the colour is already in the picture it brought"
+    # And a skin replacing some other picture has painted nothing, so its chip
+    # is still the only thing saying what colour it is.
+    assert painted["Badge"] == [{"material": "body", "colour": "#ed1114"}]
 
 
 # ----------------------------------------------------- a real car, if there is one

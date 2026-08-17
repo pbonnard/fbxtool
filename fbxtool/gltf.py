@@ -434,6 +434,14 @@ def _materials(json_doc: dict, build: _Builder, buffers: Sequence[bytes | None],
 
         props = [
             _p70("DiffuseColor", "Color", *(_d(c) for c in diffuse)),
+            # And that the factors above are read through the pictures rather
+            # than replaced by them, which is what glTF means: base colour is
+            # `baseColorFactor` times `baseColorTexture`, said in as many
+            # words.  Most files state a factor of one and nothing turns on it
+            # — but a car exported wearing a skin states its paint there, and
+            # read the other way round it comes back the grey it was
+            # unpainted.
+            _p70("TintsTexture", "Bool", _i(1)),
             _p70("SpecularColor", "Color", *(_d(c) for c in specular)),
             # Roughness back to the exponent an FBX material carries.
             # An exponent, which is what an FBX material states.  The two meet

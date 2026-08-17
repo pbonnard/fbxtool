@@ -261,14 +261,11 @@ const FbxSkins = (function () {
       replaces: [...skin.images.keys()].filter((n) => worn.has(n)).length,
       named: config ? paintMaterials(config) : [],
       colours,
-      /* And the picture of the paint, for the ones that state no colour at
-       * all. Sixty-nine of the 189 skins to hand are in that position —
-       * an Audi's Sakhir Orange says `#FFFFFF` and switches it off, and its
-       * Silver Pearl has no `carPaint` section to say anything in — so read
-       * from what they do say, those cars come up white. Handed back rather
-       * than opened here: the pixels are the caller's to fetch. */
-      livery: colours.some((c) => c.enabled)
-        ? null : (skin.images.get('livery.png') || null),
+      /* And the picture of the paint, which nearly all of them carry. Whether
+       * it is worth reading is settled later, once the car has said which of
+       * its materials the paint is: handed back rather than opened here, since
+       * the pixels are the caller's to fetch. */
+      livery: skin.images.get('livery.png') || null,
       paints: [],
     };
   }
@@ -281,9 +278,10 @@ const FbxSkins = (function () {
    * about a third of the time — usually because the setting is Content
    * Manager's untouched white and the chip is the paint.
    */
-  function fromChip(skin, hex) {
-    if (!hex || skin.colours.some((c) => c.enabled)) return skin;
+  function fromChip(skin, hex, pictures) {
+    if (!hex || !skin.wantsChip) return skin;
     skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
+    skin.paints = pair(skin.settled || [], skin.colours, new Set(pictures.keys()));
     return skin;
   }
 
@@ -321,7 +319,9 @@ const FbxSkins = (function () {
    * that names nothing the car has is answered this way, and only from names
    * its own siblings used.
    */
-  function settle(skins, { materials, fallback }) {
+  function settle(skins, { pictures, fallback }) {
+    //: Material name -> the picture it wears, both lowercased.
+    const materials = new Set(pictures.keys());
     const known = [];
     for (const skin of skins) {
       for (const name of skin.named) {
@@ -332,7 +332,26 @@ const FbxSkins = (function () {
       let named = skin.named.filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = (fallback || []).filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = known;
+      skin.settled = named;
       skin.paints = pair(named, skin.colours, materials);
+      /* And whether the picture of the paint is worth reading, for the skins
+       * that state no colour anywhere.
+       *
+       * Only where the skin does not bring the paint's own picture. A skin
+       * that replaces the very texture the paint material wears has put the
+       * colour there already, and painting the chip over the top paints it
+       * twice: a Lancia Beta Montecarlo's seven skins each replace the
+       * `LANCIA_body.dds` that `lancia_body_paint` wears and say nothing else
+       * at all, so read the other way round every one of its liveries comes
+       * out under a flat wash of its own average.
+       *
+       * It is the rule `cm_skin.json` states in words when it switches a
+       * colour off: a slot whose colour is in its texture is not painted. */
+      skin.wantsChip = !!skin.livery && !skin.colours.some((c) => c.enabled)
+        && !named.some((name) => {
+          const picture = pictures.get(name.toLowerCase());
+          return !!picture && skin.images.has(picture);
+        });
     }
     return skins;
   }

@@ -1,6 +1,6 @@
 /* The grain a surface is tiled over with — a game's `txDetail`.
  *
- *   node web/test/detail.js <plain.kn5> <grained.kn5>
+ *   node web/test/detail.js <out-dir> <plain.kn5> <grained.kn5> <flat.kn5> <deep.kn5>
  *
  * A car's interior is one atlas of flat panels with the leather, the carpet
  * and the carbon laid over them, tiled sixty or a hundred times across: the
@@ -15,9 +15,21 @@
  * taken as neutral at its own average, in linear light, and only what differs
  * from that average shows.
  *
- * Both fixtures are the same cube wearing the same mid-grey colour map. One
- * has no grain; the other has a green one, dark and light in equal measure. So
- * the second must come out green, and must not come out darker.
+ * All four fixtures are the same cube wearing the same mid-grey colour map.
+ * One has no grain. One has a green one, dark and light in equal measure, and
+ * must come out green without coming out darker. One's grain is nothing but
+ * its own average, so it must do nothing at all — the strictest thing a grain
+ * can be asked, and the one that says which light the multiply happened in:
+ * read as the file writes it rather than as the card decodes it, a flat grain
+ * over a grey panel turns it white. The last is dark enough that taking it as
+ * neutral asks for forty-seven times the light back, where eight is as far as
+ * anything here will lighten a surface.
+ *
+ * And each has to leave that way too. Neither glTF nor FBX has a second set of
+ * coordinates to tile a map by, so a grain travels only by being multiplied
+ * into the picture before it goes — and exported without that, a car's whole
+ * cabin arrives flat. So each cube is written out both ways and opened again,
+ * and has to come back what it was.
  */
 'use strict';
 
@@ -64,9 +76,10 @@ async function load(page, file) {
 }
 
 async function main() {
-  const [plainFile, grainedFile] = process.argv.slice(2);
-  if (!plainFile || !grainedFile) {
-    console.error('usage: node web/test/detail.js <plain.kn5> <grained.kn5>');
+  const [outDir, plainFile, grainedFile, flatFile, deepFile] = process.argv.slice(2);
+  if (!outDir || !plainFile || !grainedFile || !flatFile || !deepFile) {
+    console.error('usage: node web/test/detail.js <out-dir> '
+      + '<plain.kn5> <grained.kn5> <flat.kn5> <deep.kn5>');
     process.exit(2);
   }
   if (!fs.existsSync(PAGE)) {
@@ -78,6 +91,12 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(String(error)));
+  const written = [];
+  page.on('download', async (item) => {
+    const name = item.suggestedFilename();
+    await item.saveAs(path.join(outDir, name));
+    written.push(path.join(outDir, name));
+  });
   await page.goto(`file://${PAGE}`);
   await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
 
@@ -94,6 +113,58 @@ async function main() {
    * is where it shows. */
   check('and is no darker overall than without it',
     grained[1] > plain[1] * 0.7, `rgb(${grained}) against rgb(${plain})`);
+
+  const flat = await load(page, flatFile);
+  /* A grain that is its own average is no grain: it says nothing differs from
+   * the average anywhere, so the panel is the grey its colour map is. Read in
+   * the light the file is written in rather than the light the card decodes it
+   * into, the same grain comes out at twice what it should and whites the
+   * panel out. */
+  check('a grain that is nothing but its own average changes nothing',
+    [0, 1, 2].every((k) => Math.abs(flat[k] - plain[k]) <= 10),
+    `rgb(${flat}) against rgb(${plain})`);
+
+  const deep = await load(page, deepFile);
+  /* A grain dark enough that taking it as neutral asks for forty-seven times
+   * the light back gets eight, which is as far as the viewer will lighten
+   * anything. So the panel is much darker than its colour map, and the number
+   * that made it so is the one the export has to use too. */
+  check('a grain too dark to make neutral is held at the ceiling',
+    deep[1] < plain[1] * 0.55, `rgb(${deep}) against rgb(${plain})`);
+
+  /* And out again. The cube is still loaded and still grained, so writing it
+   * now and opening what was written asks the one question the export has to
+   * answer: the file it produces has nowhere to put a tiled second map, so
+   * either the grain is in the picture or it is gone. */
+  console.log('and the same cubes written out and opened again');
+  for (const [label, source, from, cast] of [
+    ['grained', grained, grainedFile, true], ['flat', flat, flatFile, false],
+    ['deep', deep, deepFile, false]]) {
+    for (const format of ['glb', 'fbx']) {
+      await load(page, from);
+      written.length = 0;
+      await page.selectOption('#export-format', format);
+      await page.click('#export-gltf');
+      const until = Date.now() + 120000;
+      while (!written.length && Date.now() < until) await page.waitForTimeout(150);
+      if (!written.length) {
+        check(`a .${format} was written for the ${label} one`, false, 'nothing arrived');
+        continue;
+      }
+      const back = await load(page, written[0]);
+      if (cast) {
+        check(`the ${label} .${format} still takes the cast of its grain`,
+          back[1] > back[0] * 1.25 && back[1] > back[2] * 1.25, `rgb(${back})`);
+      }
+      /* And is what it was, not merely something: multiplied in the wrong
+       * light the answer lands somewhere else entirely, and the flat one is
+       * where that shows — it has to arrive as grey as it left. */
+      check(`the ${label} .${format} comes back what it went out`,
+        [0, 1, 2].every((k) => Math.abs(back[k] - source[k]) <= 24),
+        `rgb(${back}) against rgb(${source})`);
+    }
+  }
+
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 
   await browser.close();

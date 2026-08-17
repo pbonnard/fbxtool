@@ -22,6 +22,16 @@ const FbxViewer = (function () {
    * Anything the file did not say is opaque. */
   const ALPHA_MODES = { BLEND: 1, MASK: 2, OPAQUE: 0 };
 
+  /* How far a grain is allowed to lighten or darken the surface under it.
+   *
+   * A grain is taken as neutral at its own average, which means dividing by
+   * that average — and a map that is almost black, or one whose alpha came
+   * back as nothing, asks to be multiplied by a number with no ceiling. An
+   * Audi S8's paint asks for ten and gets eight. Read from here by the export
+   * as well, since what is written out has to be what was on screen. */
+  const GRAIN_FLOOR = 0.1;
+  const GRAIN_CEILING = 8;
+
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
@@ -483,6 +493,8 @@ ${SHADOW_LOOKUP}
     // is. Not the same as the tint flag below, which says whether a
     // material colour is read through its picture.
     float lensFilter = 0.0;
+    // And the picture itself, kept for the metalness split further down.
+    vec3 picture = vec3(1.0);
     if (uMode == 0 && uPaletteSize > 0) {
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
       vec4 finish = texelFetch(uPalette, ivec2(slot, 1), 0);
@@ -500,6 +512,7 @@ ${SHADOW_LOOKUP}
         // to be multiplied through it, which is how a car's paint is stated.
         // The sampler is sRGB, so this is already linear.
         vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
+        picture = painted.rgb;
         albedo = tinted ? painted.rgb * albedo : painted.rgb;
         /* …and its fourth channel is how much of the surface is there, for a
          * material that said that is where its transparency lives.
@@ -573,10 +586,18 @@ ${SHADOW_LOOKUP}
         // multiplying the factor stated beside it.
         vec3 mr = texture(uFinish, vec3(vUv, float(finishLayer))).rgb;
         float stated = clamp(extra.a, 0.0, 1.0);
-        // The colour before the split: the image itself where there is one,
-        // and otherwise the two halves put back together.
-        vec3 base = layer >= 0 ? albedo
-          : (stated >= 0.999 ? f0 : albedo / max(1.0 - stated, 1e-3));
+        /* The colour before the split, which is what the metalness is applied
+         * to again per pixel.
+         *
+         * The two halves put back together, times the picture where the
+         * material reads its colour through one. Taking the albedo as it
+         * stands instead undoes nothing: a material tinting its texture has
+         * already had the split multiplied into it, and at full metalness that
+         * is zero — and a glTF whose base colour factor multiplies its base
+         * colour image, which is what glTF says it does, would draw black. */
+        vec3 factor = stated >= 0.999 ? f0
+          : entry.rgb / max(1.0 - stated, 1e-3);
+        vec3 base = layer >= 0 ? (tinted ? picture * factor : picture) : factor;
         float m = clamp(stated * mr.b, 0.0, 1.0);
         roughness = clamp(roughness * mr.g, 0.05, 1.0);
         albedo = base * (1.0 - m);
@@ -1235,7 +1256,7 @@ ${SHADOW_LOOKUP}
         // Taken as neutral at its own average, so a grain changes the surface
         // and not how bright the car is.
         data[(width * 5 + i) * 4 + 2] = typeof material.detailScale === 'number'
-          ? Math.min(8, Math.max(0.1, material.detailScale)) : 1;
+          ? Math.min(GRAIN_CEILING, Math.max(GRAIN_FLOOR, material.detailScale)) : 1;
         /* How much of the sun's highlight the surface takes, where the file
          * says. Nothing states it but a game's material, and one that says
          * nothing takes all of it. */
@@ -1903,7 +1924,7 @@ ${SHADOW_LOOKUP}
     }
   }
 
-  return { Viewer };
+  return { Viewer, GRAIN_FLOOR, GRAIN_CEILING };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;

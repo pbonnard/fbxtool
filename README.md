@@ -768,13 +768,25 @@ skin's own — nothing here needs the game installed to read either:
 | `ext_config.ini`, again | the colours themselves, for the half of them that have no `cm_skin.json`. A chameleon paint states two — `ChameleonColorA` facing you and `ChameleonColorB` at a grazing angle, each with an opacity after it — and only the first is taken, since there is one albedo here and A is what the car looks like from where you are standing. A Clio V6's Illiad Blue is `#33007f` turning to yellow at the edges. |
 | `livery.png` | the picture of the paint, for the ones that state no colour at all — 69 of the 189 skins to hand, and every one of the 189 has the picture. |
 
-**And last the chip, where nothing was stated.** `livery.png` is the swatch
+**And last the chip, where nothing else says the colour at all.** `livery.png` is the swatch
 Content Manager shows beside a skin's name: a rounded square of the paint with
 a gloss sweeping over it, sixty-four pixels square. It is a picture rather than
 a statement, so it is read after both files and never against them — where both
 are there they disagree about a third of the time, usually because the setting
 is Content Manager's untouched white. But read, it is exact: a Champagne Quartz
 chip is 1874 pixels of `#565D6B` and its `cm_skin.json` says `#565D6B`.
+
+It is weaker still than the skin's own pictures. **A skin that replaces the very
+texture the paint material wears has put the colour there already**, and the
+chip over the top paints it twice — the material overtaking the skin it was
+meant to be showing. A Lancia Beta Montecarlo has seven skins, none of them
+carrying a `cm_skin.json` or an `ext_config.ini`, and each replaces the
+`LANCIA_body.dds` that its `lancia_body_paint` wears; read the other way round
+every one of its liveries comes out under a flat wash of that livery's own
+average. So the chip is settled last of all, after the car has said which
+material its paint is and what picture that material wears. It is the rule
+`cm_skin.json` states in words when it switches a colour off: a slot whose
+colour is in its texture is not painted.
 
 Two things make a plain average the wrong reading. The gloss is a wide bright
 sweep, and under some of them is a band of dark reflection — a Renault 5's
@@ -1605,6 +1617,37 @@ black. So the pixels are read back through a GL texture, which keeps the two
 apart when it is told to, and written out as an unfiltered PNG over
 `CompressionStream`. That gives up the compression a filtered encoder would
 find, and buys an export whose textures are the ones that went in.
+
+**The grain goes into the picture.** `txDetail` is tiled — twenty-five or a
+hundred times across the panel it covers — and neither glTF nor FBX has a
+second set of coordinates to tile a map by. So it travels the only way it can:
+multiplied into the base colour before the file is written, exactly as the
+shader multiplies it and in the same light, with the grain taken as neutral at
+its own average. Left out instead, the whole of a car's interior exports flat —
+which was the state of it until now, and on an Audi S8 that is thirty-eight
+materials arriving as grey plastic where there was leather, carpet and carbon.
+
+What that costs is the tiling, and it cannot be otherwise: having its own
+repeat is the whole reason a grain was allowed to be small. The bake is done at
+whichever of the two pictures is larger, up to 2048, and one tile of the grain
+gets whatever room that leaves it — eighty-two pixels for a 512-square grain
+tiled twenty-five times across a 2048-square paint map. The texels it no longer
+has room for are averaged rather than dropped, which is what the card would
+have done with them, so a grain too fine to resolve arrives as the tone it
+averages instead of as speckle. The pair is baked once however many materials
+wear it, so an interior atlas with one grain over it is still one picture in
+the file.
+
+Taken to its end that rule answers the absurd cases by itself. Cars state
+tilings from 1 to 250,000 — a Renault 5 Turbo's 136 grained materials use
+twenty-one different ones — and past a few hundred a grain has less than a
+pixel to repeat in, so it resolves to the single tone it averages and, being
+neutral at its own average, changes nothing. Which is what it was already
+doing on screen. The strength is held between the same two ends the viewer
+holds it between: a grain is taken as neutral by dividing by its own average,
+and one that is almost black asks for a number with no ceiling. Sixteen of the
+Audi's 69 grained materials ask for more than eight and get eight, on screen
+and in the file alike.
 
 An export says what it left behind. Materials that cover no triangles are
 dropped, and so is any part taken out here — which is a decision worth making

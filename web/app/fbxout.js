@@ -219,6 +219,11 @@ const FbxOut = (function () {
       props.push(p70('EmissiveColor', 'Color', ...emissive.map(D)));
       props.push(p70('EmissiveFactor', 'Number', D(1)));
     }
+    /* And whether the colour above is read through the picture or replaced by
+     * it. A game's material means the first and most files mean the second, so
+     * what the material said on the way in is what it says on the way out —
+     * without which a car exported wearing a skin loses its paint. */
+    if (entry.tintTexture) props.push(p70('TintsTexture', 'Bool', I(1)));
     if (entry.alphaMode) props.push(p70('AlphaMode', 'KString', S(entry.alphaMode)));
     if (typeof entry.alphaCutoff === 'number') {
       props.push(p70('AlphaCutoff', 'Number', D(entry.alphaCutoff)));

@@ -469,6 +469,13 @@ const FbxGltfIn = (function () {
 
       const props = [
         p70('DiffuseColor', 'Color', ...diffuse.map(D)),
+        /* And that the factors above are read through the pictures rather
+         * than replaced by them, which is what glTF means: base colour is
+         * `baseColorFactor` times `baseColorTexture`, said in as many words.
+         * Most files state a factor of one and nothing turns on it — but a car
+         * exported wearing a skin states the paint there, and read the other
+         * way round it comes back the grey it was unpainted. */
+        p70('TintsTexture', 'Bool', I(1)),
         p70('SpecularColor', 'Color', ...specular.map(D)),
         // Roughness back to the exponent an FBX material carries.
         p70('ShininessExponent', 'Number',
