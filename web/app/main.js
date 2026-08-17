@@ -2156,9 +2156,75 @@
     return null;
   }
 
-  /** An image as PNG bytes, through a canvas, and whether any of it is see-through. */
+  //: One context for reading pixels back, made when something first needs it.
+  let readback = null;
+
+  /**
+   * The pixels of a decoded image, with the colour still on them.
+   *
+   * There is no way to ask a 2D canvas for these. It holds what it is given
+   * premultiplied, so a texel at zero alpha comes back black however it was
+   * put in — and a `.dds` out of Assetto Corsa routinely carries an alpha
+   * channel of nothing beside a picture that matters. The upload path has
+   * avoided the canvas for a while; the export was still going through one,
+   * and a Renault 5's rubber, carpet, brass and interior panels came out of it
+   * as squares of black.
+   *
+   * A GL texture keeps the two apart when it is told to, and reading it back
+   * through a framebuffer gives the image as it was decoded. Row zero is the
+   * top of the picture, which is the order a PNG is written in: the source is
+   * not turned over on the way in, so it does not have to be turned back.
+   */
+  function pixelsOf(image) {
+    const width = image && image.width;
+    const height = image && image.height;
+    if (!width || !height) return null;
+    if (readback === null) {
+      const canvas = document.createElement('canvas');
+      readback = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: false })
+        || false;
+    }
+    const gl = readback;
+    if (!gl) return null;
+    if (width > gl.getParameter(gl.MAX_TEXTURE_SIZE)
+      || height > gl.getParameter(gl.MAX_TEXTURE_SIZE)) return null;
+    const texture = gl.createTexture();
+    const frame = gl.createFramebuffer();
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D, texture, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return null;
+      const out = new Uint8ClampedArray(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return gl.getError() === gl.NO_ERROR ? out : null;
+    } catch (error) {
+      return null;
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(frame);
+      gl.deleteTexture(texture);
+    }
+  }
+
+  /** An image as PNG bytes, and whether any of it is see-through. */
   async function encodePng(image) {
     if (!image) return null;
+    const pixels = pixelsOf(image);
+    if (pixels) {
+      const written = await FbxPng.encode(pixels, image.width, image.height);
+      if (written) return { bytes: written, hasAlpha: anyAlpha(pixels) };
+    }
+    /* Failing that, the canvas after all.
+     *
+     * Somewhere with no WebGL2 and no `CompressionStream` is somewhere the
+     * viewer barely runs, and a picture whose empty texels are black beats no
+     * picture at all — but it is the second answer and not the first. */
     const canvas = document.createElement('canvas');
     canvas.width = image.width;
     canvas.height = image.height;
@@ -2166,13 +2232,16 @@
     context.drawImage(image, 0, 0);
     // A canvas always encodes RGBA, so the header alone would call every one
     // of these transparent. The pixels themselves settle it.
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    let hasAlpha = false;
-    for (let i = 3; i < pixels.length; i += 4) {
-      if (pixels[i] !== 255) { hasAlpha = true; break; }
-    }
+    const drawn = context.getImageData(0, 0, canvas.width, canvas.height).data;
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    return blob ? { bytes: new Uint8Array(await blob.arrayBuffer()), hasAlpha } : null;
+    return blob
+      ? { bytes: new Uint8Array(await blob.arrayBuffer()), hasAlpha: anyAlpha(drawn) } : null;
+  }
+
+  /** Whether any texel of an RGBA run is less than solid. */
+  function anyAlpha(pixels) {
+    for (let at = 3; at < pixels.length; at += 4) if (pixels[at] !== 255) return true;
+    return false;
   }
 
   /**
@@ -2191,12 +2260,20 @@
    */
   async function encodeNormals(image, strength) {
     if (!image) return null;
+    const width = image.width;
+    const height = image.height;
     const canvas = document.createElement('canvas');
-    const width = canvas.width = image.width;
-    const height = canvas.height = image.height;
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext('2d', { willReadFrequently: true });
-    context.drawImage(image, 0, 0);
-    const source = context.getImageData(0, 0, width, height);
+    // Read the same way the colour is — a height map under an empty alpha is
+    // flat black through a canvas, and a flat height map is no relief at all.
+    let read = pixelsOf(image);
+    if (!read) {
+      context.drawImage(image, 0, 0);
+      read = context.getImageData(0, 0, width, height).data;
+    }
+    const source = { data: read };
     const out = context.createImageData(width, height);
     // The red channel is the height: a bump map is grey, and where it is not,
     // red is the channel every convention agrees on.

@@ -39,6 +39,7 @@ SCRIPTS = [
     "skins.js",
     "psd.js",
     "dds.js",
+    "png.js",
     "transform.js",
     "analyze.js",
     "palette.js",

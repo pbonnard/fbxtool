@@ -1458,7 +1458,12 @@ What is left is where the formats disagree:
   245,514 vertices, which is what makes it 11.6 MiB instead of 35;
 - glTF is Y-up in metres while these files are often Z-up in centimetres, so
   that difference goes on the root node's matrix rather than into the vertex
-  data — the geometry is written exactly as the file holds it.
+  data — the geometry is written exactly as the file holds it;
+- and glTF measures V downwards from the top of a texture where FBX measures it
+  upwards, so the texture coordinates are turned over on the way out, which is
+  the same turn the reader makes on the way in. It has to be the coordinates
+  and not the picture: one image is shared by every material that names it, and
+  turning that over would move every other surface wearing it.
 
 Materials map onto metallic-roughness directly: base colour and opacity,
 roughness, metalness, what the surface gives off, and `KHR_materials_specular`
@@ -1492,9 +1497,23 @@ nothing decodes them, and an untouched index beside its image bytes is the
 whole of it. On a body panel that is the difference between a shut line and a
 stripe painted on. Samplers travel with them, so a tiling tread does not come
 back clamped, and an image several materials share is stored once. Bytes that
-are already PNG or JPEG are embedded untouched; anything else is drawn once
-and encoded as a PNG, which is how a texture that arrived as KTX2 leaves as a
-picture — the Pantera's nineteen Basis textures export as nineteen PNGs.
+are already PNG or JPEG are embedded untouched; anything else is encoded as a
+PNG, which is how a texture that arrived as KTX2 leaves as a picture — the
+Pantera's nineteen Basis textures export as nineteen PNGs.
+
+That PNG is written here rather than by the browser, and it is the one place
+this had to be. `canvas.toBlob` is the obvious way to make one and it cannot be
+used: a 2D canvas holds its pixels premultiplied, so a texel at zero alpha
+comes back black and the colour that was on it is gone — dividing it back out
+is a division by nothing. The upload path has avoided the canvas for a while;
+the export was still going through one, and a `.dds` out of Assetto Corsa
+routinely carries an alpha channel of nothing beside a picture that matters. A
+Renault 5 Turbo has twenty-four such among its forty-two — its rubber, carpet,
+brass and interior panels — and every one of them exported as a square of
+black. So the pixels are read back through a GL texture, which keeps the two
+apart when it is told to, and written out as an unfiltered PNG over
+`CompressionStream`. That gives up the compression a filtered encoder would
+find, and buys an export whose textures are the ones that went in.
 
 An export says what it left behind. Materials that cover no triangles are
 dropped, and so is any part taken out here — which is a decision worth making

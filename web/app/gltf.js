@@ -414,9 +414,22 @@ const FbxGltf = (function () {
           NORMAL: accessor(normalView, FLOAT, welded.normals.length / 3, 'VEC3'),
         };
         if (welded.uvs) {
-          const uvView = store(welded.uvs);
+          /* glTF measures V downwards from the top of a texture and FBX
+           * upwards, so the coordinates are turned over on the way out — as
+           * the reader turns them over on the way in, and as the kn5 reader
+           * turns the game's own round for the same reason.
+           *
+           * The picture itself goes across untouched, which is the whole
+           * reason this has to be the coordinates: one image is shared by
+           * every material that names it, so turning it over would move every
+           * other surface wearing it. And a tiled UV is turned over just the
+           * same — 1 − 60 is off the end of the sheet, but a repeating
+           * sampler lands it on the same texels the right way up. */
+          const uvs = welded.uvs;
+          for (let at = 1; at < uvs.length; at += 2) uvs[at] = 1 - uvs[at];
+          const uvView = store(uvs);
           json.bufferViews[uvView].target = ARRAY_BUFFER;
-          attributes.TEXCOORD_0 = accessor(uvView, FLOAT, welded.uvs.length / 2, 'VEC2');
+          attributes.TEXCOORD_0 = accessor(uvView, FLOAT, uvs.length / 2, 'VEC2');
         }
 
         const primitive = {

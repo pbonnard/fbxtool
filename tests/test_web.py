@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -285,6 +286,76 @@ def test_a_surface_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, why
     import fbxbuild as fb
 
     assert _decode_dds(tmp_path, mangle(fb.dds_bc1())) is None, why
+
+
+# ------------------------------------------ writing a PNG back out
+
+
+def _encode_png(tmp_path, pixels, width: int, height: int) -> bytes:
+    """Run the page's own ``png.js`` over some pixels, under Node."""
+    out = tmp_path / "written.png"
+    script = (
+        "const fs=require('fs');"
+        f"const P=require({str(WEB / 'app' / 'png.js')!r});"
+        f"const px=new Uint8ClampedArray({json.dumps(list(pixels))});"
+        f"P.encode(px, {width}, {height}).then((bytes) => "
+        f"fs.writeFileSync({str(out)!r}, Buffer.from(bytes)));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return out.read_bytes()
+
+
+@needs_node
+def test_a_texel_that_is_not_there_keeps_its_colour_through_an_export(tmp_path):
+    """The one thing a browser will not do for us.
+
+    `canvas.toBlob` is the obvious way to make a PNG and it cannot be used for
+    an export: a 2D canvas holds its pixels premultiplied, so a texel at zero
+    alpha comes back black and the colour that was on it is gone — dividing it
+    back out is a division by nothing. The viewer's upload path has avoided
+    that for a while and the export was still going through a canvas, so a
+    car's own textures left it as squares of black. A Renault 5 Turbo has
+    twenty-four such among its forty-two, its rubber, carpet, brass and
+    interior panels among them, each a picture that matters under an empty
+    alpha: through a canvas its `rubber` exports as (0, 0, 0, 0) and written
+    here as the (66, 66, 66, 0) the file holds.
+
+    The reader that checks it is the one `.kn5` uses for a paint chip, so the
+    two halves of this repository are held against each other.
+    """
+    from fbxtool import kn5
+
+    pixels = []
+    for y in range(3):
+        for x in range(4):
+            # Solid along the top row, and nothing at all below it.
+            pixels += [200, 50, 25, 255 if y == 0 else 0]
+    written = _encode_png(tmp_path, pixels, 4, 3)
+    assert written[:8] == bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+    read = kn5._png_pixels(written)
+    assert read is not None, "our own reader would not have it"
+    got, width, height = read
+    assert (width, height) == (4, 3)
+    assert list(got) == pixels, "every texel as it went in, alpha and all"
+    assert list(got[16:20]) == [200, 50, 25, 0], "the colour under an empty alpha"
+
+
+@needs_node
+def test_the_png_writer_says_when_it_cannot(tmp_path):
+    """A caller told nothing can fall back; one handed a broken file cannot."""
+    script = (
+        f"const P=require({str(WEB / 'app' / 'png.js')!r});"
+        "Promise.all(["
+        "P.encode(new Uint8ClampedArray(4), 0, 0),"
+        "P.encode(new Uint8ClampedArray(4), 8, 8),"
+        "P.encode(null, 2, 2),"
+        "]).then((r) => console.log(JSON.stringify(r.map((v) => v === null))));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [True, True, True],         "no size, too few pixels for the size claimed, and no pixels at all"
 
 
 # ------------------------------------------ the paint beside a car
@@ -1288,19 +1359,65 @@ def test_gltf_export(built, tmp_path):
     basis.write_bytes(fb.build_basis_glb())
     draco = tmp_path / "draco.glb"
     draco.write_bytes(fb.build_draco_glb())
+    # A car whose one texture is a colour under an alpha of nothing, which is
+    # what a `.dds` out of Assetto Corsa routinely is and what a canvas
+    # destroys: written through one, this exports as a square of black.
+    hollow = tmp_path / "hollow.kn5"
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    hollow.write_bytes(fb.build_kn5(
+        6, textures=[("skin.dds", fb.dds_bgra(4, 4, bytes([25, 50, 200, 0]) * 16))],
+        materials=[fb.kn5_material("paint", "ksPerPixel",
+                                   slots=(("txDiffuse", 0, "skin.dds"),))],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("body", vertices, indices), 1)))
     files = [str(ROOT / "samples" / "cube_textured.fbx"),
              str(ROOT / "samples" / "scene_parts.fbx"),
              f"{ROOT / 'samples' / 'pyramid.obj'}+{ROOT / 'samples' / 'pyramid.mtl'}"
              f"+{ROOT / 'samples' / 'checker.png'}",
-             str(glass), str(basis), str(draco)]
+             str(glass), str(basis), str(draco), str(hollow)]
     for real in (real_sample(), real_scene()):
         if real:
             files.append(real)
 
-    result = _run(["node", str(WEB / "test" / "gltf.js"), *files], env=_node_env(), timeout=600)
+    kept = tmp_path / "exports"
+    kept.mkdir()
+    env = dict(_node_env())
+    env["FBXTOOL_EXPORT_DIR"] = str(kept)
+    result = _run(["node", str(WEB / "test" / "gltf.js"), *files], env=env, timeout=600)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
+
+    # And the picture that came out, read with the repository's own reader
+    # rather than with the page that wrote it.
+    from fbxtool import kn5
+
+    images = _glb_images(kept / "hollow.kn5.glb")
+    assert len(images) == 1, f"{len(images)} image(s) exported"
+    read = kn5._png_pixels(images[0])
+    assert read is not None, "the export is not a PNG this can read"
+    pixels, width, height = read
+    assert (width, height) == (4, 4)
+    assert list(pixels[:4]) == [200, 50, 25, 0], \
+        "the colour under an empty alpha, which a canvas would have thrown away"
+
+
+def _glb_images(path) -> list:
+    """The bytes of every image a .glb carries in its binary chunk."""
+    raw = path.read_bytes()
+    json_length = struct.unpack_from("<I", raw, 12)[0]
+    document = json.loads(raw[20:20 + json_length].decode("utf-8"))
+    binary_at = 20 + json_length + 8
+    length = struct.unpack_from("<I", raw, 20 + json_length)[0]
+    binary = raw[binary_at:binary_at + length]
+    out = []
+    for image in document.get("images", []):
+        view = document["bufferViews"][image["bufferView"]]
+        at = view.get("byteOffset", 0)
+        out.append(binary[at:at + view["byteLength"]])
+    return out
 
 
 @needs_clang

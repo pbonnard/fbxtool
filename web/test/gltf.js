@@ -18,6 +18,8 @@ const { launch } = require('./chromium');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PAGE = path.join(ROOT, 'web', 'dist', 'fbxview.html');
+//: Where to leave each export, for a caller that wants to read one.
+const KEEP = process.env.FBXTOOL_EXPORT_DIR || null;
 
 let validator = null;
 try {
@@ -27,6 +29,9 @@ try {
 }
 
 let failures = 0;
+//: Files whose V is not its own mirror, which are the ones that can tell
+//: an export turned over from one that was not.
+let asymmetric = 0;
 
 function check(label, condition, detail = '') {
   if (!condition) failures++;
@@ -53,6 +58,42 @@ const countOf = (report, code) =>
 
 const COMPONENT_SIZE = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 };
 const COMPONENT_COUNT = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
+
+/** The floats an accessor holds, read out of the binary chunk. */
+function floatsOf(json, bin, index) {
+  const accessor = json.accessors[index];
+  const view = json.bufferViews[accessor.bufferView];
+  const at = (view.byteOffset || 0) + (accessor.byteOffset || 0);
+  return new Float32Array(bin.buffer, bin.byteOffset + at,
+    accessor.count * COMPONENT_COUNT[accessor.type]);
+}
+
+/**
+ * Every texture coordinate the file exports, as "u,v" strings.
+ *
+ * glTF measures V downwards from the top of a texture and FBX upwards, so the
+ * two are turned over on the way out — the same turn the reader makes on the
+ * way in. It has to be the coordinates and not the picture: one image is
+ * shared by every material that names it, and turning it over would move every
+ * other surface wearing it.
+ *
+ * A model is a poor witness to this on its own. A car's UV islands are
+ * scattered over the sheet, so a flip slides the paint about rather than
+ * turning the car over, and it reads as some other fault entirely — which is
+ * how it went unseen until somebody opened an export in another tool.
+ */
+function exportedUvs(json, bin) {
+  const out = new Set();
+  for (const mesh of json.meshes) {
+    for (const primitive of mesh.primitives) {
+      const which = primitive.attributes.TEXCOORD_0;
+      if (which === undefined) continue;
+      const uvs = floatsOf(json, bin, which);
+      for (let at = 0; at < uvs.length; at += 2) out.add(`${uvs[at]},${uvs[at + 1]}`);
+    }
+  }
+  return out;
+}
 
 /** Split a GLB into its JSON and its binary chunk, checking the container. */
 function readGlb(bytes) {
@@ -253,7 +294,13 @@ async function main() {
       page.waitForEvent('download', { timeout: 180000 }),
       page.click('#export-gltf'),
     ]);
-    const saved = path.join(path.dirname(await download.path()), 'export.glb');
+    /* Kept where the caller asked, if it asked. What comes out of here is
+     * worth reading with something other than the page that wrote it, and the
+     * repository has a PNG reader on the Python side that owes this one
+     * nothing. */
+    const saved = KEEP
+      ? path.join(KEEP, `${path.basename(group[0]).replace(/[^\w.-]/g, '_')}.glb`)
+      : path.join(path.dirname(await download.path()), 'export.glb');
     await download.saveAs(saved);
     const bytes = new Uint8Array(fs.readFileSync(saved));
     const stats = await page.evaluate(() => window.fbxtool.lastExport);
@@ -288,6 +335,33 @@ async function main() {
     check('welding dropped the repeated vertices', stats.vertices < inspected.stored * 3,
       `${stats.vertices.toLocaleString()} vertices for `
       + `${(inspected.stored * 3).toLocaleString()} corners`);
+
+    // ---- which way up the texture coordinates come out
+    const written = exportedUvs(json, bin);
+    if (written.size) {
+      const held = await page.evaluate(() => {
+        const mesh = window.fbxtool.exportMesh();
+        if (!mesh || !mesh.uvs) return null;
+        const plain = new Set();
+        const turned = new Set();
+        for (let at = 0; at < mesh.uvs.length; at += 2) {
+          plain.add(`${mesh.uvs[at]},${mesh.uvs[at + 1]}`);
+          turned.add(`${mesh.uvs[at]},${Math.fround(1 - mesh.uvs[at + 1])}`);
+        }
+        return { plain: [...plain], turned: [...turned] };
+      });
+      const turned = new Set(held ? held.turned : []);
+      const stray = [...written].filter((uv) => !turned.has(uv));
+      check('every coordinate is the one the page holds, turned over',
+        held !== null && stray.length === 0,
+        stray.length ? `${stray.length} of ${written.size}, e.g. ${stray[0]}` : `${written.size}`);
+      /* Whether that could have told the difference. A sheet whose V values
+       * are all 0 and 1 comes back to itself turned over, and a cube mapped
+       * corner to corner is exactly that — so it agrees either way and the run
+       * as a whole has to carry something that does not. */
+      if (held && (held.plain.length !== turned.size
+        || held.plain.some((uv) => !turned.has(uv)))) asymmetric++;
+    }
 
     // ---- the geometry itself, where the parts stand
     const min = [Infinity, Infinity, Infinity];
@@ -517,6 +591,8 @@ async function main() {
       + '\n');
   }
 
+  check('and at least one of them would have shown the difference',
+    asymmetric > 0, `${asymmetric} file(s) whose sheet is not its own mirror`);
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
   await browser.close();
   console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');

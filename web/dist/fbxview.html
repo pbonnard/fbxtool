@@ -6781,6 +6781,125 @@ const FbxDds = (function () {
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxDds;
 
+// ---- png.js ------------------------------------------------------------
+/* Write a PNG, keeping the colour on a texel that is not there.
+ *
+ * The one thing a browser will not do for us. `canvas.toBlob` is the obvious
+ * way to make a PNG and it cannot be used for an export, because a 2D canvas
+ * holds its pixels premultiplied: a texel at zero alpha comes back black and
+ * the colour that was on it is gone, since dividing it back out is a division
+ * by nothing. The viewer's upload path has been careful about that for a while
+ * — every `createImageBitmap` in it is told not to premultiply — and the
+ * export was still going through a canvas, so a car's own textures came out
+ * black wherever their alpha was empty. A Renault 5 Turbo has twenty-four such
+ * among its forty-two: its rubber, its carpet, its interior body panels and
+ * its brass, all of them a picture that matters under an alpha of nothing.
+ *
+ * So the file is written here instead, from the pixels as they stand. A PNG is
+ * a signature, an IHDR, one zlib stream of filtered rows and an IEND, and
+ * `CompressionStream('deflate')` is a zlib stream — the one part worth having
+ * a library for is the part the platform already has.
+ *
+ * Rows are written unfiltered. Filtering is what makes a PNG small and this
+ * gives that up: a photograph comes out perhaps a third larger than one an
+ * encoder would write. It buys exactness and a hundred lines fewer, and an
+ * exported `.glb` is not a delivery format for pictures.
+ */
+'use strict';
+
+const FbxPng = (function () {
+  const MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+  //: The usual reversed-polynomial table, built once.
+  const CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      table[n] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(bytes) {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  /** A chunk: its length, its tag, its body, and the CRC over the last two. */
+  function chunk(tag, body) {
+    const out = new Uint8Array(12 + body.length);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, body.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = tag.charCodeAt(i);
+    out.set(body, 8);
+    view.setUint32(8 + body.length, crc32(out.subarray(4, 8 + body.length)));
+    return out;
+  }
+
+  /** Everything a stream hands back, joined. */
+  async function drain(stream) {
+    const reader = stream.getReader();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  }
+
+  /** Whether this is somewhere a PNG can be written at all. */
+  function available() {
+    return typeof CompressionStream === 'function';
+  }
+
+  /**
+   * *pixels* as a PNG, eight-bit RGBA, top row first.
+   *
+   * Returns null where the platform has no deflate to offer, which leaves the
+   * caller to fall back rather than to write a file nothing can read.
+   */
+  async function encode(pixels, width, height) {
+    if (!available() || !width || !height) return null;
+    if (!pixels || pixels.length < width * height * 4) return null;
+    const stride = width * 4;
+    // One filter byte in front of each row, saying the row is not filtered.
+    const raw = new Uint8Array((stride + 1) * height);
+    for (let y = 0; y < height; y++) {
+      raw.set(pixels.subarray(y * stride, y * stride + stride), y * (stride + 1) + 1);
+    }
+    const header = new Uint8Array(13);
+    const view = new DataView(header.buffer);
+    view.setUint32(0, width);
+    view.setUint32(4, height);
+    header[8] = 8;                       // eight bits a channel
+    header[9] = 6;                       // truecolour with alpha
+    header[10] = 0;                      // deflate, which is the only one
+    header[11] = 0;                      // and the only filter method
+    header[12] = 0;                      // written in one pass, not interlaced
+
+    const deflated = await drain(new Blob([raw]).stream()
+      .pipeThrough(new CompressionStream('deflate')));
+    const parts = [new Uint8Array(MAGIC), chunk('IHDR', header),
+      chunk('IDAT', deflated), chunk('IEND', new Uint8Array(0))];
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  }
+
+  return { encode, available, crc32 };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxPng;
+
 // ---- transform.js ------------------------------------------------------
 /* FBX node transforms.
  *
@@ -8712,9 +8831,22 @@ const FbxGltf = (function () {
           NORMAL: accessor(normalView, FLOAT, welded.normals.length / 3, 'VEC3'),
         };
         if (welded.uvs) {
-          const uvView = store(welded.uvs);
+          /* glTF measures V downwards from the top of a texture and FBX
+           * upwards, so the coordinates are turned over on the way out — as
+           * the reader turns them over on the way in, and as the kn5 reader
+           * turns the game's own round for the same reason.
+           *
+           * The picture itself goes across untouched, which is the whole
+           * reason this has to be the coordinates: one image is shared by
+           * every material that names it, so turning it over would move every
+           * other surface wearing it. And a tiled UV is turned over just the
+           * same — 1 − 60 is off the end of the sheet, but a repeating
+           * sampler lands it on the same texels the right way up. */
+          const uvs = welded.uvs;
+          for (let at = 1; at < uvs.length; at += 2) uvs[at] = 1 - uvs[at];
+          const uvView = store(uvs);
           json.bufferViews[uvView].target = ARRAY_BUFFER;
-          attributes.TEXCOORD_0 = accessor(uvView, FLOAT, welded.uvs.length / 2, 'VEC2');
+          attributes.TEXCOORD_0 = accessor(uvView, FLOAT, uvs.length / 2, 'VEC2');
         }
 
         const primitive = {
@@ -13504,9 +13636,75 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     return null;
   }
 
-  /** An image as PNG bytes, through a canvas, and whether any of it is see-through. */
+  //: One context for reading pixels back, made when something first needs it.
+  let readback = null;
+
+  /**
+   * The pixels of a decoded image, with the colour still on them.
+   *
+   * There is no way to ask a 2D canvas for these. It holds what it is given
+   * premultiplied, so a texel at zero alpha comes back black however it was
+   * put in — and a `.dds` out of Assetto Corsa routinely carries an alpha
+   * channel of nothing beside a picture that matters. The upload path has
+   * avoided the canvas for a while; the export was still going through one,
+   * and a Renault 5's rubber, carpet, brass and interior panels came out of it
+   * as squares of black.
+   *
+   * A GL texture keeps the two apart when it is told to, and reading it back
+   * through a framebuffer gives the image as it was decoded. Row zero is the
+   * top of the picture, which is the order a PNG is written in: the source is
+   * not turned over on the way in, so it does not have to be turned back.
+   */
+  function pixelsOf(image) {
+    const width = image && image.width;
+    const height = image && image.height;
+    if (!width || !height) return null;
+    if (readback === null) {
+      const canvas = document.createElement('canvas');
+      readback = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: false })
+        || false;
+    }
+    const gl = readback;
+    if (!gl) return null;
+    if (width > gl.getParameter(gl.MAX_TEXTURE_SIZE)
+      || height > gl.getParameter(gl.MAX_TEXTURE_SIZE)) return null;
+    const texture = gl.createTexture();
+    const frame = gl.createFramebuffer();
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D, texture, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return null;
+      const out = new Uint8ClampedArray(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return gl.getError() === gl.NO_ERROR ? out : null;
+    } catch (error) {
+      return null;
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(frame);
+      gl.deleteTexture(texture);
+    }
+  }
+
+  /** An image as PNG bytes, and whether any of it is see-through. */
   async function encodePng(image) {
     if (!image) return null;
+    const pixels = pixelsOf(image);
+    if (pixels) {
+      const written = await FbxPng.encode(pixels, image.width, image.height);
+      if (written) return { bytes: written, hasAlpha: anyAlpha(pixels) };
+    }
+    /* Failing that, the canvas after all.
+     *
+     * Somewhere with no WebGL2 and no `CompressionStream` is somewhere the
+     * viewer barely runs, and a picture whose empty texels are black beats no
+     * picture at all — but it is the second answer and not the first. */
     const canvas = document.createElement('canvas');
     canvas.width = image.width;
     canvas.height = image.height;
@@ -13514,13 +13712,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     context.drawImage(image, 0, 0);
     // A canvas always encodes RGBA, so the header alone would call every one
     // of these transparent. The pixels themselves settle it.
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    let hasAlpha = false;
-    for (let i = 3; i < pixels.length; i += 4) {
-      if (pixels[i] !== 255) { hasAlpha = true; break; }
-    }
+    const drawn = context.getImageData(0, 0, canvas.width, canvas.height).data;
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    return blob ? { bytes: new Uint8Array(await blob.arrayBuffer()), hasAlpha } : null;
+    return blob
+      ? { bytes: new Uint8Array(await blob.arrayBuffer()), hasAlpha: anyAlpha(drawn) } : null;
+  }
+
+  /** Whether any texel of an RGBA run is less than solid. */
+  function anyAlpha(pixels) {
+    for (let at = 3; at < pixels.length; at += 4) if (pixels[at] !== 255) return true;
+    return false;
   }
 
   /**
@@ -13539,12 +13740,20 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    */
   async function encodeNormals(image, strength) {
     if (!image) return null;
+    const width = image.width;
+    const height = image.height;
     const canvas = document.createElement('canvas');
-    const width = canvas.width = image.width;
-    const height = canvas.height = image.height;
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext('2d', { willReadFrequently: true });
-    context.drawImage(image, 0, 0);
-    const source = context.getImageData(0, 0, width, height);
+    // Read the same way the colour is — a height map under an empty alpha is
+    // flat black through a canvas, and a flat height map is no relief at all.
+    let read = pixelsOf(image);
+    if (!read) {
+      context.drawImage(image, 0, 0);
+      read = context.getImageData(0, 0, width, height).data;
+    }
+    const source = { data: read };
     const out = context.createImageData(width, height);
     // The red channel is the height: a bump map is grey, and where it is not,
     // red is the channel every convention agrees on.
