@@ -94,6 +94,9 @@ def _slot_property(slot: str, shader: str) -> str:
 
 #: Property defaults for a material that leaves one out, as the shaders do.
 _DEFAULT_FRESNEL_C = 0.05
+#: And no ceiling on the Fresnel term where none is stated.
+_DEFAULT_FRESNEL_MAX = 1.0
+
 
 #: The most a dielectric reflects facing you: diamond, at an index of refraction
 #: of 2.42.  Glass and plastic sit near 0.04, and an artist writing 0.15 for a
@@ -109,10 +112,12 @@ def _metalness(facing: float, blended: bool) -> float:
 
     A kn5 states no metalness.  The game shades a car with a Blinn-Phong
     highlight and a Schlick Fresnel over it, and chrome is simply a material
-    whose ``fresnelC`` an artist set high.  But ``fresnelC`` is a reflectance
-    at normal incidence, and that is the one number where the two kinds of
-    surface cannot be confused: no dielectric reflects more than about 17%
-    facing you, and no metal less than about half.
+    whose reflectance an artist set high.  *facing* is what the surface
+    actually returns at normal incidence — `fresnelC` held under its own
+    ceiling, which is what :func:`_reflectance` settles — and that is the one
+    number where the two kinds of surface cannot be confused: no dielectric
+    reflects more than about 17% facing you, and no metal less than about
+    half.
 
     Nothing is read from a surface the file also says is see-through — light
     passes through a dielectric and not through a conductor, so a windscreen
@@ -128,6 +133,33 @@ def _metalness(facing: float, blended: bool) -> float:
         return 0.0
     return min(1.0, (facing - _DIELECTRIC_CEILING)
                / (_METAL_FLOOR - _DIELECTRIC_CEILING))
+
+
+def _reflectance(material: "_Material") -> float:
+    """What a surface actually reflects facing you.
+
+    ``fresnelC`` is the Schlick base and ``fresnelMaxLevel`` is a ceiling on
+    the whole term — not the value at a grazing angle, which is what the pair
+    reads like until you see the numbers.  A BMW Z3M's ``lightclear`` states
+    1.0 and 0.03: read as a base it is a perfect mirror, and read as a ceiling
+    it is the three per cent a clear lens reflects.  An Alfa TZ2's ``EXT_TYRE``
+    settles it — it states 5.0, which is not a reflectance at all and can only
+    be a number something clamps, beside a ceiling of 0.02.
+
+    The two always travel together: of 1853 materials across the cars to hand,
+    1075 state both and 778 state neither, and not one states only one of them.
+    So reading the first without the second is reading half of a sentence, and
+    it is the half that turns a tail lamp and a tyre into mirrors.
+
+    The ceiling is below the base in 95 of them.  What is not modelled is the
+    ceiling at a grazing angle: the viewer's own Schlick rises towards 1 at the
+    edge where the game would hold it at ``fresnelMaxLevel``, which is a
+    brighter rim than the game draws and nothing like the difference between a
+    lens and a mirror.
+    """
+    facing = material.scalar("fresnelC", _DEFAULT_FRESNEL_C)
+    ceiling = material.scalar("fresnelMaxLevel", _DEFAULT_FRESNEL_MAX)
+    return min(max(min(facing, ceiling), 0.0), 1.0)
 
 
 #: What a plainly lit surface takes from the light: `ksAmbient` and `ksDiffuse`
@@ -1098,10 +1130,10 @@ def _material_records(materials: Sequence[_Material], texture_uids: dict[str, in
         uids.append(uid)
 
         # What comes back facing you.  The game's shaders spell a Schlick
-        # Fresnel out in full: `fresnelC` at normal incidence rising to
-        # `fresnelMaxLevel` at grazing, over `fresnelEXP`.  The first of those
-        # is a reflectance, and it is written as one.
-        facing = min(max(material.scalar("fresnelC", _DEFAULT_FRESNEL_C), 0.0), 1.0)
+        # Fresnel out in full — `fresnelC` as the base, rising over `fresnelEXP`
+        # and held under `fresnelMaxLevel` — and the reflectance is what the
+        # two of those come to, not what the first of them says alone.
+        facing = _reflectance(material)
         alpha_mode = ("MASK" if material.alpha_tested
                       else _BLEND_MODES.get(material.blend, "OPAQUE"))
         metal = _metalness(facing, alpha_mode == "BLEND")

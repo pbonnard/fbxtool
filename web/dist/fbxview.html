@@ -666,7 +666,16 @@ ul.record-tree .count { color: var(--muted); }
         ground</label>
       <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
       <button id="reset-view" type="button">Reset view</button>
-      <button id="export-gltf" type="button" disabled>Export glTF</button>
+      <!-- Which spelling the export is written in. A .glb is one file and is
+           what most things want; a .gltf beside a .bin is the same document
+           with its JSON out where it can be read; an .fbx is what the rest of
+           this tool reads, written back out. -->
+      <select id="export-format" title="What to export as">
+        <option value="glb">.glb</option>
+        <option value="gltf">.gltf + .bin</option>
+        <option value="fbx">.fbx</option>
+      </select>
+      <button id="export-gltf" type="button" disabled>Export</button>
       <button id="restore-all" type="button"
         title="Put every deleted part back and undo every split" hidden disabled>Restore all</button>
     </div>
@@ -5186,6 +5195,38 @@ const FbxKn5 = (function () {
       / (METAL_FLOOR - DIELECTRIC_CEILING));
   }
 
+  /* Property defaults for a material that leaves one out, as the shaders do,
+   * and no ceiling on the Fresnel term where none is stated. */
+  const DEFAULT_FRESNEL_C = 0.05;
+  const DEFAULT_FRESNEL_MAX = 1;
+
+  /**
+   * What a surface actually reflects facing you.
+   *
+   * `fresnelC` is the Schlick base and `fresnelMaxLevel` is a ceiling on the
+   * whole term — not the value at a grazing angle, which is what the pair
+   * reads like until you see the numbers. A BMW Z3M's `lightclear` states 1.0
+   * and 0.03: read as a base it is a perfect mirror, and read as a ceiling it
+   * is the three per cent a clear lens reflects. An Alfa TZ2's `EXT_TYRE`
+   * settles it — it states 5.0, which is not a reflectance at all and can only
+   * be a number something clamps, beside a ceiling of 0.02.
+   *
+   * The two always travel together: of 1853 materials across the cars to hand,
+   * 1075 state both and 778 state neither, and not one states only one of
+   * them. So reading the first without the second is reading half of a
+   * sentence, and it is the half that turns a tail lamp and a tyre into
+   * mirrors. The ceiling is below the base in 95 of them.
+   *
+   * What is not modelled is the ceiling at a grazing angle: the viewer's own
+   * Schlick rises towards 1 at the edge where the game would hold it at
+   * `fresnelMaxLevel`.
+   */
+  function reflectance(material) {
+    const facing = scalarOf(material, 'fresnelC', DEFAULT_FRESNEL_C);
+    const ceiling = scalarOf(material, 'fresnelMaxLevel', DEFAULT_FRESNEL_MAX);
+    return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
+  }
+
   /* What a plainly lit surface takes from the light: `ksAmbient` and
    * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
    * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
@@ -5632,10 +5673,10 @@ const FbxKn5 = (function () {
     const materialUids = materials.map((material) => {
       const id = uid();
       /* What comes back facing you. The game's shaders spell a Schlick Fresnel
-       * out in full: `fresnelC` at normal incidence rising to `fresnelMaxLevel`
-       * at grazing, over `fresnelEXP`. The first of those is a reflectance, and
-       * it is written as one. */
-      const facing = Math.min(Math.max(scalarOf(material, 'fresnelC', 0.05), 0), 1);
+       * out in full — `fresnelC` as the base, rising over `fresnelEXP` and held
+       * under `fresnelMaxLevel` — and the reflectance is what the two of those
+       * come to, not what the first of them says alone. */
+      const facing = reflectance(material);
       const alphaMode = material.alphaTested ? 'MASK'
         : (BLEND_MODES[material.blend] || 'OPAQUE');
       const metal = metalness(facing, alphaMode === 'BLEND');
@@ -6514,6 +6555,9 @@ const FbxDds = (function () {
   const ATI2 = code('ATI2');
   const BC5U = code('BC5U');
   const DX10 = code('DX10');
+  //: BC7 only ever arrives through a DX10 header, so it has no fourCC of
+  //: its own in any file; this one is ours, to say so past the header.
+  const BC7 = code('BC7 ');
 
   //: The DXGI formats that are one of the block layouts read here.
   const DXGI = {
@@ -6522,7 +6566,12 @@ const FbxDds = (function () {
     76: DXT5, 77: DXT5, 78: DXT5,              // BC3
     79: ATI1, 80: ATI1,                        // BC4 typeless / unorm
     82: ATI2, 83: ATI2,                        // BC5 typeless / unorm
-    87: 'bgra8', 88: 'bgra8', 91: 'bgra8',
+    97: BC7, 98: BC7, 99: BC7,                 // BC7 typeless / unorm / sRGB
+    87: 'bgra8', 91: 'bgra8',
+    // B8G8R8X8: the fourth byte is padding rather than an alpha, and reading
+    // it as one hides the picture. An Alfa A110's are all zero there, so its
+    // twenty-two BGRX textures would come out fully transparent.
+    88: 'bgrx8', 92: 'bgrx8', 93: 'bgrx8',
     28: 'rgba8', 29: 'rgba8',
   };
 
@@ -6652,6 +6701,241 @@ const FbxDds = (function () {
     }
   }
 
+  // ------------------------------------------------------------------- BC7
+
+  /* BC7 is the last of the block formats and the only one with modes: eight of
+   * them, each cutting a 4x4 tile up differently and spending its 128 bits
+   * differently. A block says which by how many zeros it begins with, and
+   * everything after that follows from the mode — how many subsets the tile is
+   * cut into, how wide an endpoint is, whether alpha is stored apart from
+   * colour, and how many bits an index gets.
+   *
+   * It is what a modern car is saved in. Sixteen textures across five of the
+   * cars to hand are BC7 and every one of them is bound to a material: a BMW
+   * Z3M's `dirty-glass`, an Alfa TZ2's brake disc, a Donkervoort's gauges.
+   * Refused, each is a surface with no picture on it.
+   *
+   * The tables are the specification's, transcribed: which subset each of the
+   * sixteen pixels belongs to under each of the 64 partitions, and which pixel
+   * anchors each subset. An anchor stores one bit fewer, its high bit being
+   * implicitly zero — that is what makes an endpoint pair unambiguous, and it
+   * is where a decoder written from memory goes wrong. What settles whether
+   * this one is right is not reading it back: every BC7 texture in the cars to
+   * hand is decoded here and compared against Pillow, texel for texel.
+   */
+  const bitsOf = (text) => Uint8Array.from(text, (c) => c.charCodeAt(0) - 48);
+
+  const PARTITION2 = [
+    '0011001100110011', '0001000100010001', '0111011101110111', '0001001100110111',
+    '0000000100010011', '0011011101111111', '0001001101111111', '0000000100110111',
+    '0000000000010011', '0011011111111111', '0000000101111111', '0000000000010111',
+    '0001011111111111', '0000000011111111', '0000111111111111', '0000000000001111',
+    '0000100011101111', '0111000100000000', '0000000010001110', '0111001100010000',
+    '0011000100000000', '0000100011001110', '0000000010001100', '0111001100110001',
+    '0011000100010000', '0000100010001100', '0110011001100110', '0011011001101100',
+    '0001011111101000', '0000111111110000', '0111000110001110', '0011100110011100',
+    '0101010101010101', '0000111100001111', '0101101001011010', '0011001111001100',
+    '0011110000111100', '0101010110101010', '0110100101101001', '0101101010100101',
+    '0111001111001110', '0001001111001000', '0011001001001100', '0011101111011100',
+    '0110100110010110', '0011110011000011', '0110011010011001', '0000011001100000',
+    '0100111001000000', '0010011100100000', '0000001001110010', '0000010011100100',
+    '0110110010010011', '0011011011001001', '0110001110011100', '0011100111000110',
+    '0110110011001001', '0110001100111001', '0111111010000001', '0001100011100111',
+    '0000111100110011', '0011001111110000', '0010001011101110', '0100010001110111',
+  ].map(bitsOf);
+
+  const PARTITION3 = [
+    '0011001102212222', '0001001122112221', '0000200122112211', '0222002200110111',
+    '0000000011221122', '0011001100220022', '0022002211111111', '0011001122112211',
+    '0000000011112222', '0000111111112222', '0000111122222222', '0012001200120012',
+    '0112011201120112', '0122012201220122', '0011011211221222', '0011200122002220',
+    '0001001101121122', '0111001120012200', '0000112211221122', '0022002200221111',
+    '0111011102220222', '0001000122212221', '0000001101220122', '0000110022102210',
+    '0122012200110000', '0012001211222222', '0110122112210110', '0000011012211221',
+    '0022110211020022', '0110011020022222', '0011012201220011', '0000200022112221',
+    '0000000211221222', '0222002200120011', '0011001200220222', '0120012001200120',
+    '0000111122220000', '0120120120120120', '0120201212010120', '0011220011220011',
+    '0011112222000011', '0101010122222222', '0000000021212121', '0022112200221122',
+    '0022001100220011', '0220122102201221', '0101222222220101', '0000212121212121',
+    '0101010101012222', '0222011102220111', '0002111200021112', '0000211221122112',
+    '0222011101110222', '0002111211120002', '0110011001102222', '0000000021122112',
+    '0110011022222222', '0022001100110022', '0022112211220022', '0000000000002112',
+    '0002000100020001', '0222122202221222', '0101222222222222', '0111201122012220',
+  ].map(bitsOf);
+
+  //: Which pixel anchors the second subset of a two-subset partition, and the
+  //: second and third of a three-subset one. The first is always pixel zero.
+  const ANCHOR2 = Uint8Array.from([
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 2, 8, 2, 2, 8, 8, 15, 2, 8, 2, 2, 8, 8, 2, 2,
+    15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6,
+    6, 2, 6, 8, 15, 15, 2, 2, 15, 15, 15, 15, 15, 2, 2, 15,
+  ]);
+  const ANCHOR3_SECOND = Uint8Array.from([
+    3, 3, 15, 15, 8, 3, 15, 15, 8, 8, 6, 6, 6, 5, 3, 3,
+    3, 3, 8, 15, 3, 3, 6, 10, 5, 8, 8, 6, 8, 5, 15, 15,
+    8, 15, 3, 5, 6, 10, 8, 15, 15, 3, 15, 5, 15, 15, 15, 15,
+    3, 15, 5, 5, 5, 8, 5, 10, 5, 10, 8, 13, 15, 12, 3, 3,
+  ]);
+  const ANCHOR3_THIRD = Uint8Array.from([
+    15, 8, 8, 3, 15, 15, 3, 8, 15, 15, 15, 15, 15, 15, 15, 8,
+    15, 8, 15, 3, 15, 8, 15, 8, 3, 15, 6, 10, 15, 15, 10, 8,
+    15, 3, 15, 10, 10, 8, 9, 10, 6, 15, 8, 15, 3, 6, 6, 8,
+    15, 3, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 3, 15, 15, 8,
+  ]);
+
+  /* What each mode spends its bits on, in the order the block states them:
+   * how many subsets, then the widths of the partition, the rotation, the
+   * index selector, a colour endpoint, an alpha endpoint, the per-endpoint
+   * parity bits, the per-subset shared parity bits, and the two index sets. */
+  const BC7_MODES = [
+    { ns: 3, pb: 4, rb: 0, isb: 0, cb: 4, ab: 0, epb: 1, spb: 0, ib: 3, ib2: 0 },
+    { ns: 2, pb: 6, rb: 0, isb: 0, cb: 6, ab: 0, epb: 0, spb: 1, ib: 3, ib2: 0 },
+    { ns: 3, pb: 6, rb: 0, isb: 0, cb: 5, ab: 0, epb: 0, spb: 0, ib: 2, ib2: 0 },
+    { ns: 2, pb: 6, rb: 0, isb: 0, cb: 7, ab: 0, epb: 1, spb: 0, ib: 2, ib2: 0 },
+    { ns: 1, pb: 0, rb: 2, isb: 1, cb: 5, ab: 6, epb: 0, spb: 0, ib: 2, ib2: 3 },
+    { ns: 1, pb: 0, rb: 2, isb: 0, cb: 7, ab: 8, epb: 0, spb: 0, ib: 2, ib2: 2 },
+    { ns: 1, pb: 0, rb: 0, isb: 0, cb: 7, ab: 7, epb: 1, spb: 0, ib: 4, ib2: 0 },
+    { ns: 2, pb: 6, rb: 0, isb: 0, cb: 5, ab: 5, epb: 1, spb: 0, ib: 2, ib2: 0 },
+  ];
+
+  //: How far along the two endpoints an index sits, in sixty-fourths.
+  const WEIGHTS = {
+    2: [0, 21, 43, 64],
+    3: [0, 9, 18, 27, 37, 46, 55, 64],
+    4: [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64],
+  };
+
+  /** A value of *width* bits stretched over the full eight, as the spec says. */
+  function stretch(value, width) {
+    if (width >= 8) return value & 255;
+    return ((value << (8 - width)) | (value >>> Math.max(0, 2 * width - 8))) & 255;
+  }
+
+  const between = (a, b, weight) => (((64 - weight) * a + weight * b + 32) >> 6);
+
+  /** One sixteen-byte BC7 tile, written into *rgba*. */
+  function bc7Block(view, at, rgba, width, height, x0, y0) {
+    let bit = 0;
+    const read = (count) => {
+      let out = 0;
+      for (let n = 0; n < count; n++) {
+        out |= ((view.getUint8(at + (bit >> 3)) >> (bit & 7)) & 1) << n;
+        bit += 1;
+      }
+      return out;
+    };
+    const put = (x, y, r, g, b, a) => {
+      if (x0 + x >= width || y0 + y >= height) return;
+      const to = ((y0 + y) * width + (x0 + x)) * 4;
+      rgba[to] = r; rgba[to + 1] = g; rgba[to + 2] = b; rgba[to + 3] = a;
+    };
+
+    let mode = -1;
+    for (let m = 0; m < 8; m++) {
+      if (read(1)) { mode = m; break; }
+    }
+    // Eight zero bits is a mode the format reserves, and a block in it reads
+    // as nothing at all rather than as whatever happens to follow.
+    if (mode < 0) {
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) put(x, y, 0, 0, 0, 0);
+      return;
+    }
+
+    const spec = BC7_MODES[mode];
+    const partition = spec.pb ? read(spec.pb) : 0;
+    const rotation = spec.rb ? read(spec.rb) : 0;
+    const swapped = spec.isb ? read(spec.isb) : 0;
+    const ends = spec.ns * 2;
+
+    const channel = (count) => {
+      const out = new Array(ends);
+      for (let i = 0; i < ends; i++) out[i] = read(count);
+      return out;
+    };
+    const red = channel(spec.cb);
+    const green = channel(spec.cb);
+    const blue = channel(spec.cb);
+    const alpha = spec.ab ? channel(spec.ab) : new Array(ends).fill(255);
+
+    /* The parity bits, which are the last bit of every endpoint and are stored
+     * away from it: one for each end, or one shared by both ends of a subset. */
+    let colourWidth = spec.cb;
+    let alphaWidth = spec.ab;
+    if (spec.epb || spec.spb) {
+      const parity = new Array(ends);
+      if (spec.epb) {
+        for (let i = 0; i < ends; i++) parity[i] = read(1);
+      } else {
+        for (let i = 0; i < spec.ns; i++) {
+          const shared = read(1);
+          parity[2 * i] = shared;
+          parity[2 * i + 1] = shared;
+        }
+      }
+      for (let i = 0; i < ends; i++) {
+        red[i] = (red[i] << 1) | parity[i];
+        green[i] = (green[i] << 1) | parity[i];
+        blue[i] = (blue[i] << 1) | parity[i];
+        if (spec.ab) alpha[i] = (alpha[i] << 1) | parity[i];
+      }
+      colourWidth += 1;
+      if (spec.ab) alphaWidth += 1;
+    }
+    for (let i = 0; i < ends; i++) {
+      red[i] = stretch(red[i], colourWidth);
+      green[i] = stretch(green[i], colourWidth);
+      blue[i] = stretch(blue[i], colourWidth);
+      if (spec.ab) alpha[i] = stretch(alpha[i], alphaWidth);
+    }
+
+    // Which subset each pixel belongs to, and which pixel anchors each subset.
+    const table = spec.ns === 3 ? PARTITION3[partition]
+      : (spec.ns === 2 ? PARTITION2[partition] : null);
+    const anchors = [0];
+    if (spec.ns === 2) {
+      anchors.push(ANCHOR2[partition]);
+    } else if (spec.ns === 3) {
+      anchors.push(ANCHOR3_SECOND[partition], ANCHOR3_THIRD[partition]);
+    }
+    const subsetOf = (pixel) => (table ? table[pixel] : 0);
+
+    const primary = new Uint8Array(16);
+    for (let p = 0; p < 16; p++) {
+      primary[p] = read(spec.ib - (anchors[subsetOf(p)] === p ? 1 : 0));
+    }
+    let secondary = null;
+    if (spec.ib2) {
+      secondary = new Uint8Array(16);
+      // A mode with a second index set has one subset, so pixel zero is the
+      // only anchor there is.
+      for (let p = 0; p < 16; p++) secondary[p] = read(spec.ib2 - (p === 0 ? 1 : 0));
+    }
+
+    const colourWeights = WEIGHTS[spec.ib2 && swapped ? spec.ib2 : spec.ib];
+    const alphaWeights = WEIGHTS[spec.ib2 ? (swapped ? spec.ib : spec.ib2) : spec.ib];
+
+    for (let p = 0; p < 16; p++) {
+      const first = subsetOf(p) * 2;
+      const second = first + 1;
+      const ci = spec.ib2 && swapped ? secondary[p] : primary[p];
+      const ai = spec.ib2 ? (swapped ? primary[p] : secondary[p]) : primary[p];
+      const cw = colourWeights[ci];
+      const aw = alphaWeights[ai];
+      let r = between(red[first], red[second], cw);
+      let g = between(green[first], green[second], cw);
+      let b = between(blue[first], blue[second], cw);
+      let a = spec.ab ? between(alpha[first], alpha[second], aw) : 255;
+      /* A rotation says one of the colour channels is really the alpha, which
+       * is how a mode with one endpoint pair spends its bits on whichever
+       * channel needs them most. */
+      if (rotation === 1) { const swap = a; a = r; r = swap; } else if (rotation === 2) {
+        const swap = a; a = g; g = swap;
+      } else if (rotation === 3) { const swap = a; a = b; b = swap; }
+      put(p & 3, p >> 2, r, g, b, a);
+    }
+  }
+
   function decodeBlocks(view, at, width, height, fourCC, rgba) {
     const wide = Math.max(1, Math.ceil(width / 4));
     const tall = Math.max(1, Math.ceil(height / 4));
@@ -6670,6 +6954,8 @@ const FbxDds = (function () {
         } else if (fourCC === DXT4 || fourCC === DXT5) {
           colourBlock(view, block + 8, rgba, width, height, x0, y0, false);
           interpolatedBlock(view, block, rgba, width, height, x0, y0, 3);
+        } else if (fourCC === BC7) {
+          bc7Block(view, block, rgba, width, height, x0, y0);
         } else if (fourCC === ATI1) {
           interpolatedBlock(view, block, rgba, width, height, x0, y0, 0);
         } else {                                       // ATI2 / BC5: red, green
@@ -6743,18 +7029,26 @@ const FbxDds = (function () {
       luminance: (flags & LUMINANCE) !== 0,
     };
     let at = 128;
+    /* A DX10 header states its layout as a number instead of as masks and
+     * flags, so a surface that arrives that way says `DDPF_FOURCC` and nothing
+     * else — and the uncompressed ones have to be let past the flag test on
+     * the strength of that number rather than of a bit nobody set. */
+    let plain = false;
     if (fourCC === DX10) {
       if (bytes.length < 148) return null;
       const dxgi = DXGI[view.getUint32(128, true)];
       at = 148;
       if (dxgi === undefined) return null;
-      if (dxgi === 'bgra8' || dxgi === 'rgba8') {
+      if (dxgi === 'bgra8' || dxgi === 'bgrx8' || dxgi === 'rgba8') {
+        const bgr = dxgi !== 'rgba8';
         fourCC = 0;
+        plain = true;
         format.bits = 32;
-        format.rMask = dxgi === 'bgra8' ? 0x00ff0000 : 0x000000ff;
+        format.rMask = bgr ? 0x00ff0000 : 0x000000ff;
         format.gMask = 0x0000ff00;
-        format.bMask = dxgi === 'bgra8' ? 0x000000ff : 0x00ff0000;
-        format.aMask = 0xff000000;
+        format.bMask = bgr ? 0x000000ff : 0x00ff0000;
+        // No mask at all is what `decodePlain` reads as solid.
+        format.aMask = dxgi === 'bgrx8' ? 0 : 0xff000000;
       } else {
         fourCC = dxgi;
       }
@@ -6766,8 +7060,11 @@ const FbxDds = (function () {
     else if (fourCC === BC5U) done = decodeBlocks(view, at, width, height, ATI2, rgba);
     else if (fourCC) {
       if (fourCC !== DXT1 && fourCC !== DXT2 && fourCC !== DXT3 && fourCC !== DXT4
-        && fourCC !== DXT5 && fourCC !== ATI1 && fourCC !== ATI2) return null;
+        && fourCC !== DXT5 && fourCC !== ATI1 && fourCC !== ATI2
+        && fourCC !== BC7) return null;
       done = decodeBlocks(view, at, width, height, fourCC, rgba);
+    } else if (plain) {
+      done = decodePlain(view, at, width, height, format, rgba);
     } else if ((flags & (RGB | LUMINANCE)) && bits >= 8 && bits <= 32 && bits % 8 === 0) {
       done = decodePlain(view, at, width, height, format, rgba);
     } else {
@@ -8937,6 +9234,11 @@ const FbxGltf = (function () {
 
     return {
       glb,
+      // The same document taken apart, for the spelling that keeps the two
+      // in separate files. The binary is a window on the chunk already
+      // written rather than a second copy of it.
+      json,
+      binary: new Uint8Array(glb, 20 + jsonBytes.length + 8, offset),
       stats: {
         primitives,
         meshes: json.meshes.length,
@@ -8957,10 +9259,707 @@ const FbxGltf = (function () {
     };
   }
 
-  return { build, weld, rootMatrix, material };
+  /**
+   * A built document as a `.gltf` beside its `.bin`, which is the other
+   * spelling of the same file.
+   *
+   * The JSON is the same in both; all that changes is that the buffer names
+   * the file its bytes are in rather than being handed the chunk behind it.
+   * Written with indentation, since the point of this spelling is that a
+   * person can open it.
+   */
+  function separate(built, binName) {
+    const json = Object.assign({}, built.json, {
+      buffers: built.json.buffers.map((buffer, at) =>
+        (at === 0 ? Object.assign({}, buffer, { uri: binName }) : buffer)),
+    });
+    return { gltf: JSON.stringify(json, null, 2), bin: built.binary };
+  }
+
+  return { build, separate, weld, rootMatrix, material };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxGltf;
+
+// ---- fbxout.js ---------------------------------------------------------
+/* Write the scene out as a binary FBX.
+ *
+ * Everything else here reads FBX; this is the one thing that writes it. The
+ * record tree it builds is the same one every reader in this repository
+ * produces — a `Definitions` block, an `Objects` block of `Model`, `Geometry`,
+ * `Material`, `Texture` and `Video` records, and a `Connections` block wiring
+ * them together — so what comes out is read back by the same code that read
+ * what went in, and the two can be held against each other.
+ *
+ * Where the formats disagree, FBX is the more accommodating of the two:
+ *
+ *   - a mesh may wear several materials, so one geometry carries a material
+ *     index per polygon rather than being split into one primitive apiece;
+ *   - a node states a translation, a rotation in degrees and a scale rather
+ *     than a matrix, so each placement is decomposed — and a mirrored node
+ *     keeps its flip as a negative X scale, since no rotation produces a
+ *     negative determinant;
+ *   - the up axis and the units live in `GlobalSettings`, so the geometry is
+ *     written exactly as the file holds it and nothing is scaled on the way
+ *     out.
+ *
+ * The container is version 7400: a header, a stream of nested records, a null
+ * record, and a footer. Each record states where the next one begins, so the
+ * whole tree is measured before any of it is written. Array properties are
+ * deflated where that makes them smaller, which is what the format is for — a
+ * car's positions and normals are megabytes of float64 and compress to a
+ * fraction.
+ */
+'use strict';
+
+const FbxOut = (function () {
+  //: What every FBX file begins with: twenty characters, a NUL, then 0x1A
+  //: and a second NUL, and the version — twenty-seven bytes in all.
+  const MAGIC = 'Kaydara FBX Binary  \u0000';
+  const VERSION = 7400;
+  //: FBX spells a name as `Name\0\1Class` — a NUL and a SOH between the two, written
+  //: here as escapes so that nothing in the way can lose them.
+  const CLASS_SEP = '\u0000\u0001';
+  //: The 16 bytes a writer leaves after the last record, and the 16 it ends
+  //: with. Neither means anything to a reader; both are expected to be there.
+  const FOOTER_ID = [0xfa, 0xbc, 0xab, 0x09, 0xd0, 0xc8, 0xd4, 0x66,
+    0xb1, 0x76, 0xfb, 0x83, 0x1c, 0xf7, 0x26, 0x7e];
+  const FOOTER_MAGIC = [0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e,
+    0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b];
+
+  const node = (name, props = [], children = []) => ({ name, props, children });
+  const S = (value) => ({ code: 'S', value: String(value) });
+  const I = (value) => ({ code: 'I', value: value | 0 });
+  const L = (value) => ({ code: 'L', value });
+  const D = (value) => ({ code: 'D', value: Number(value) });
+  const R = (value) => ({ code: 'R', value });
+  const arrayOf = (code, values) => ({ code, array: values });
+  const p70 = (name, kind, ...values) =>
+    node('P', [S(name), S(kind), S(''), S('A'), ...values]);
+
+  // ------------------------------------------------------------- placement
+
+  /** Euler angles in degrees for R = Rz · Ry · Rx, which is FBX's XYZ order. */
+  function euler(m) {
+    const clamp = Math.max(-1, Math.min(1, -m[2][0]));
+    const y = Math.asin(clamp);
+    let x;
+    let z;
+    if (Math.abs(m[2][0]) < 0.99999) {
+      x = Math.atan2(m[2][1], m[2][2]);
+      z = Math.atan2(m[1][0], m[0][0]);
+    } else {                          // straight up or down: x and z are one turn
+      x = Math.atan2(-m[1][2], m[1][1]);
+      z = 0;
+    }
+    return [x, y, z].map((v) => (v * 180) / Math.PI);
+  }
+
+  /**
+   * A node's translation, rotation in degrees and scale, from its matrix.
+   *
+   * *matrix* is column-major acting on column vectors, which is what the
+   * viewer works in. A mirrored node has a negative determinant and no
+   * rotation can produce one, so the flip is kept where it belongs.
+   */
+  function placement(matrix) {
+    const m = matrix || [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const translation = [m[12], m[13], m[14]];
+    const basis = [0, 1, 2].map((row) => [0, 1, 2].map((col) => m[col * 4 + row]));
+    const scale = [0, 1, 2].map((col) =>
+      Math.hypot(basis[0][col], basis[1][col], basis[2][col]));
+    const determinant =
+      basis[0][0] * (basis[1][1] * basis[2][2] - basis[1][2] * basis[2][1])
+      - basis[0][1] * (basis[1][0] * basis[2][2] - basis[1][2] * basis[2][0])
+      + basis[0][2] * (basis[1][0] * basis[2][1] - basis[1][1] * basis[2][0]);
+    if (determinant < 0) scale[0] = -scale[0];
+    const unit = [0, 1, 2].map((row) => [0, 1, 2].map((col) =>
+      (scale[col] ? basis[row][col] / scale[col] : 0)));
+    return { translation, rotation: euler(unit), scale };
+  }
+
+  // ------------------------------------------------------------- the tree
+
+  /** Hands out the ids records address each other by. */
+  function builder() {
+    const objects = [];
+    const connections = [];
+    let next = 1000;
+    return {
+      objects,
+      connections,
+      uid: () => (next += 1),
+      connect(kind, source, target, extra) {
+        const props = [S(kind), L(source), L(target)];
+        if (extra !== undefined) props.push(S(extra));
+        connections.push(node('C', props));
+      },
+    };
+  }
+
+  /**
+   * One geometry, welded, with a material index per polygon.
+   *
+   * Welding is what FBX's `PolygonVertexIndex` is for: a cube arrives as
+   * thirty-six corners and is stored as twenty-four vertices addressed by
+   * thirty-six indices. Normals and coordinates are written per vertex, since
+   * the weld already split them wherever they differed.
+   *
+   * The last corner of each polygon is stored as its complement, which is how
+   * FBX says where one polygon ends and the next begins.
+   */
+  function geometry(entry, slots, build) {
+    const mesh = entry.mesh;
+    const wantUv = !!mesh.hasUv;
+    const triangles = [];
+    const perPolygon = [];
+    for (let t = 0; t < mesh.triangleCount; t++) {
+      triangles.push(t);
+      perPolygon.push(slots.get(t) || 0);
+    }
+    const welded = FbxGltf.weld(triangles, mesh, wantUv);
+    const polygons = new Int32Array(welded.index.length);
+    for (let at = 0; at < welded.index.length; at++) {
+      const value = welded.index[at];
+      polygons[at] = (at % 3 === 2) ? (-value - 1) : value;
+    }
+
+    const children = [
+      node('Version', [I(124)]),
+      node('Vertices', [arrayOf('d', welded.positions)]),
+      node('PolygonVertexIndex', [arrayOf('i', polygons)]),
+      node('LayerElementNormal', [I(0)], [
+        node('Version', [I(102)]),
+        node('Name', [S('')]),
+        node('MappingInformationType', [S('ByVertice')]),
+        node('ReferenceInformationType', [S('Direct')]),
+        node('Normals', [arrayOf('d', welded.normals)]),
+      ]),
+    ];
+    if (wantUv && welded.uvs) {
+      children.push(node('LayerElementUV', [I(0)], [
+        node('Version', [I(101)]),
+        node('Name', [S('map1')]),
+        node('MappingInformationType', [S('ByVertice')]),
+        node('ReferenceInformationType', [S('Direct')]),
+        node('UV', [arrayOf('d', welded.uvs)]),
+      ]));
+    }
+    // One index per polygon into the materials hung off this model, in the
+    // order they are connected — which is how a reader here resolves them.
+    children.push(node('LayerElementMaterial', [I(0)], [
+      node('Version', [I(101)]),
+      node('Name', [S('')]),
+      node('MappingInformationType', [S('ByPolygon')]),
+      node('ReferenceInformationType', [S('IndexToDirect')]),
+      node('Materials', [arrayOf('i', Int32Array.from(perPolygon))]),
+    ]));
+    const layer = [
+      node('Version', [I(100)]),
+      node('LayerElement', [], [
+        node('Type', [S('LayerElementNormal')]), node('TypedIndex', [I(0)])]),
+      node('LayerElement', [], [
+        node('Type', [S('LayerElementMaterial')]), node('TypedIndex', [I(0)])]),
+    ];
+    if (wantUv && welded.uvs) {
+      layer.push(node('LayerElement', [], [
+        node('Type', [S('LayerElementUV')]), node('TypedIndex', [I(0)])]));
+    }
+    children.push(node('Layer', [I(0)], layer));
+
+    const uid = build.uid();
+    const label = entry.name || 'mesh';
+    build.objects.push(node('Geometry',
+      [L(uid), S(`${label}${CLASS_SEP}Geometry`), S('Mesh')], children));
+    return { uid, vertices: welded.positions.length / 3, triangles: mesh.triangleCount };
+  }
+
+  /**
+   * One material, written as the phong record every FBX reader expects.
+   *
+   * The palette holds a colour already split between diffuse and reflectance
+   * by one metalness. Both halves are written, and the metalness beside them,
+   * so a reader that understands it can put the two back together and one
+   * that does not still sees a plausible surface.
+   */
+  function materialRecord(entry, build) {
+    const colour = entry.colour || [0.8, 0.8, 0.8];
+    const specular = entry.specular || [0.04, 0.04, 0.04];
+    const roughness = typeof entry.roughness === 'number' ? entry.roughness : 0.5;
+    const props = [
+      p70('DiffuseColor', 'Color', ...colour.map(D)),
+      p70('SpecularColor', 'Color', ...specular.map(D)),
+      p70('Metallic', 'Number', D(typeof entry.metallic === 'number' ? entry.metallic : 0)),
+      // FBX states a Phong exponent, not a roughness. The two are the usual
+      // reciprocal: a mirror is a large exponent and a matte surface a small
+      // one, and 2/r² − 2 is the mapping every importer here reads back.
+      p70('ShininessExponent', 'Number',
+        D(Math.max(2 / Math.max(roughness * roughness, 1e-4) - 2, 0))),
+      p70('Opacity', 'Number', D(typeof entry.opacity === 'number' ? entry.opacity : 1)),
+    ];
+    const emissive = entry.emissive || [0, 0, 0];
+    if (emissive.some((c) => c > 0)) {
+      props.push(p70('EmissiveColor', 'Color', ...emissive.map(D)));
+      props.push(p70('EmissiveFactor', 'Number', D(1)));
+    }
+    if (entry.alphaMode) props.push(p70('AlphaMode', 'KString', S(entry.alphaMode)));
+    if (typeof entry.alphaCutoff === 'number') {
+      props.push(p70('AlphaCutoff', 'Number', D(entry.alphaCutoff)));
+    }
+    const uid = build.uid();
+    build.objects.push(node('Material',
+      [L(uid), S(`${entry.name || 'material'}${CLASS_SEP}Material`), S('')], [
+        node('Version', [I(102)]),
+        node('ShadingModel', [S('phong')]),
+        node('Properties70', [], props),
+      ]));
+    return uid;
+  }
+
+  /**
+   * One Texture and one Video per picture, shared by everything wearing it.
+   *
+   * The bytes go in the Video's `Content`, which is where an embedded texture
+   * lives in an FBX and is how a car's paint travels with it in one file.
+   */
+  /**
+   * One Texture and one Video per picture, shared by everything wearing it.
+   *
+   * The bytes go in the Video's `Content`, which is where an embedded texture
+   * lives in an FBX and is how a car's paint travels with it in one file.
+   * Shared, and not copied per material: a Renault 5's paint, its detail map
+   * and its normal map are worn by dozens each, and written once per wearer
+   * the file comes out three times the size of the car it was made from.
+   *
+   * Two pictures are the same picture when they are the same bytes, which they
+   * are when the same file was decoded for both. The Texture over it is shared
+   * only when the wrapping matches too, since that is what a Texture states.
+   */
+  function textures(build) {
+    const videos = new Map();
+    const wrapped = new Map();
+    return function record(name, image) {
+      if (!image || !image.bytes || !image.bytes.length) return -1;
+      const kind = (image.mimeType || 'image/png').split('/').pop().replace('jpeg', 'jpg');
+      const file = `${name}.${kind}`;
+      let videoUid = videos.get(image.bytes);
+      if (videoUid === undefined) {
+        videoUid = build.uid();
+        build.objects.push(node('Video',
+          [L(videoUid), S(`${name}${CLASS_SEP}Video`), S('Clip')], [
+            node('Type', [S('Clip')]),
+            node('FileName', [S(file)]),
+            node('RelativeFilename', [S(file)]),
+            node('Content', [R(image.bytes)]),
+          ]));
+        videos.set(image.bytes, videoUid);
+      }
+      const key = `${videoUid}|${image.wrapS}|${image.wrapT}`;
+      if (wrapped.has(key)) return wrapped.get(key);
+      const textureUid = build.uid();
+      build.objects.push(node('Texture',
+        [L(textureUid), S(`${name}${CLASS_SEP}Texture`), S('')], [
+          node('Type', [S('TextureVideoClip')]),
+          node('Version', [I(202)]),
+          node('FileName', [S(file)]),
+          node('RelativeFilename', [S(file)]),
+          node('Properties70', [], [
+            // 0 repeats and 1 clamps, which is the other way round from how
+            // glTF numbers them; 33071 is glTF's CLAMP_TO_EDGE.
+            p70('WrapModeU', 'enum', I(image.wrapS === 33071 ? 1 : 0)),
+            p70('WrapModeV', 'enum', I(image.wrapT === 33071 ? 1 : 0)),
+          ]),
+        ]));
+      build.connect('OO', videoUid, textureUid);
+      wrapped.set(key, textureUid);
+      return textureUid;
+    };
+  }
+
+  //: Which FBX property each of the maps carried across drives. A slot with no
+  //: FBX spelling keeps the name it came with rather than being invented one.
+  const SLOT_PROPERTIES = {
+    baseColor: 'DiffuseColor',
+    normal: 'NormalMap',
+    emissive: 'EmissiveColor',
+    occlusion: 'AmbientColor',
+    metallicRoughness: 'SpecularFactor',
+  };
+
+  /**
+   * Build the record tree for a scene.
+   *
+   * *scene* is what the glTF export is handed, so the two write the same model
+   * from the same numbers and can be compared.
+   */
+  function build(scene) {
+    const meshes = scene.meshes || [];
+    const roots = scene.nodes || [];
+    const images = scene.images instanceof Map ? scene.images : new Map();
+    const extraTextures = scene.textures instanceof Map ? scene.textures : new Map();
+    const drawn = meshes.reduce((sum, m) => sum + (m.mesh ? m.mesh.triangleCount : 0), 0);
+    if (!drawn) throw new Error('there is no geometry to export');
+
+    const make = builder();
+    const rootUid = 0;
+
+    // ---- materials, once each however many meshes wear them
+    const materialUid = new Map();
+    const pictureFor = textures(make);
+    const worn = new Set();
+    const materialFor = (entry) => {
+      if (materialUid.has(entry.name)) return materialUid.get(entry.name);
+      const uid = materialRecord(entry, make);
+      materialUid.set(entry.name, uid);
+      // And the maps it wears, hung off it by the property each one drives.
+      const wearing = [];
+      const base = images.get(entry.name);
+      if (base) wearing.push({ slot: 'baseColor', image: base });
+      for (const map of extraTextures.get(entry.name) || []) {
+        wearing.push({ slot: map.slot, image: map });
+      }
+      const seen = new Set();
+      for (const map of wearing) {
+        const property = SLOT_PROPERTIES[map.slot] || map.slot;
+        if (seen.has(property)) continue;
+        seen.add(property);
+        const label = map.slot === 'baseColor' ? entry.name : `${entry.name} ${map.slot}`;
+        const picture = pictureFor(label, map.image !== undefined ? map.image : map);
+        if (picture < 0) continue;
+        make.connect('OP', picture, uid, property);
+        worn.add(picture);
+      }
+      return uid;
+    };
+
+    /* ---- one model per node, and one geometry under each that has a mesh */
+    let vertices = 0;
+    let placed = 0;
+    let stored = 0;
+    let geometries = 0;
+    const nodeNames = [];
+
+    /* A mesh used by several nodes is written once and connected to each,
+     * which FBX allows and which is how the file this came from held it: the
+     * three-part sample scene is one cube under three transforms. The
+     * materials go on in the same order every time, since the order is what
+     * the per-polygon indices are numbered against. */
+    const shared = new Map();
+    const geometryFor = (which, part) => {
+      if (shared.has(which)) return shared.get(which);
+      const palette = part.palette || [];
+      const groupOf = (slot) => {
+        const found = palette[slot];
+        return found && Number.isInteger(found.group) ? found.group : slot;
+      };
+      const order = [];
+      const seen = new Map();
+      const slots = new Map();
+      for (let t = 0; t < part.mesh.triangleCount; t++) {
+        const slot = Math.round(part.mesh.materials[t * 3]) || 0;
+        const group = palette.length ? groupOf(slot) : 0;
+        if (!seen.has(group)) {
+          seen.set(group, order.length);
+          order.push(palette[slot] || { name: `material${group}` });
+        }
+        slots.set(t, seen.get(group));
+      }
+      const wrote = geometry(part, slots, make);
+      vertices += wrote.vertices;
+      stored += wrote.triangles;
+      geometries += 1;
+      const held = { uid: wrote.uid, triangles: wrote.triangles,
+        materials: order.map(materialFor) };
+      shared.set(which, held);
+      return held;
+    };
+
+    const emit = (entry, parentUid) => {
+      const uid = make.uid();
+      const named = entry.mesh !== null && entry.mesh !== undefined
+        ? meshes[entry.mesh] : null;
+      const part = named && named.mesh && named.mesh.triangleCount ? named : null;
+      const name = entry.name || `node${uid}`;
+      const { translation, rotation, scale } = placement(entry.matrix);
+      const props = [];
+      if (translation.some((v) => v !== 0)) {
+        props.push(p70('Lcl Translation', 'Lcl Translation', ...translation.map(D)));
+      }
+      if (rotation.some((v) => Math.abs(v) > 1e-9)) {
+        props.push(p70('Lcl Rotation', 'Lcl Rotation', ...rotation.map(D)));
+      }
+      if (scale.some((v) => v !== 1)) {
+        props.push(p70('Lcl Scaling', 'Lcl Scaling', ...scale.map(D)));
+      }
+      make.objects.push(node('Model',
+        [L(uid), S(`${name}${CLASS_SEP}Model`), S(part ? 'Mesh' : 'Null')], [
+          node('Version', [I(232)]),
+          node('Properties70', [], props),
+        ]));
+      make.connect('OO', uid, parentUid);
+      if (entry.name) nodeNames.push(entry.name);
+
+      if (part) {
+        const held = geometryFor(entry.mesh, part);
+        for (const material of held.materials) make.connect('OO', material, uid);
+        make.connect('OO', held.uid, uid);
+        placed += held.triangles;
+      }
+      for (const child of entry.children || []) emit(child, uid);
+    };
+
+    for (const entry of roots) emit(entry, rootUid);
+
+    // ---- and the file around them
+    const settings = scene.settings || {};
+    const upAxis = (scene.upAxis || 'y').toLowerCase() === 'z' ? 2 : 1;
+    const tree = node('', [], []);
+    tree.children.push(node('FBXHeaderExtension', [], [
+      node('FBXHeaderVersion', [I(1003)]),
+      node('FBXVersion', [I(VERSION)]),
+      node('Creator', [S('fbxtool')]),
+    ]));
+    tree.children.push(node('Creator', [S('fbxtool')]));
+    tree.children.push(node('GlobalSettings', [], [
+      node('Version', [I(1000)]),
+      node('Properties70', [], [
+        p70('UpAxis', 'int', I(upAxis)),
+        p70('UpAxisSign', 'int', I(1)),
+        p70('FrontAxis', 'int', I(upAxis === 2 ? 1 : 2)),
+        p70('FrontAxisSign', 'int', I(1)),
+        p70('CoordAxis', 'int', I(0)),
+        p70('CoordAxisSign', 'int', I(1)),
+        // Centimetres per unit, which is what FBX counts and what the file
+        // this came from stated. Nothing is scaled on the way out.
+        p70('UnitScaleFactor', 'double', D(
+          typeof settings.unitScale === 'number' ? settings.unitScale : 1)),
+      ]),
+    ]));
+
+    const counts = new Map();
+    for (const object of make.objects) {
+      counts.set(object.name, (counts.get(object.name) || 0) + 1);
+    }
+    tree.children.push(node('Definitions', [], [
+      node('Version', [I(100)]),
+      node('Count', [I(make.objects.length)]),
+      ...[...counts].map(([name, count]) =>
+        node('ObjectType', [S(name)], [node('Count', [I(count)])])),
+    ]));
+    tree.children.push(node('Objects', [], make.objects));
+    tree.children.push(node('Connections', [], make.connections));
+
+    const materialNames = [...materialUid.keys()];
+    return {
+      tree,
+      stats: {
+        meshes: geometries,
+        nodes: nodeNames.length,
+        primitives: geometries,
+        materials: materialNames.length,
+        images: worn.size,
+        textures: worn.size,
+        triangles: placed,
+        stored,
+        vertices,
+        materialNames,
+        nodeNames,
+      },
+    };
+  }
+
+  // ------------------------------------------------------- the binary file
+
+  const ARRAY_WIDTH = { f: 4, d: 8, l: 8, i: 4, b: 1 };
+
+  /** Everything a compression stream hands back, joined. */
+  async function drain(stream) {
+    const reader = stream.getReader();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  }
+
+  /** An array property's values as the bytes that stand for them. */
+  function rawArray(property) {
+    const width = ARRAY_WIDTH[property.code];
+    const values = property.array;
+    const out = new Uint8Array(values.length * width);
+    const view = new DataView(out.buffer);
+    for (let at = 0; at < values.length; at++) {
+      const to = at * width;
+      if (property.code === 'd') view.setFloat64(to, values[at], true);
+      else if (property.code === 'f') view.setFloat32(to, values[at], true);
+      else if (property.code === 'i') view.setInt32(to, values[at], true);
+      else if (property.code === 'l') view.setBigInt64(to, BigInt(values[at]), true);
+      else out[to] = values[at] ? 1 : 0;
+    }
+    return out;
+  }
+
+  /**
+   * Settle what every array property will occupy, deflating where that helps.
+   *
+   * FBX allows either, one array at a time, and says which it used. A car's
+   * positions and normals are megabytes of float64 that compress to a
+   * fraction; a nine-value array does not, and is left alone rather than
+   * written larger than it was.
+   */
+  async function measure(record, out) {
+    for (const property of record.props) {
+      if (!property.array) continue;
+      const raw = rawArray(property);
+      let payload = raw;
+      let encoding = 0;
+      if (raw.length >= 64 && typeof CompressionStream === 'function') {
+        const packed = await drain(new Blob([raw]).stream()
+          .pipeThrough(new CompressionStream('deflate')));
+        if (packed.length < raw.length) { payload = packed; encoding = 1; }
+      }
+      out.set(property, { payload, encoding, count: property.array.length });
+    }
+    for (const child of record.children) await measure(child, out);
+  }
+
+  const TEXT = new TextEncoder();
+
+  function propertySize(property, packed) {
+    switch (property.code) {
+      case 'Y': return 3;
+      case 'C': return 2;
+      case 'I': case 'F': return 5;
+      case 'D': case 'L': return 9;
+      case 'S': case 'R': return 5 + (property.code === 'S'
+        ? TEXT.encode(property.value).length : property.value.length);
+      default: return 13 + packed.get(property).payload.length;
+    }
+  }
+
+  /** How long a record is, including everything nested inside it. */
+  function recordSize(record, packed, sizes) {
+    let props = 0;
+    for (const property of record.props) props += propertySize(property, packed);
+    let children = 0;
+    for (const child of record.children) children += recordSize(child, packed, sizes);
+    // Every record with children is followed by a null one saying they end.
+    const total = 13 + TEXT.encode(record.name).length + props
+      + children + (record.children.length ? 13 : 0);
+    sizes.set(record, { total, props });
+    return total;
+  }
+
+  /** A writer over a fixed-size buffer, which is what the measuring is for. */
+  function cursor(bytes) {
+    const view = new DataView(bytes.buffer);
+    let at = 0;
+    return {
+      get at() { return at; },
+      u8(v) { bytes[at] = v; at += 1; },
+      u32(v) { view.setUint32(at, v, true); at += 4; },
+      i32(v) { view.setInt32(at, v, true); at += 4; },
+      i16(v) { view.setInt16(at, v, true); at += 2; },
+      f32(v) { view.setFloat32(at, v, true); at += 4; },
+      f64(v) { view.setFloat64(at, v, true); at += 8; },
+      i64(v) { view.setBigInt64(at, BigInt(v), true); at += 8; },
+      raw(v) { bytes.set(v, at); at += v.length; },
+      skip(n) { at += n; },
+    };
+  }
+
+  function writeProperty(out, property, packed) {
+    out.u8(property.code.charCodeAt(0));
+    switch (property.code) {
+      case 'Y': out.i16(property.value); return;
+      case 'C': out.u8(property.value ? 1 : 0); return;
+      case 'I': out.i32(property.value); return;
+      case 'F': out.f32(property.value); return;
+      case 'D': out.f64(property.value); return;
+      case 'L': out.i64(property.value); return;
+      case 'S': {
+        const text = TEXT.encode(property.value);
+        out.u32(text.length);
+        out.raw(text);
+        return;
+      }
+      case 'R':
+        out.u32(property.value.length);
+        out.raw(property.value);
+        return;
+      default: {
+        const held = packed.get(property);
+        out.u32(held.count);
+        out.u32(held.encoding);
+        out.u32(held.payload.length);
+        out.raw(held.payload);
+      }
+    }
+  }
+
+  function writeRecord(out, record, packed, sizes) {
+    const size = sizes.get(record);
+    const name = TEXT.encode(record.name);
+    out.u32(out.at + size.total);            // where the next record begins
+    out.u32(record.props.length);
+    out.u32(size.props);
+    out.u8(name.length);
+    out.raw(name);
+    for (const property of record.props) writeProperty(out, property, packed);
+    for (const child of record.children) writeRecord(out, child, packed, sizes);
+    if (record.children.length) out.skip(13);
+  }
+
+  /**
+   * The whole file: a header, the records, a null record and a footer.
+   *
+   * Nothing in the footer means anything to a reader — it is a fixed sixteen
+   * bytes, a pad to the next sixteen, the version again and a second fixed
+   * sixteen — but a file without one is a file some importers refuse, so it is
+   * written the way every other writer writes it.
+   */
+  async function serialise(tree) {
+    const packed = new Map();
+    await measure(tree, packed);
+    const sizes = new Map();
+    let body = 0;
+    for (const record of tree.children) body += recordSize(record, packed, sizes);
+
+    const head = MAGIC.length + 2 + 4;
+    const afterRecords = head + body + 13;   // and the null record that ends them
+    const beforePad = afterRecords + 16;
+    let pad = (16 - (beforePad % 16)) % 16;
+    if (pad === 0) pad = 16;
+    const total = beforePad + pad + 4 + 4 + 120 + 16;
+
+    const bytes = new Uint8Array(total);
+    const out = cursor(bytes);
+    out.raw(TEXT.encode(MAGIC));
+    out.u8(0x1a);
+    out.u8(0x00);
+    out.u32(VERSION);
+    for (const record of tree.children) writeRecord(out, record, packed, sizes);
+    out.skip(13);                            // the null record
+    out.raw(new Uint8Array(FOOTER_ID));
+    out.skip(pad);
+    out.u32(0);
+    out.u32(VERSION);
+    out.skip(120);
+    out.raw(new Uint8Array(FOOTER_MAGIC));
+    return bytes;
+  }
+
+  return { build, serialise, placement, euler, VERSION };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxOut;
 
 // ---- edits.js ----------------------------------------------------------
 /* Taking a part out of a scene, and taking a part apart.
@@ -11516,6 +12515,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     exportGltf: $('export-gltf'),
+    exportFormat: $('export-format'),
     tabs: document.querySelectorAll('.tab'),
     tree: $('tree'),
     stage: $('stage'),
@@ -14151,11 +15151,24 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     return ` · dropped ${parts.join(' and ')}${renamed}${maps}`;
   }
 
+  //: What each spelling is called, for the status line and for the failure.
+  const EXPORT_NAMES = { glb: 'glTF', gltf: 'glTF', fbx: 'FBX' };
+
+  /**
+   * Write what is on screen out, in whichever spelling was asked for.
+   *
+   * All three are the same scene: the same meshes, the same node tree, the
+   * same materials and the same pictures, gathered once and handed to whichever
+   * writer. A `.glb` is one file; a `.gltf` is that file's JSON beside its
+   * buffer, which is two downloads and the browser asking whether you meant
+   * it; an `.fbx` is what the rest of this tool reads, written back out.
+   */
   async function exportGltf() {
     if (!currentMesh) return;
+    const format = (dom.exportFormat && dom.exportFormat.value) || 'glb';
     try {
       dom.exportGltf.disabled = true;
-      setStatus('Writing glTF…');
+      setStatus(`Writing ${EXPORT_NAMES[format] || 'the model'}…`);
       await nextFrame();
       const { images, textures } = await textureBytes(currentPalette);
       const settings = (currentAnalysis && currentAnalysis.globalSettings) || {};
@@ -14171,7 +15184,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
           nodes: [{ name: stem, matrix: FbxTransform.identity(), mesh: 0, children: [] }],
         }
         : exportScene();
-      const { glb, stats } = FbxGltf.build({
+      const common = {
         name: stem,
         meshes: scene.meshes,
         nodes: scene.nodes,
@@ -14179,15 +15192,46 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         textures,
         upAxis: dom.upSelect.value,
         flips: flips.slice(),
-        unitScale: centimetres / 100,
-      });
-      download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
+      };
+      let stats;
+      if (format === 'fbx') {
+        /* FBX is the format the axis and the units are *stated* in, so they go
+         * into `GlobalSettings` where they came from and the geometry is
+         * written exactly as it stands. glTF has no such field, which is why
+         * the other two put the same difference on the root node's matrix. */
+        const built = FbxOut.build(Object.assign({}, common, {
+          settings: { unitScale: centimetres },
+        }));
+        const bytes = await FbxOut.serialise(built.tree);
+        download(new Blob([bytes], { type: 'application/octet-stream' }), `${stem}.fbx`);
+        stats = built.stats;
+        stats.bytes = bytes.length;
+        stats.files = [`${stem}.fbx`];
+      } else {
+        const built = FbxGltf.build(Object.assign({}, common, {
+          unitScale: centimetres / 100,
+        }));
+        stats = built.stats;
+        if (format === 'gltf') {
+          const { gltf, bin } = FbxGltf.separate(built, `${stem}.bin`);
+          const text = new TextEncoder().encode(gltf);
+          download(new Blob([bin], { type: 'application/octet-stream' }), `${stem}.bin`);
+          download(new Blob([text], { type: 'model/gltf+json' }), `${stem}.gltf`);
+          stats.bytes = text.length + bin.length;
+          stats.files = [`${stem}.gltf`, `${stem}.bin`];
+        } else {
+          download(new Blob([built.glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
+          stats.files = [`${stem}.glb`];
+        }
+      }
       const missingMaps = unwrittenMaps(images, textures);
+      stats.format = format;
       stats.dropped = currentGeometry ? null : reportDropped(stats, missingMaps);
       lastExport = stats;
       const instanced = stats.triangles > stats.stored
         ? `, ${stats.stored.toLocaleString()} stored` : '';
       setStatus(`Exported ${stats.triangles.toLocaleString()} triangles${instanced} as `
+        + `${stats.files.join(' + ')} — `
         + `${stats.meshes} mesh(es) in ${stats.nodes} node(s), `
         + `${stats.vertices.toLocaleString()} vertices, `
         + `${(stats.bytes / 1048576).toFixed(1)} MiB`
@@ -14196,7 +15240,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         + describeDropped(stats.dropped), 'ok');
     } catch (error) {
       console.error(error);
-      setStatus(`Could not write the glTF: ${error.message}`, 'error');
+      setStatus(`Could not write the ${EXPORT_NAMES[format] || 'model'}: `
+        + `${error.message}`, 'error');
     } finally {
       dom.exportGltf.disabled = !currentMesh;
     }

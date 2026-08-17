@@ -69,7 +69,16 @@
         ground</label>
       <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
       <button id="reset-view" type="button">Reset view</button>
-      <button id="export-gltf" type="button" disabled>Export glTF</button>
+      <!-- Which spelling the export is written in. A .glb is one file and is
+           what most things want; a .gltf beside a .bin is the same document
+           with its JSON out where it can be read; an .fbx is what the rest of
+           this tool reads, written back out. -->
+      <select id="export-format" title="What to export as">
+        <option value="glb">.glb</option>
+        <option value="gltf">.gltf + .bin</option>
+        <option value="fbx">.fbx</option>
+      </select>
+      <button id="export-gltf" type="button" disabled>Export</button>
       <button id="restore-all" type="button"
         title="Put every deleted part back and undo every split" hidden disabled>Restore all</button>
     </div>

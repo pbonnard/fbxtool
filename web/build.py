@@ -44,6 +44,7 @@ SCRIPTS = [
     "analyze.js",
     "palette.js",
     "gltf.js",
+    "fbxout.js",
     "edits.js",
     "report.js",
     "viewer.js",

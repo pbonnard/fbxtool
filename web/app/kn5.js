@@ -102,6 +102,38 @@ const FbxKn5 = (function () {
       / (METAL_FLOOR - DIELECTRIC_CEILING));
   }
 
+  /* Property defaults for a material that leaves one out, as the shaders do,
+   * and no ceiling on the Fresnel term where none is stated. */
+  const DEFAULT_FRESNEL_C = 0.05;
+  const DEFAULT_FRESNEL_MAX = 1;
+
+  /**
+   * What a surface actually reflects facing you.
+   *
+   * `fresnelC` is the Schlick base and `fresnelMaxLevel` is a ceiling on the
+   * whole term — not the value at a grazing angle, which is what the pair
+   * reads like until you see the numbers. A BMW Z3M's `lightclear` states 1.0
+   * and 0.03: read as a base it is a perfect mirror, and read as a ceiling it
+   * is the three per cent a clear lens reflects. An Alfa TZ2's `EXT_TYRE`
+   * settles it — it states 5.0, which is not a reflectance at all and can only
+   * be a number something clamps, beside a ceiling of 0.02.
+   *
+   * The two always travel together: of 1853 materials across the cars to hand,
+   * 1075 state both and 778 state neither, and not one states only one of
+   * them. So reading the first without the second is reading half of a
+   * sentence, and it is the half that turns a tail lamp and a tyre into
+   * mirrors. The ceiling is below the base in 95 of them.
+   *
+   * What is not modelled is the ceiling at a grazing angle: the viewer's own
+   * Schlick rises towards 1 at the edge where the game would hold it at
+   * `fresnelMaxLevel`.
+   */
+  function reflectance(material) {
+    const facing = scalarOf(material, 'fresnelC', DEFAULT_FRESNEL_C);
+    const ceiling = scalarOf(material, 'fresnelMaxLevel', DEFAULT_FRESNEL_MAX);
+    return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
+  }
+
   /* What a plainly lit surface takes from the light: `ksAmbient` and
    * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
    * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
@@ -548,10 +580,10 @@ const FbxKn5 = (function () {
     const materialUids = materials.map((material) => {
       const id = uid();
       /* What comes back facing you. The game's shaders spell a Schlick Fresnel
-       * out in full: `fresnelC` at normal incidence rising to `fresnelMaxLevel`
-       * at grazing, over `fresnelEXP`. The first of those is a reflectance, and
-       * it is written as one. */
-      const facing = Math.min(Math.max(scalarOf(material, 'fresnelC', 0.05), 0), 1);
+       * out in full — `fresnelC` as the base, rising over `fresnelEXP` and held
+       * under `fresnelMaxLevel` — and the reflectance is what the two of those
+       * come to, not what the first of them says alone. */
+      const facing = reflectance(material);
       const alphaMode = material.alphaTested ? 'MASK'
         : (BLEND_MODES[material.blend] || 'OPAQUE');
       const metal = metalness(facing, alphaMode === 'BLEND');

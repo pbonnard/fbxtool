@@ -617,13 +617,29 @@ without the weights the rims, the lamps and the carbon mirror caps all draw as
 bright as the body. 94 of that car's 97 materials are dimmed, and the report
 says how many.
 
-**Metals.** A kn5 states no metalness. The game shades a car with a Blinn-Phong
-highlight and a Schlick Fresnel over it — `fresnelC` facing you rising to
-`fresnelMaxLevel` at grazing, over `fresnelEXP` — and chrome is simply a
-material whose `fresnelC` an artist set high.
+**How much a surface reflects.** The game shades a car with a Blinn-Phong
+highlight and a Schlick Fresnel over it, spelt out in full: `fresnelC` as the
+base, rising over `fresnelEXP`, and the whole term held under
+`fresnelMaxLevel`. That last one is a **ceiling**, not the value at a grazing
+angle, which is what the pair reads like until you see the numbers — and
+reading the base without it is reading half of a sentence.
 
-But that number is a reflectance at normal incidence, and it is the one place
-the two kinds of surface cannot be confused: **no dielectric reflects more than
+A BMW Z3M's `lightclear` states 1.0 and 0.03. Read as a base alone it is a
+perfect mirror, and the tail lamp draws as an opaque white blade instead of the
+see-through red lens it is. An Alfa TZ2's `EXT_TYRE` settles which way round it
+goes: it states 5.0, which is not a reflectance at all and can only be a number
+something clamps, beside a ceiling of 0.02. The two always travel together — of
+1853 materials across the cars to hand, 1075 state both and 778 state neither,
+and not one states only one of them — and the ceiling is below the base in 95.
+
+What is not modelled is the ceiling at a grazing angle: the viewer's own
+Schlick rises towards 1 at the edge where the game holds it at
+`fresnelMaxLevel`. That is a brighter rim than the game draws, and nothing like
+the difference between a lens and a mirror.
+
+**Metals.** A kn5 states no metalness, and chrome is simply a material whose
+reflectance an artist set high. That reflectance at normal incidence is the one
+place the two kinds of surface cannot be confused: **no dielectric reflects more than
 about 17% facing you** — diamond, at an index of refraction of 2.42 — **and no
 metal less than about half**, iron and chromium being the dullest of them.
 Glass and plastic sit near 4%, and an artist writing 15% for a windscreen is
@@ -637,7 +653,7 @@ reflection is a windscreen.
 
 What comes out is what you would pick by hand. Across fifteen cars it finds the
 mirrors, the chrome, the alloy and the exhaust tips and nothing else: a
-Cullinan's `mirror` at 1.00 and its `int_chrome` and `light_chrome` at 0.39; a
+Cullinan's `mirror` at 1.00 and its `int_chrome` and `light_chrome` at 0.24; a
 Puma's `Ext_chrome` at 0.70 and `Ext_exhaust` at 0.24. Where an artist stated
 nothing it reads zero rather than guessing from a material's name — an Alfa
 Brera's `chrome` and its `body` are the same numbers to three decimal places,
@@ -1435,11 +1451,21 @@ returns linear values, material colours are linear as written, shading happens
 in linear light, and the result is tone-mapped through a filmic curve before
 being encoded back to sRGB. Highlights roll off instead of clipping.
 
-### Exporting glTF
+### Exporting
 
-**Export glTF** writes what is on screen as a `.glb`: the scene as it stands,
-with whatever materials you have assigned and whatever parts you have deleted
-or split, in one self-contained binary file.
+**Export** writes what is on screen: the scene as it stands, with whatever
+materials you have assigned and whatever parts you have deleted or split. Three
+spellings of the same model, chosen beside the button:
+
+| | |
+| --- | --- |
+| `.glb` | one self-contained binary file, which is what most things want |
+| `.gltf` + `.bin` | the same document with its JSON out where a person can read it, and the geometry in the file beside it. Two downloads, so a browser will ask whether you meant it |
+| `.fbx` | binary FBX 7.4, which is what the rest of this tool reads, written back out |
+
+Everything below is true of all three unless it says otherwise: they are handed
+the same scene, the same materials and the same pictures, and differ only in
+what the format can hold.
 
 The scene keeps its shape. Each mesh is written once in its own local space and
 placed by a node, so a hierarchy stays a hierarchy — a part keeps its name and
@@ -1536,11 +1562,45 @@ What still does not survive: animation, skins and morph targets; cameras and
 lights; tangents, vertex colours and second UV sets. The geometric offset a
 mesh carries is baked into its vertices, since glTF has no such thing.
 
-The export is checked against the **Khronos glTF-Validator**
+**Writing FBX.** Everything else here reads FBX; the export is the one thing
+that writes it, and the record tree it builds is the same one every reader in
+this repository produces — a `Definitions` block, an `Objects` block of `Model`,
+`Geometry`, `Material`, `Texture` and `Video` records, and a `Connections`
+block wiring them together. So what comes out is read back by the code that
+read what went in, and the two are held against each other in the tests: the
+page opens each export again, and the Python side reads the FBX with the reader
+that owes it nothing.
+
+Where the two formats part company, FBX is the more accommodating:
+
+- a mesh there may wear several materials and carry an index per polygon saying
+  which, so a part keeps its name and stays one part. A glTF primitive has
+  exactly one material, so the Mercedes sample's single mesh of seventeen
+  materials comes back from a `.glb` as seventeen parts and from an `.fbx` as
+  one;
+- the up axis and the units are stated in `GlobalSettings`, so the geometry
+  goes out exactly as the file holds it. glTF has no such field, which is why
+  the other two put that same difference on the root node's matrix;
+- a node states a translation, a rotation in degrees and a scale rather than a
+  matrix, so each placement is decomposed — and a mirrored node keeps its flip
+  as a negative X scale, since no rotation produces a negative determinant.
+
+The container is version 7400, the most widely supported: a header, a stream of
+records that each say where the next one begins, a null record and a footer.
+Because every record states its own end, the whole tree is measured before any
+of it is written. Array properties are deflated where that makes them smaller,
+which is what the format is for — a Renault 5's positions and normals are
+megabytes of float64. Textures go inside the file, in each `Video` record's
+`Content`, and are shared by everything wearing them: written once per wearer
+instead, that car comes out 35 MiB against the 19 it does.
+
+The exports are checked against the **Khronos glTF-Validator**
 (`npm i -g gltf-validator`) on every sample, alongside checks that the model
 that comes out is the one that went in: every triangle placed by its node
 against the same bounds, one node per part, a mesh used twice stored once, and
-on small meshes every triangle compared corner by corner.
+on small meshes every triangle compared corner by corner. All three spellings
+are then opened again in the page and held against what went in — a format
+nobody can read back is not an export.
 
 ### Draco compression
 
@@ -1619,16 +1679,42 @@ meant for a GPU rather than a picture, no browser will decode one, and Assetto
 Corsa keeps almost every texture in one — 111 of the 135 inside a single
 Mercedes. `web/app/dds.js` decodes the top mip level to RGBA: BC1, BC2 and BC3,
 BC4 and BC5 (whose missing third channel is rebuilt, since a normal is a unit
-vector), and uncompressed surfaces read by their **channel masks** rather than
-by a table of layouts — a mask says which bits of a pixel are which channel, so
-B8G8R8A8 and R5G6B5 need no entry apiece.
+vector), BC7, and uncompressed surfaces read by their **channel masks** rather
+than by a table of layouts — a mask says which bits of a pixel are which
+channel, so B8G8R8A8 and R5G6B5 need no entry apiece. BC6H and floating-point
+surfaces are declined rather than guessed at.
 
 BC3's alpha is where a decoder goes wrong quietly: sixteen three-bit selectors
 over six bytes, which read as one 48-bit number come out as zero. Glass and a
 spinning wheel are both fully transparent textures in a car, so alpha read as
 zero is indistinguishable from alpha not read at all — and the tests hold the
-interpolated ramp against the values the block was written with. BC6H, BC7 and
-floating-point surfaces are declined rather than guessed at.
+interpolated ramp against the values the block was written with.
+
+**BC7** is the last of them and the only one with modes: eight, each cutting a
+4x4 tile up differently and spending its 128 bits differently. It is what a
+modern car is saved in — sixteen textures across five of the cars to hand, all
+of them bound to a material, a BMW Z3M's `dirty-glass` and an Alfa TZ2's brake
+disc among them. Two of its tables cannot be reasoned to and have to be got
+right: which subset each of sixteen pixels belongs to under each of 64
+partitions, and which pixel anchors each subset, an anchor storing one bit
+fewer with its high bit implicitly zero.
+
+Nothing about getting them wrong announces itself. Written from memory the
+partition table here was right for its first eighteen entries and wrong for the
+other forty-six, which is a picture that looks like a picture with some of its
+tiles in the wrong place. What settled it was a second decoder: every BC7
+texture in the cars to hand is decoded by this one and by Pillow, which
+implements the same specification and shares no code, and all 22 come out
+identical byte for byte. The fixtures in the tests are held against it the same
+way.
+
+**A DX10 header states its layout as a number rather than as masks**, which is
+its own trap: a surface written that way sets `DDPF_FOURCC` and nothing else,
+so a reader that decides what to do from the flags refuses every one of them
+however well it knows the layout underneath. B8G8R8X8 is the one that matters
+most, because its fourth byte is padding and not an alpha — an Alfa A110's
+twenty-two are all zero there, so read as an alpha the car loses twenty-two of
+its sixty-three textures to full transparency.
 
 **Colour and alpha are kept apart all the way to the GPU**, which is less
 obvious than it sounds. Multiplied together — which is what a browser does by
@@ -1955,8 +2041,8 @@ raises (`ParseError` / `UnsupportedFormatError`, both subclasses of
 
 ## Limitations
 
-- Nothing here writes FBX, OBJ or `.blend`. The web viewer exports glTF, and
-  that is the only file it produces.
+- Nothing here writes OBJ or `.blend`, and nothing on the Python side writes
+  anything. The web viewer exports glTF and FBX.
 - Mesh detail is read from the record structure (counts, layer elements). The
   Python side evaluates no geometry — no triangulation, transforms or bounding
   boxes; that happens in the web viewer.

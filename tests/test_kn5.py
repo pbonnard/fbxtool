@@ -272,14 +272,69 @@ def test_a_surface_that_reflects_nothing_says_so(car):
 
 # ----------------------------------------------------------------- metalness
 
-def chrome(facing: float, *, blend: int = 0, shader: str = "ksPerPixelReflection"):
-    """A material reflecting *facing* of what hits it head on."""
+def chrome(facing: float, *, blend: int = 0, shader: str = "ksPerPixelReflection",
+           ceiling: float | None = None):
+    """A material reflecting *facing* of what hits it head on.
+
+    *ceiling* is the `fresnelMaxLevel` beside it, which every real material
+    states and which holds the whole Fresnel term down.
+    """
+    props = fb.kn5_property("fresnelC", facing)
+    count = 1
+    if ceiling is not None:
+        props += fb.kn5_property("fresnelMaxLevel", ceiling)
+        count += 1
     material = fb.kn5_material("trim", shader, blend=blend,
-                               properties=fb.kn5_property("fresnelC", facing),
-                               property_count=1)
+                               properties=props, property_count=count)
     doc = parse_bytes(fb.build_kn5(materials=[material],
                                    tree=fb.kn5_dummy("car", IDENTITY)))
     return properties_of(objects_of(doc, "Material")[0]), doc
+
+
+@pytest.mark.parametrize("facing,ceiling,expected,what", [
+    (1.00, 0.03, 0.03, "a Z3M's tail lamp lens, which the game draws see-through"),
+    (5.00, 0.02, 0.02, "an Alfa TZ2's tyre, stating what cannot be a reflectance"),
+    (0.20, 0.40, 0.20, "glass, whose ceiling is above it and changes nothing"),
+    (0.00, 0.05, 0.00, "a lamp body, reflecting nothing head on"),
+    (2.00, 0.70, 0.70, "an Audi's `metalll`, held to seven tenths"),
+    (0.04, None, 0.04, "a material stating no ceiling, which none of them do"),
+], ids=["lens", "tyre", "glass", "lamp", "metal", "silent"])
+def test_the_reflectance_is_what_the_pair_of_them_come_to(facing, ceiling, expected, what):
+    """`fresnelC` is the Schlick base and `fresnelMaxLevel` is a ceiling on the
+    whole term — not the value at a grazing angle, which is what the pair reads
+    like until you see the numbers.
+
+    A BMW Z3M's `lightclear` states 1.0 and 0.03. Read as a base alone it is a
+    perfect mirror, and the tail lamp comes out an opaque white blade instead
+    of the see-through red lens it is. An Alfa TZ2's `EXT_TYRE` settles which
+    way round it goes: 5.0 is not a reflectance at all and can only be a number
+    something clamps.
+
+    The two always travel together — of 1853 materials across the cars to hand,
+    1075 state both and 778 state neither, and not one states only one.
+    """
+    stated = {"fresnelC": (facing, (), (), ())}
+    if ceiling is not None:
+        stated["fresnelMaxLevel"] = (ceiling, (), (), ())
+    material = kn5._Material("trim", "ksPerPixelReflection", 0, 0, 0, stated, [])
+    assert kn5._reflectance(material) == pytest.approx(expected, abs=1e-3), what
+
+    # And it is that, rather than what `fresnelC` says alone, that the file
+    # comes out stating — below the point where a metalness would split it.
+    if expected <= 0.17:
+        written, _ = chrome(facing, ceiling=ceiling)
+        assert written["SpecularColor"][0] == pytest.approx(expected, abs=1e-3), what
+
+
+def test_a_reflectance_held_down_is_not_read_as_metal():
+    """Which is the whole of why it matters twice over. An Alfa TZ2's tyre
+    states 5.0 and is held to 0.02: read without the ceiling it is a full
+    conductor, its diffuse cancelled outright, and a tyre draws as a mirror."""
+    loose, _ = chrome(5.0)
+    assert loose["Metallic"] == pytest.approx(1.0), "5.0 on its own is a mirror"
+    held, _ = chrome(5.0, ceiling=0.02)
+    assert held["Metallic"] == 0.0
+    assert held["DiffuseColor"] == pytest.approx([1.0, 1.0, 1.0]),         "and its picture is drawn, rather than cancelled by a metalness"
 
 
 @pytest.mark.parametrize("facing,expected,what", [

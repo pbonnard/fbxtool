@@ -2453,6 +2453,87 @@ def _dds_header(width: int, height: int, *, fourcc: bytes = b"",
             + b"\x00" * 44 + pixel_format + struct.pack("<IIIII", 0x1000, 0, 0, 0, 0))
 
 
+def _dds_dx10(width: int, height: int, dxgi: int, payload: bytes) -> bytes:
+    """A surface whose layout is stated as a DXGI number rather than as masks.
+
+    A file written this way says `DDPF_FOURCC` and nothing else in its flags,
+    so a reader that decides what to do from the flags alone refuses every one
+    of them however well it knows the format underneath.
+    """
+    return (_dds_header(width, height, fourcc=b"DX10")
+            + struct.pack("<IIIII", dxgi, 3, 0, 1, 0) + payload)
+
+
+class _Bits:
+    """A little-endian bit writer, which is the order a BC7 block is read in."""
+
+    def __init__(self) -> None:
+        self.bits: list[int] = []
+
+    def put(self, value: int, count: int) -> "_Bits":
+        for n in range(count):
+            self.bits.append((value >> n) & 1)
+        return self
+
+    def block(self) -> bytes:
+        if len(self.bits) != 128:
+            raise ValueError(f"a BC7 block is 128 bits, not {len(self.bits)}")
+        out = bytearray(16)
+        for at, bit in enumerate(self.bits):
+            if bit:
+                out[at >> 3] |= 1 << (at & 7)
+        return bytes(out)
+
+
+def bc7_mode6(low=(0, 0, 0, 0), high=(255, 255, 255, 255), indices=None) -> bytes:
+    """A BC7 tile in mode 6: one subset, four-bit indices, alpha of its own.
+
+    Mode 6 is what most of a photograph comes out as — one pair of endpoints
+    across the whole tile and sixteen bits of index to place each pixel between
+    them. Seven bits a channel with a parity bit under each, so 127 with a one
+    beneath it is 255 and 0 with a zero is nothing.
+
+    *indices* is sixteen values 0-15; the first is the anchor and stores three
+    bits, its top bit being implicitly zero.
+    """
+    picks = list(indices or [0] * 16)
+    if len(picks) != 16:
+        raise ValueError("a tile has sixteen pixels")
+    if picks[0] > 7:
+        raise ValueError("the anchor stores three bits, so 0-7")
+    out = _Bits().put(0, 6).put(1, 1)                  # mode 6
+    for channel in range(4):                           # R, G, B then A
+        out.put(low[channel] >> 1, 7)
+        out.put(high[channel] >> 1, 7)
+    out.put(low[0] & 1, 1).put(high[0] & 1, 1)         # the two parity bits
+    out.put(picks[0], 3)
+    for pick in picks[1:]:
+        out.put(pick, 4)
+    return _dds_dx10(4, 4, 98, out.block())
+
+
+def bc7_mode1(partition: int, low=(0, 0, 0), high=(255, 255, 255)) -> bytes:
+    """A BC7 tile in mode 1: two subsets, and every index left at zero.
+
+    Which makes each pixel its own subset's first endpoint, so what comes out
+    is the partition drawn in two colours — the one thing a wrong partition
+    table cannot survive.
+    """
+    out = _Bits().put(0, 1).put(1, 1)                  # mode 1
+    out.put(partition, 6)
+    for channel in range(3):                           # six-bit endpoints
+        out.put(low[channel] >> 2, 6).put(low[channel] >> 2, 6)
+        out.put(high[channel] >> 2, 6).put(high[channel] >> 2, 6)
+    out.put(1, 1).put(1, 1)                            # one parity per subset
+    out.put(0, 46)                                     # every index at zero
+    return _dds_dx10(4, 4, 98, out.block())
+
+
+def dds_bgrx(width: int, height: int, pixels: bytes, dxgi: int = 93) -> bytes:
+    """A B8G8R8X8 surface — the fourth byte is padding, not an alpha."""
+    return _dds_dx10(width, height, dxgi, pixels)
+
+
 def rgb565(red: int, green: int, blue: int) -> int:
     """One 8-bit colour as the 16-bit endpoint a block format stores."""
     return ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)

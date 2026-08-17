@@ -520,6 +520,11 @@ const FbxGltf = (function () {
 
     return {
       glb,
+      // The same document taken apart, for the spelling that keeps the two
+      // in separate files. The binary is a window on the chunk already
+      // written rather than a second copy of it.
+      json,
+      binary: new Uint8Array(glb, 20 + jsonBytes.length + 8, offset),
       stats: {
         primitives,
         meshes: json.meshes.length,
@@ -540,7 +545,24 @@ const FbxGltf = (function () {
     };
   }
 
-  return { build, weld, rootMatrix, material };
+  /**
+   * A built document as a `.gltf` beside its `.bin`, which is the other
+   * spelling of the same file.
+   *
+   * The JSON is the same in both; all that changes is that the buffer names
+   * the file its bytes are in rather than being handed the chunk behind it.
+   * Written with indentation, since the point of this spelling is that a
+   * person can open it.
+   */
+  function separate(built, binName) {
+    const json = Object.assign({}, built.json, {
+      buffers: built.json.buffers.map((buffer, at) =>
+        (at === 0 ? Object.assign({}, buffer, { uri: binName }) : buffer)),
+    });
+    return { gltf: JSON.stringify(json, null, 2), bin: built.binary };
+  }
+
+  return { build, separate, weld, rootMatrix, material };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxGltf;

@@ -36,6 +36,7 @@
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     exportGltf: $('export-gltf'),
+    exportFormat: $('export-format'),
     tabs: document.querySelectorAll('.tab'),
     tree: $('tree'),
     stage: $('stage'),
@@ -2671,11 +2672,24 @@
     return ` · dropped ${parts.join(' and ')}${renamed}${maps}`;
   }
 
+  //: What each spelling is called, for the status line and for the failure.
+  const EXPORT_NAMES = { glb: 'glTF', gltf: 'glTF', fbx: 'FBX' };
+
+  /**
+   * Write what is on screen out, in whichever spelling was asked for.
+   *
+   * All three are the same scene: the same meshes, the same node tree, the
+   * same materials and the same pictures, gathered once and handed to whichever
+   * writer. A `.glb` is one file; a `.gltf` is that file's JSON beside its
+   * buffer, which is two downloads and the browser asking whether you meant
+   * it; an `.fbx` is what the rest of this tool reads, written back out.
+   */
   async function exportGltf() {
     if (!currentMesh) return;
+    const format = (dom.exportFormat && dom.exportFormat.value) || 'glb';
     try {
       dom.exportGltf.disabled = true;
-      setStatus('Writing glTF…');
+      setStatus(`Writing ${EXPORT_NAMES[format] || 'the model'}…`);
       await nextFrame();
       const { images, textures } = await textureBytes(currentPalette);
       const settings = (currentAnalysis && currentAnalysis.globalSettings) || {};
@@ -2691,7 +2705,7 @@
           nodes: [{ name: stem, matrix: FbxTransform.identity(), mesh: 0, children: [] }],
         }
         : exportScene();
-      const { glb, stats } = FbxGltf.build({
+      const common = {
         name: stem,
         meshes: scene.meshes,
         nodes: scene.nodes,
@@ -2699,15 +2713,46 @@
         textures,
         upAxis: dom.upSelect.value,
         flips: flips.slice(),
-        unitScale: centimetres / 100,
-      });
-      download(new Blob([glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
+      };
+      let stats;
+      if (format === 'fbx') {
+        /* FBX is the format the axis and the units are *stated* in, so they go
+         * into `GlobalSettings` where they came from and the geometry is
+         * written exactly as it stands. glTF has no such field, which is why
+         * the other two put the same difference on the root node's matrix. */
+        const built = FbxOut.build(Object.assign({}, common, {
+          settings: { unitScale: centimetres },
+        }));
+        const bytes = await FbxOut.serialise(built.tree);
+        download(new Blob([bytes], { type: 'application/octet-stream' }), `${stem}.fbx`);
+        stats = built.stats;
+        stats.bytes = bytes.length;
+        stats.files = [`${stem}.fbx`];
+      } else {
+        const built = FbxGltf.build(Object.assign({}, common, {
+          unitScale: centimetres / 100,
+        }));
+        stats = built.stats;
+        if (format === 'gltf') {
+          const { gltf, bin } = FbxGltf.separate(built, `${stem}.bin`);
+          const text = new TextEncoder().encode(gltf);
+          download(new Blob([bin], { type: 'application/octet-stream' }), `${stem}.bin`);
+          download(new Blob([text], { type: 'model/gltf+json' }), `${stem}.gltf`);
+          stats.bytes = text.length + bin.length;
+          stats.files = [`${stem}.gltf`, `${stem}.bin`];
+        } else {
+          download(new Blob([built.glb], { type: 'model/gltf-binary' }), `${stem}.glb`);
+          stats.files = [`${stem}.glb`];
+        }
+      }
       const missingMaps = unwrittenMaps(images, textures);
+      stats.format = format;
       stats.dropped = currentGeometry ? null : reportDropped(stats, missingMaps);
       lastExport = stats;
       const instanced = stats.triangles > stats.stored
         ? `, ${stats.stored.toLocaleString()} stored` : '';
       setStatus(`Exported ${stats.triangles.toLocaleString()} triangles${instanced} as `
+        + `${stats.files.join(' + ')} — `
         + `${stats.meshes} mesh(es) in ${stats.nodes} node(s), `
         + `${stats.vertices.toLocaleString()} vertices, `
         + `${(stats.bytes / 1048576).toFixed(1)} MiB`
@@ -2716,7 +2761,8 @@
         + describeDropped(stats.dropped), 'ok');
     } catch (error) {
       console.error(error);
-      setStatus(`Could not write the glTF: ${error.message}`, 'error');
+      setStatus(`Could not write the ${EXPORT_NAMES[format] || 'model'}: `
+        + `${error.message}`, 'error');
     } finally {
       dom.exportGltf.disabled = !currentMesh;
     }

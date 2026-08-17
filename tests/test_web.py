@@ -10,6 +10,7 @@ Three layers, each skipping cleanly when its toolchain is missing:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -288,6 +289,106 @@ def test_a_surface_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, why
     assert _decode_dds(tmp_path, mangle(fb.dds_bc1())) is None, why
 
 
+@needs_node
+def test_a_bc7_tile_is_decoded_against_a_decoder_that_owes_us_nothing(tmp_path):
+    """BC7 is the last of the block formats and the only one with modes: eight
+    of them, each cutting a 4x4 tile up differently and spending its 128 bits
+    differently.
+
+    It is what a modern car is saved in. Sixteen textures across five of the
+    cars to hand are BC7 and every one is bound to a material — a BMW Z3M's
+    `dirty-glass`, an Alfa TZ2's brake disc, a Donkervoort's gauges — so
+    refused, each is a surface with no picture on it.
+
+    Nothing about a wrong BC7 decoder announces itself: it produces a plausible
+    picture with some of its tiles wrong. So each fixture is decoded here and
+    by Pillow, which implements the same specification and shares no code with
+    this. Written from memory, the partition table in this reader was right for
+    the first eighteen entries and wrong for the other forty-six, and it took
+    the second decoder to say so.
+    """
+    import fbxbuild as fb
+    from PIL import Image
+
+    def both(data):
+        ours = _decode_dds(tmp_path, data)
+        picture = Image.open(io.BytesIO(data))
+        picture.load()
+        theirs = list(picture.convert("RGBA").tobytes())
+        return ours, theirs
+
+    # Mode 6: one pair of endpoints and four-bit indices, which is what most of
+    # a photograph comes out as.
+    ours, theirs = both(fb.bc7_mode6(low=(10, 20, 30, 0), high=(200, 150, 100, 255),
+                                     indices=[0, 5, 10, 15] * 4))
+    assert ours is not None, "the decoder would not claim it"
+    assert (ours["width"], ours["height"]) == (4, 4)
+    assert ours["rgba"] == theirs
+    assert ours["rgba"][0:4] == [10, 20, 30, 0], "the low endpoint, alpha and all"
+    assert ours["rgba"][12:16] == [200, 150, 100, 254], "and the high one"
+
+
+@needs_node
+@pytest.mark.parametrize("partition", [0, 1, 17, 18, 34, 47, 63],
+                         ids=lambda p: f"partition{p}")
+def test_which_subset_each_pixel_of_a_bc7_tile_belongs_to(tmp_path, partition):
+    """The partition tables are the part of BC7 a reader cannot reason its way
+    to: sixty-four arrangements of sixteen pixels into subsets, and sixty-four
+    more into three.
+
+    Every index is left at zero here, so each pixel comes out its own subset's
+    first endpoint and what is drawn is the partition itself, in two colours.
+    A table wrong at one entry is a tile wrong wherever a file happens to use
+    it — 18 onwards, in this reader's first draft.
+    """
+    import fbxbuild as fb
+    from PIL import Image
+
+    data = fb.bc7_mode1(partition)
+    ours = _decode_dds(tmp_path, data)
+    picture = Image.open(io.BytesIO(data))
+    picture.load()
+    assert ours is not None
+    assert ours["rgba"] == list(picture.convert("RGBA").tobytes())
+    # Two colours and no others, which is what an all-zero index set gives.
+    seen = {tuple(ours["rgba"][at:at + 4]) for at in range(0, 64, 4)}
+    assert len(seen) == 2, f"a two-subset partition draws in two colours: {seen}"
+
+
+@needs_node
+def test_a_surface_stating_its_layout_as_a_number(tmp_path):
+    """A DX10 header names a DXGI format instead of writing masks and flags,
+    so the file says `DDPF_FOURCC` and nothing else — and a reader deciding
+    what to do from the flags refuses every one of them, however well it knows
+    the layout underneath.
+
+    B8G8R8X8 is the one that matters most, because the fourth byte is padding
+    rather than an alpha. An Alfa A110's twenty-two are all zero there, so read
+    as an alpha the car loses twenty-two of its sixty-three textures.
+    """
+    import fbxbuild as fb
+    stored = bytes([10, 20, 30, 0, 40, 50, 60, 0, 70, 80, 90, 0, 100, 110, 120, 0])
+    image = _decode_dds(tmp_path, fb.dds_bgrx(2, 2, stored))
+    assert image is not None, "a DXGI number is a statement of layout like any other"
+    assert (image["width"], image["height"]) == (2, 2)
+    assert image["rgba"][0:8] == [30, 20, 10, 255, 60, 50, 40, 255], \
+        "blue first in the file, and the padding read as solid"
+
+    # And the same bytes called BGRA, where the fourth one is an alpha and is
+    # nothing — which is a surface that is really there and really invisible.
+    opaque = _decode_dds(tmp_path, fb.dds_bgrx(2, 2, stored, dxgi=87))
+    assert opaque["rgba"][0:4] == [30, 20, 10, 0]
+
+
+@needs_node
+def test_a_dxgi_format_this_does_not_decode_is_refused(tmp_path):
+    """BC6H is a floating-point surface and there is nothing to be gained by
+    half-reading one. A texture nobody can tell is wrong is one nobody fixes."""
+    import fbxbuild as fb
+    assert _decode_dds(tmp_path, fb.dds_bgrx(4, 4, bytes(64), dxgi=95)) is None
+    assert _decode_dds(tmp_path, fb.dds_bgrx(4, 4, bytes(64), dxgi=1234)) is None
+
+
 # ------------------------------------------ writing a PNG back out
 
 
@@ -356,6 +457,131 @@ def test_the_png_writer_says_when_it_cannot(tmp_path):
     result = _run(["node", "-e", script])
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [True, True, True],         "no size, too few pixels for the size claimed, and no pixels at all"
+
+
+# ------------------------------------------ writing an FBX back out
+
+
+def _write_fbx(tmp_path, body: str):
+    """Build a scene through the page's own ``fbxout.js`` and write it, under
+    Node. Returns the document our own reader makes of what came out."""
+    out = tmp_path / "written.fbx"
+    script = (
+        "const fs=require('fs');"
+        f"global.FbxGltf=require({str(WEB / 'app' / 'gltf.js')!r});"
+        f"const O=require({str(WEB / 'app' / 'fbxout.js')!r});"
+        + body
+        + "O.serialise(built.tree).then((bytes) => {"
+        f"fs.writeFileSync({str(out)!r}, Buffer.from(bytes));"
+        "console.log(JSON.stringify(built.stats)); });"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    from fbxtool import read_fbx
+
+    return json.loads(result.stdout), read_fbx(str(out), load_arrays=True)
+
+
+#: One triangle wearing one material with one picture, placed away from the
+#: origin — enough for every kind of record the writer emits.
+_ONE_TRIANGLE = """
+  const mesh = { triangleCount: 1, hasUv: true,
+    positions: Float32Array.from([0,0,0, 1,0,0, 0,1,0]),
+    normals: Float32Array.from([0,0,1, 0,0,1, 0,0,1]),
+    uvs: Float32Array.from([0,0, 1,0, 0,1]),
+    materials: Float32Array.from([0,0,0]) };
+  const palette = [{ name: 'paint', colour: [0.8,0.1,0.1], specular: [0.04,0.04,0.04],
+    roughness: 0.4, metallic: 0, opacity: 1, emissive: [0,0,0] }];
+  const built = O.build({ name: 'thing',
+    meshes: [{ name: 'tri', mesh, palette }],
+    nodes: [{ name: 'root', matrix: [1,0,0,0, 0,1,0,0, 0,0,1,0, 2,3,4,1],
+              mesh: 0, children: [] }],
+    images: new Map([['paint', { bytes: new Uint8Array([1,2,3,4,5]),
+                                 mimeType: 'image/png' }]]),
+    settings: { unitScale: 100 }, upAxis: 'y' });
+"""
+
+
+@needs_node
+def test_the_fbx_it_writes_is_one_this_reads(tmp_path):
+    """Everything else here reads FBX; this is the one thing that writes it,
+    and the reader on the other side of the repository is what says whether it
+    got the container right.
+
+    A binary FBX is a header, a stream of records that each say where the next
+    one begins, a null record and a footer. Nothing in it is self-describing
+    enough to fail loudly: an end offset one byte out is a file that parses
+    into nonsense rather than one that refuses.
+    """
+    stats, doc = _write_fbx(tmp_path, _ONE_TRIANGLE)
+    assert doc.format == "fbx"
+    assert doc.version == 7400
+    assert not doc.warnings, doc.warnings
+
+    objects = doc.root.path("Objects")
+    kinds = [child.name for child in objects.children]
+    assert sorted(kinds) == ["Geometry", "Material", "Model", "Texture", "Video"]
+
+    geometry = objects.get("Geometry")
+    assert geometry.get("Vertices").props[0].value == [
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    # The last corner of a polygon is stored as its complement, which is how
+    # FBX says where one ends.
+    assert geometry.get("PolygonVertexIndex").props[0].value == [0, 1, -3]
+    assert geometry.get("LayerElementUV").get("UV").props[0].value == [
+        0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+    assert stats["triangles"] == 1 and stats["vertices"] == 3
+
+
+@needs_node
+def test_what_a_written_fbx_says_about_itself(tmp_path):
+    """The scene around the geometry: where the node stands, what the material
+    is, the picture carried inside the file, and the units it is measured in."""
+    from fbxtool import analyze
+
+    _, doc = _write_fbx(tmp_path, _ONE_TRIANGLE)
+    info = analyze(doc)
+
+    assert info.global_settings["unit_scale"] == 100.0
+    assert info.global_settings["up_axis"] == "+Y"
+    model = doc.root.path("Objects").get("Model")
+    placed = {entry.props[0].value: [p.value for p in entry.props[4:]]
+              for entry in model.path("Properties70").children}
+    assert placed["Lcl Translation"] == [2.0, 3.0, 4.0]
+
+    # The picture goes inside the file, which is where an embedded texture
+    # lives in an FBX and is how a car's paint travels with it.
+    video = doc.root.path("Objects").get("Video")
+    assert video.get("Content").props[0].value == bytes([1, 2, 3, 4, 5])
+
+    # And everything is wired together: the geometry and the material to the
+    # model, the model to the root, the picture to the property it drives.
+    connections = doc.root.path("Connections").children
+    kinds = [c.props[0].value for c in connections]
+    assert kinds.count("OO") == 4, "geometry, material and video, and the model"
+    assert kinds.count("OP") == 1
+    binding = [c for c in connections if c.props[0].value == "OP"][0]
+    assert binding.props[3].value == "DiffuseColor"
+
+
+@needs_node
+def test_a_mesh_used_twice_is_written_once(tmp_path):
+    """Which is how the file it came from held it: the three-part sample scene
+    is one cube under three transforms. The materials go on in the same order
+    each time, since that order is what the per-polygon indices count."""
+    # The one node becomes two, the second hanging off the first and
+    # naming the same mesh.
+    body = _ONE_TRIANGLE.replace(
+        "nodes: [{ name: 'root'",
+        "nodes: [{ name: 'a'", 1).replace(
+        "mesh: 0, children: [] }],",
+        "mesh: 0, children: [{ name: 'b', matrix: null, mesh: 0, " + "children: [] }] }],", 1)
+    stats, doc = _write_fbx(tmp_path, body)
+    objects = doc.root.path("Objects")
+    assert len(objects.get_all("Model")) == 2
+    assert len(objects.get_all("Geometry")) == 1, "one geometry for both"
+    assert stats["triangles"] == 2, "drawn twice"
+    assert stats["stored"] == 1, "and stored once"
 
 
 # ------------------------------------------ the paint beside a car
@@ -1331,6 +1557,45 @@ def test_a_new_file_replaces_the_last(built):
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_every_spelling_the_export_is_written_in(built, tmp_path):
+    """Three spellings of the same scene, each opened again in the page.
+
+    A `.glb` is one file and is what most things want; a `.gltf` beside a
+    `.bin` is the same document with its JSON out where a person can read it;
+    an `.fbx` is what the rest of this tool reads, written back out. A format
+    nobody can read back is not an export, so each is held against what went
+    in — every triangle, every part, every material by name.
+
+    The FBX is then read by the Python side as well, which owes the page
+    nothing: a binary FBX is a stream of records that each say where the next
+    begins, and an end offset one byte out is a file that parses into nonsense
+    rather than one that refuses.
+    """
+    written = tmp_path / "written"
+    written.mkdir()
+    files = [str(ROOT / "samples" / "cube_textured.fbx"),
+             str(ROOT / "samples" / "scene_parts.fbx")]
+    real = real_sample()
+    if real:
+        files.append(real)
+    result = _run(["node", str(WEB / "test" / "exports.js"), str(written), *files],
+                  env=_node_env(), timeout=900)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+    from fbxtool import read_fbx
+
+    doc = read_fbx(str(written / "scene_parts.fbx"), load_arrays=True)
+    assert doc.format == "fbx" and doc.version == 7400
+    assert not doc.warnings, doc.warnings
+    objects = doc.root.path("Objects")
+    assert len(objects.get_all("Model")) == 3, "one model per part"
+    assert len(objects.get_all("Geometry")) == 1, "one cube under three transforms"
 
 
 @needs_clang
