@@ -711,6 +711,40 @@ uncompressed surfaces read by their channel masks. No browser will make an
 image of one, and 111 of that Mercedes' 135 textures are DDS, so without it the
 car opens as a grey model with no paint, no badges and no dials.
 
+**What colour a lamp lens is, a car does not hold.** Its glass is one grey
+picture however many lamps wear it — a Renault 5 has nine materials sharing one
+32-pixel square of `rgba(52, 60, 61, 47)`, told apart only by the normal map
+moulding each pattern. What makes its fog lamps yellow and its indicators amber
+is stated beside the model, in the blocks Custom Shaders Patch reads to
+simulate a lamp:
+
+```ini
+[REFRACTING_HEADLIGHT_...]
+SURFACE = glass_fog
+GLASS_COLOR = 1, 0.80723137, 0.12472421
+```
+
+Eighteen of them on that car, naming a mesh apiece — amber for the four
+indicators, red for the tail lamps, yellow for the fog lamps and a plain
+quarter-grey for the headlights. Four of the 41 cars to hand state any, and the
+whole of the `extension/` folder is read for them rather than the includes
+followed, since a car's lighting lives in whichever files its author split it
+across. A block that turns the colouring off is taken at its word.
+
+`SURFACE` names a **mesh** and not a material, and the two do not line up: that
+car's `glass_fog` mesh wears the material its `glass_platelight` mesh wears,
+and the two are given different colours. So the colour goes on the record for
+that mesh and travels to the screen as a second row of the part texture, beside
+where each part's middle is.
+
+How it is used follows from what a tint is. Stated white or grey it is a
+darkening of the glass that is already there, so it multiplies and white
+changes nothing. Stated amber it *is* the lens, since the picture under it
+carries nothing to keep — and a lens you can see a colour in is a lens you
+cannot see through, so how saturated it is also says how much of what stands
+behind it comes past. A quarter-grey headlight stays as clear as it was; an
+amber indicator goes nearly solid, which is what an amber indicator is.
+
 **A car in the file is a car unpainted.** A kn5 carries one set of textures
 and the game puts another over the top before it draws: every file under
 `skins/<name>/` beside the car replaces the texture of that name for as long

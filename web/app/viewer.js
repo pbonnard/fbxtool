@@ -300,6 +300,13 @@ ${ENVIRONMENT}
 
   uniform int uMode;          // 0 file colours, 1 index colours, 2 clay, 3 normals
   uniform vec3 uClayColour;
+  //: Row 1 of the part texture: what colour of lens each part is, and whether
+  //: it is one at all. A part's own, since a car's lamps share one material.
+  uniform highp sampler2D uParts;
+  // Explicitly high, since a fragment shader defaults an int to medium and the
+  // vertex stage does not — and a uniform whose precision differs between the
+  // two is a program that will not link.
+  uniform highp int uPartCount;
   uniform sampler2D uPalette;      // two rows per material: colour, then finish
   uniform int uPaletteSize;
   // GLSL ES 3.0 has no default precision for array samplers, unlike sampler2D.
@@ -472,6 +479,10 @@ ${SHADOW_LOOKUP}
       alphaMode = int(over.b + 0.5);
       alphaCutoff = over.a;
     }
+    // How much of a colour a lamp lens is, which is how much of a filter it
+    // is. Not the same as the tint flag below, which says whether a
+    // material colour is read through its picture.
+    float lensFilter = 0.0;
     if (uMode == 0 && uPaletteSize > 0) {
       vec4 entry = texelFetch(uPalette, ivec2(slot, 0), 0);
       vec4 finish = texelFetch(uPalette, ivec2(slot, 1), 0);
@@ -525,6 +536,28 @@ ${SHADOW_LOOKUP}
           albedo *= clamp(tiled * grain.b, 0.0, 4.0);
         }
       }
+      /* The lens this part is, where the car's lighting says it is one.
+       *
+       * A lamp's glass is the same colourless picture as every other lamp's on
+       * the car; what makes one amber and another yellow is stated beside the
+       * model, per mesh. So it tints what the surface lets through rather than
+       * replacing it — a yellow lens over a grey reflector, which is what a
+       * lamp is. */
+      if (uPartCount > 0) {
+        vec4 lens = texelFetch(uParts, ivec2(vPart, 1), 0);
+        if (lens.a > 0.5) {
+          /* How much of a colour of its own the lens is, which is the whole of
+           * what this turns on. A tint stated white or grey is a darkening of
+           * the glass that is there — so it multiplies, and white changes
+           * nothing. A tint stated amber is the lens: the picture under it is
+           * one flat grey square shared by every lamp on the car and carries
+           * nothing to keep, so the colour stands in its place. */
+          lensFilter = max(lens.r, max(lens.g, lens.b))
+            - min(lens.r, min(lens.g, lens.b));
+          albedo = mix(albedo * lens.rgb, lens.rgb, lensFilter);
+        }
+      }
+
       /* A metallic-roughness map, where the material has one.
        *
        * The palette arrives already split into a diffuse and a reflectance by
@@ -641,12 +674,19 @@ ${SHADOW_LOOKUP}
       ambient += environmentSpecular(r, coatRoughness) * coatReflectance;
     }
 
-    // What a sheet of glass hides is what it lets through plus what it
-    // reflects, and at a grazing angle it reflects nearly everything — which
-    // is why a windscreen goes opaque as it turns away from you.
+    /* What a sheet of glass hides is what it lets through plus what it
+     * reflects, and at a grazing angle it reflects nearly everything — which
+     * is why a windscreen goes opaque as it turns away from you.
+     *
+     * And a lens you can see a colour in is a lens you cannot see through. A
+     * tint is a filter: what makes it amber is that it stops everything but
+     * the amber, so the more of a colour it is the less of what stands behind
+     * it comes past. How saturated it is says that and how dark it is does not
+     * — a headlight's plain quarter grey is a darkening, not a filter, and it
+     * stays as clear as it was. */
     float mirrored = clamp(dot(reflectance * under + coatReflectance,
                                vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
-    float coverage = clamp(opacity + (1.0 - opacity) * mirrored, 0.0, 1.0);
+    float coverage = clamp(opacity + (1.0 - opacity) * max(mirrored, lensFilter), 0.0, 1.0);
 
     // A marked material glows a little, so it reads even where it is in shadow.
     vec3 lit = direct + ambient + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
@@ -1057,16 +1097,30 @@ ${SHADOW_LOOKUP}
       this.partCount = this.parts.length;
       this.selectedPart = -1;
       if (!this.partCount) { this.dirty = true; return; }
-      const data = new Float32Array(this.partCount * 4);
+      /* Two rows: where each part's middle is, and what colour of lens it is.
+       *
+       * The second is a part's own and not its material's — a car's glass is
+       * one grey picture however many lamps wear it, and what makes a Renault
+       * 5's fog lamps yellow and its indicators amber is stated per mesh in
+       * the car's lighting config. Its `glass_fog` mesh wears the material its
+       * `glass_platelight` mesh wears, and the two are given different
+       * colours, so there is nowhere else for it to go. */
+      const data = new Float32Array(this.partCount * 8);
       this.parts.forEach((part, i) => {
         const centre = part.centre || [0, 0, 0];
         data[i * 4] = centre[0];
         data[i * 4 + 1] = centre[1];
         data[i * 4 + 2] = centre[2];
         data[i * 4 + 3] = 1;
+        const lens = Array.isArray(part.lens) ? part.lens : null;
+        const at = (this.partCount + i) * 4;
+        data[at] = lens ? lens[0] : 1;
+        data[at + 1] = lens ? lens[1] : 1;
+        data[at + 2] = lens ? lens[2] : 1;
+        data[at + 3] = lens ? 1 : 0;
       });
       gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 1, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 2, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this._updateRadius();

@@ -306,6 +306,10 @@ def _render_kn5_rows(rows: list[tuple[str, Any]], doc) -> None:
     if dimmed:
         rows.append(("Dimmed", f"{dimmed:,} take less of the light than a plainly "
                                "lit surface, down to none at all"))
+    lenses = extra.get("lenses", 0)
+    if lenses:
+        rows.append(("Lenses", f"{lenses:,} lamp(s) coloured by the car's own "
+                               "lighting config, which the model does not hold"))
     shaders = extra.get("shaders") or []
     if shaders:
         rows.append(("Shaders", ", ".join(shaders[:6])

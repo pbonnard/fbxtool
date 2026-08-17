@@ -940,6 +940,107 @@ def test_a_file_on_disk_is_read_by_the_same_route(tmp_path):
     assert doc.file_size == path.stat().st_size
 
 
+# ------------------------------------------------------- the colour of a lamp
+
+_LAMPS = (
+    "[REFRACTING_HEADLIGHT_...]" + NL
+    + "SURFACE = glass_fog" + NL
+    + "INSIDE = lc_fog" + NL
+    + "GLASS_COLOR = 1, 0.80723137, 0.12472421" + NL
+    + "EXTRA_GLASS_COLORIZATION = 1" + NL
+    + "CUSTOM_BULB_0 = 0.5,0.5,0,0" + NL
+    + NL
+    + "[REFRACTING_HEADLIGHT_...]" + NL
+    + "SURFACE = glass_turnfl, glass_turnfl2" + NL
+    + "GLASS_COLOR = 0.9672982,0.2797753,0   ; amber" + NL
+    + NL
+    + "[REFRACTING_HEADLIGHT_...]" + NL
+    + "; a lens told not to be coloured is not coloured" + NL
+    + "SURFACE = glass_platelight" + NL
+    + "GLASS_COLOR = 0.25,0.25,0.25" + NL
+    + "EXTRA_GLASS_COLORIZATION = 0" + NL
+    + NL
+    + "[REFRACTING_HEADLIGHT_...]" + NL
+    + "SURFACE = glass_reverse" + NL
+    + NL
+    + "[LIGHT_LICENSEPLATE]" + NL
+    + "GLASS_COLOR = 1, 0, 0" + NL
+)
+
+
+def test_what_colour_each_lamp_lens_is():
+    """A car's glass is one grey picture however many lamps wear it.
+
+    A Renault 5 has nine materials sharing one 32-pixel square of
+    `rgba(52, 60, 61, 47)`, told apart only by the normal map moulding each
+    pattern. What makes its fog lamps yellow and its indicators amber is stated
+    beside the model, in the blocks Custom Shaders Patch reads to simulate a
+    lamp — and read without them every lamp on the car is the same colourless
+    glass, which is what the file holds and not what anyone has seen it as.
+    """
+    found = kn5._lens_colours(_LAMPS)
+    assert found == {
+        "glass_fog": "#ffce20",
+        "glass_turnfl": "#f74700",
+        "glass_turnfl2": "#f74700",
+    }, "one block may name several meshes, and a comment is not part of a colour"
+
+
+@pytest.mark.parametrize("text,why", [
+    ("", "nothing at all"),
+    ("[REFRACTING_HEADLIGHT_...]" + NL + "SURFACE = a", "a block with no colour"),
+    ("[REFRACTING_HEADLIGHT_...]" + NL + "GLASS_COLOR = 1,1,1", "a colour with no mesh"),
+    ("[REFRACTING_HEADLIGHT_...]" + NL + "SURFACE = a" + NL + "GLASS_COLOR = 1,1",
+     "a colour with only two channels"),
+    ("[REFRACTING_HEADLIGHT_...]" + NL + "SURFACE = a" + NL + "GLASS_COLOR = red",
+     "a colour that is not numbers"),
+], ids=["empty", "no-colour", "no-mesh", "short", "words"])
+def test_a_lamp_block_that_states_no_colour_states_nothing(text, why):
+    assert kn5._lens_colours(text) == {}, why
+
+
+def test_a_lamp_colour_goes_on_the_part_and_not_on_the_material(tmp_path):
+    """`SURFACE` names a *mesh*, and the mesh and the material do not line up:
+    a Renault 5's `glass_fog` mesh wears the material its `glass_platelight`
+    mesh wears, and the two are given different colours. So there is nowhere
+    for the colour to go but the record for that mesh.
+    """
+    path = tmp_path / "car.kn5"
+    lens = fb.kn5_mesh("glass_fog", TRIANGLE, [0, 1, 2])
+    plate = fb.kn5_mesh("glass_platelight", TRIANGLE, [0, 1, 2])
+    path.write_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("platelight")],
+        tree=fb.kn5_dummy("car", IDENTITY, lens + plate, 2)))
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "lights.ini").write_text(_LAMPS, encoding="utf-8")
+
+    doc = read_fbx(str(path))
+    assert doc.extra["lenses"] == 1, "the one mesh this car has that is named"
+    assert "1 lamp(s) coloured" in render_text(analyze(doc))
+
+    lit = {}
+    for model in doc.root.path("Objects").get_all("Model"):
+        props = {entry.props[0].value: [p.value for p in entry.props[4:]]
+                 for entry in model.path("Properties70").children}
+        if "LensColour" in props:
+            lit[model.value(1).split(chr(0))[0]] = props["LensColour"]
+    assert list(lit) == ["glass_fog"], "and not the mesh sharing its material"
+    assert lit["glass_fog"] == pytest.approx([1.0, 0.80723137, 0.12472421], abs=2e-3)
+
+
+def test_a_car_with_no_lighting_beside_it_states_no_lenses(tmp_path):
+    """Four of the 41 cars to hand state any, so most say nothing and nothing
+    is invented for them."""
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("glass")],
+        tree=fb.kn5_dummy("car", IDENTITY,
+                          fb.kn5_mesh("glass_fog", TRIANGLE, [0, 1, 2]), 1)))
+    doc = read_fbx(str(path))
+    assert doc.extra["lenses"] == 0
+    assert "lamp(s) coloured" not in render_text(analyze(doc))
+
+
 # ---------------------------------------------------------------- the paint chip
 
 

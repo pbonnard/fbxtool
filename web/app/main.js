@@ -83,6 +83,10 @@
   /** What the car's own extension config calls its paint, for skins that
    *  do not say — read from beside the car rather than from inside the game. */
   let carPaintNames = [];
+  //: Mesh name -> the colour of the lens it is, out of the car's lighting
+  //: config. `SURFACE` there names a mesh and not a material, and on a
+  //: Renault 5 the two do not line up.
+  let lensColours = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
   /** Binary payloads a .gltf points at, keyed the same way. */
@@ -374,12 +378,23 @@
      * which material is the paint once for the whole car rather than once per
      * skin — a Renault 5 names `body`, `body2` and `rim_colored` there and its
      * skins name none. */
+    lensColours = new Map();
     for (const file of list) {
       const where = pathOf(file).replace(/\\/g, '/');
-      if (!/(^|\/)extension\/ext_config\.ini$/i.test(where)) {
+      if (!/(^|\/)extension\/[^/]+\.ini$/i.test(where)) {
         continue;
       }
-      carPaintNames = FbxSkins.paintMaterials(await file.text());
+      const text = await file.text();
+      if (/(^|\/)extension\/ext_config\.ini$/i.test(where)) {
+        carPaintNames = FbxSkins.paintMaterials(text);
+      }
+      /* And what colour each lamp lens is. A car's lighting lives in
+       * whichever files its author split it across — this one pulls in a
+       * `lights.ini` beside its `ext_config.ini` — so the whole of the
+       * folder is read rather than the includes followed. */
+      for (const [mesh, colour] of FbxKn5.lensColours(text)) {
+        if (!lensColours.has(mesh)) lensColours.set(mesh, colour);
+      }
     }
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
@@ -721,6 +736,10 @@
       pendingDonor = donor;
       lastSceneFile = file;
       currentDoc = doc;
+      /* How many of the car's lamps its own lighting gives a colour to, which
+       * the report says and the model itself does not hold. */
+      const lit = countLenses(doc);
+      if (lit) doc.extra = Object.assign({}, doc.extra, { lenses: lit });
       currentAnalysis = FbxAnalyze.analyze(doc);
       // Whatever was assigned to this file last time it was open.
       const remembered = FbxPalette.load(doc.fileName);
@@ -776,6 +795,24 @@
    * A mesh is stored in its model's local space, so a scene only assembles
    * correctly once each part is placed by its model's world matrix.
    */
+  /**
+   * How many of a car's lamps the lighting beside it gives a colour to.
+   *
+   * The count the Python reader states, which counts by lens name rather than
+   * by record — a lamp is often a mesh inside a node of the same name, and it
+   * is one lens either way.
+   */
+  function countLenses(doc) {
+    if (!doc || doc.format !== 'kn5' || !lensColours.size) return 0;
+    const objects = FbxAnalyze.child(doc.root, 'Objects');
+    const named = new Set((objects ? objects.children : [])
+      .filter((entry) => entry.name === 'Model')
+      .map((entry) => String(entry.props[1].value).split('\u0000')[0].toLowerCase()));
+    let found = 0;
+    for (const mesh of lensColours.keys()) if (named.has(mesh)) found += 1;
+    return found;
+  }
+
   function collectParts(analysis, index) {
     const info = analysis || currentAnalysis;
     if (!info) return [];
@@ -984,6 +1021,12 @@
         max: mesh.max,
         name: part.model.displayName || part.geometry.displayName || 'part',
         materialNames: part.materials.map((material) => material.displayName),
+        /* And the colour of the lens this part is, where the car's lighting
+         * config says it is one. It belongs to the part and not to the
+         * material: a Renault 5's `glass_fog` mesh wears the material its
+         * `glass_platelight` mesh wears, and the two are given different
+         * colours. */
+        lens: lensColours.get(String(part.model.displayName || '').toLowerCase()) || null,
       });
       FbxWasm.release(heapMark);
     }
@@ -1054,6 +1097,8 @@
         max: piece.max.slice(),
         triangles: piece.triangleCount,
         materials: piece.materialNames,
+        // The colour of the lens it is, where the car's lighting says it is one.
+        lens: piece.lens || null,
         // What to edit when this is the part under the mouse.
         segment: kept[index],
       });

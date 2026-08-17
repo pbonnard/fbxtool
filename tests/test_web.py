@@ -389,6 +389,37 @@ def test_a_dxgi_format_this_does_not_decode_is_refused(tmp_path):
     assert _decode_dds(tmp_path, fb.dds_bgrx(4, 4, bytes(64), dxgi=1234)) is None
 
 
+@needs_node
+def test_the_two_readers_agree_on_a_lamp_lens():
+    """Both sides read the car's lighting, and a colour read one way and not
+    the other is a lamp that is amber in the report and grey on the screen."""
+    from fbxtool import kn5
+
+    text = ("[REFRACTING_HEADLIGHT_...]" + chr(10)
+            + "SURFACE = glass_fog, glass_fogb" + chr(10)
+            + "GLASS_COLOR = 1, 0.80723137, 0.12472421" + chr(10)
+            + "EXTRA_GLASS_COLORIZATION = 1" + chr(10) + chr(10)
+            + "[REFRACTING_HEADLIGHT_...]" + chr(10)
+            + "SURFACE = glass_platelight" + chr(10)
+            + "GLASS_COLOR = 0.25,0.25,0.25" + chr(10)
+            + "EXTRA_GLASS_COLORIZATION = 0" + chr(10))
+    script = (
+        f"const K=require({str(WEB / 'app' / 'kn5.js')!r});"
+        f"console.log(JSON.stringify([...K.lensColours({json.dumps(text)})]));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    page = {name: [round(c, 6) for c in rgb] for name, rgb in json.loads(result.stdout)}
+
+    here = {name: [round(int(hexed[at:at + 2], 16) / 255, 6) for at in (1, 3, 5)]
+            for name, hexed in kn5._lens_colours(text).items()}
+    assert set(page) == set(here) == {"glass_fog", "glass_fogb"}
+    for name in page:
+        # The page keeps the float the file wrote; this side goes through the
+        # eight bits a colour is written with, so they meet within one step.
+        assert page[name] == pytest.approx(here[name], abs=1 / 255)
+
+
 # ------------------------------------------ writing a PNG back out
 
 

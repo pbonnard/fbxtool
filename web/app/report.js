@@ -134,6 +134,10 @@ const FbxReport = (function () {
       pairs.push(['Dimmed', `${number(e.dimmed)} take less of the light than a plainly `
         + 'lit surface, down to none at all']);
     }
+    if (e.lenses) {
+      pairs.push(['Lenses', `${number(e.lenses)} lamp(s) coloured by the car's own `
+        + 'lighting config, which the model does not hold']);
+    }
     if ((e.shaders || []).length) {
       pairs.push(['Shaders', e.shaders.slice(0, 6).join(', ')
         + (e.shaders.length > 6 ? ' …' : '')]);

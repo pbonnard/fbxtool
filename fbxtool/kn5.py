@@ -891,6 +891,105 @@ def _pair(named: list[str], colours: list[str], materials: set[str]) -> list[dic
 
 
 
+#: A Custom Shaders Patch lamp block, and the two things wanted out of it.
+_LAMP_SECTION = re.compile(r"^\s*\[(REFRACTING_HEADLIGHT[^\]]*)\]")
+_LAMP_KEY = re.compile(r"^[ \t]*(SURFACE|GLASS_COLOR|EXTRA_GLASS_COLORIZATION)"
+                       r"[ \t]*=([^;\n]*)", re.IGNORECASE)
+
+
+def _lens_colours(text: str) -> dict[str, str]:
+    """What colour each lamp lens is, out of a car's own lighting config.
+
+    A car's glass is one grey picture however many lamps wear it — a Renault 5
+    has nine materials sharing one 32-pixel square of `rgba(52, 60, 61, 47)`,
+    told apart only by the normal map moulding each pattern.  What makes its
+    fog lamps yellow and its indicators amber is stated beside the model
+    instead, in the blocks Custom Shaders Patch reads to simulate a lamp:
+
+        [REFRACTING_HEADLIGHT_...]
+        SURFACE = glass_fog
+        GLASS_COLOR = 1, 0.80723137, 0.12472421
+
+    Eighteen of them on that car, naming a mesh apiece and giving it a tint —
+    amber for the four indicators, red for the tail lamps, yellow for the fog
+    lamps and a plain quarter-grey for the headlights.  Read without them every
+    lamp on the car is the same colourless glass, which is what the file holds
+    and not what anybody has ever seen the car as.
+
+    `SURFACE` names a *mesh* rather than a material, and the two do not line
+    up: this car's `glass_fog` mesh wears the material its `glass_platelight`
+    mesh wears, and the two are given different colours.  So the tint belongs
+    to the part.
+
+    A block that turns the colouring off is taken at its word.
+    """
+    out: dict[str, str] = {}
+    section = ""
+    surfaces: list[str] = []
+    colour = ""
+    enabled = True
+
+    def close() -> None:
+        if colour and enabled:
+            for name in surfaces:
+                out.setdefault(name.lower(), colour)
+
+    for line in text.splitlines():
+        heading = _LAMP_SECTION.match(line)
+        if heading or line.lstrip().startswith("["):
+            close()
+            section = heading.group(1) if heading else ""
+            surfaces, colour, enabled = [], "", True
+            continue
+        if not section:
+            continue
+        setting = _LAMP_KEY.match(line)
+        if setting is None:
+            continue
+        key, value = setting.group(1).upper(), setting.group(2).strip()
+        if key == "SURFACE":
+            surfaces = [n.strip() for n in value.split(",") if n.strip()]
+        elif key == "EXTRA_GLASS_COLORIZATION":
+            enabled = value not in ("0", "0.0", "false", "False")
+        else:
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            if len(parts) >= 3:
+                try:
+                    rgb = [min(max(float(p), 0.0), 1.0) for p in parts[:3]]
+                except ValueError:
+                    continue
+                colour = "#" + "".join(f"{round(c * 255):02x}" for c in rgb)
+    close()
+    return out
+
+
+def _lamps(path: str | None) -> dict[str, str]:
+    """Every lens colour stated beside a car, from all of its config.
+
+    A car's lighting lives in whichever files its author split it across —
+    `ext_config.ini` pulls in a `lights.ini` beside it on this one — so the
+    whole of the folder is read rather than the includes followed.  What they
+    name that lives inside Custom Shaders Patch rather than beside the car is
+    left where it is, as it is everywhere else here.
+    """
+    if path is None:
+        return {}
+    folder = os.path.join(os.path.dirname(os.path.abspath(path)), "extension")
+    out: dict[str, str] = {}
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return {}
+    for name in names:
+        if not name.lower().endswith(".ini"):
+            continue
+        text = _read(os.path.join(folder, name))
+        if text:
+            for mesh, colour in _lens_colours(text).items():
+                out.setdefault(mesh, colour)
+    return out
+
+
 def _skins(path: str | None, named: set[str], materials: set[str]) -> list[dict]:
     """The paint jobs sitting beside a car, and how much of each one it wears.
 
@@ -1318,6 +1417,26 @@ def parse_kn5(
         doc.warn(f"{len(data) - cursor.at} byte(s) past the end of the node tree "
                  "were not read")
 
+    # And what colour each lamp lens is, which the model does not hold: it is
+    # stated per mesh in the car's own lighting config, so it goes on the
+    # record for that mesh rather than on the material it shares.
+    lenses = _lamps(path)
+    lit: set[str] = set()
+    if lenses:
+        for entry in build.objects:
+            if entry.name != "Model":
+                continue
+            name = entry.value(1).split(chr(0))[0].lower()
+            colour = lenses.get(name)
+            if colour is None:
+                continue
+            rgb = [int(colour[at:at + 2], 16) / 255.0 for at in (1, 3, 5)]
+            entry.path("Properties70").children.append(
+                _p70("LensColour", "Color", *(_d(c) for c in rgb)))
+            # Counted by name rather than by record: a lamp is often a mesh
+            # inside a node of the same name, and it is one lens either way.
+            lit.add(name)
+
     _assemble(doc, build, version)
 
     have = {texture.name for texture in held}
@@ -1345,6 +1464,7 @@ def parse_kn5(
         "triangles": scene.triangles,
         "tree_depth": scene.depth,
         "lods": scene.lods,
+        "lenses": len(lit),
         "skins": _skins(path, {name.lower() for name in named if name},
                         {material.name.lower() for material in materials}),
         "encrypted": encrypted is not None,

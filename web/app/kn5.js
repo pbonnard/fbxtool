@@ -168,6 +168,79 @@ const FbxKn5 = (function () {
     return Math.min(Math.max(weight, 0), 1);
   }
 
+  /* A Custom Shaders Patch lamp block, and the two things wanted out of it. */
+  const LAMP_SECTION = /^\s*\[(REFRACTING_HEADLIGHT[^\]]*)\]/;
+  const LAMP_KEY = /^[ \t]*(SURFACE|GLASS_COLOR|EXTRA_GLASS_COLORIZATION)[ \t]*=([^;\n]*)/i;
+
+  /**
+   * What colour each lamp lens is, out of a car's own lighting config.
+   *
+   * A car's glass is one grey picture however many lamps wear it — a Renault 5
+   * has nine materials sharing one 32-pixel square of `rgba(52, 60, 61, 47)`,
+   * told apart only by the normal map moulding each pattern. What makes its
+   * fog lamps yellow and its indicators amber is stated beside the model
+   * instead, in the blocks Custom Shaders Patch reads to simulate a lamp:
+   *
+   *     [REFRACTING_HEADLIGHT_...]
+   *     SURFACE = glass_fog
+   *     GLASS_COLOR = 1, 0.80723137, 0.12472421
+   *
+   * Eighteen of them on that car, naming a mesh apiece and giving it a tint —
+   * amber for the four indicators, red for the tail lamps, yellow for the fog
+   * lamps and a plain quarter-grey for the headlights. Read without them every
+   * lamp on the car is the same colourless glass, which is what the file holds
+   * and not what anybody has seen the car as.
+   *
+   * `SURFACE` names a *mesh* rather than a material, and the two do not line
+   * up: this car's `glass_fog` mesh wears the material its `glass_platelight`
+   * mesh wears, and the two are given different colours. So the tint belongs
+   * to the part.
+   *
+   * A block that turns the colouring off is taken at its word.
+   */
+  function lensColours(text) {
+    const out = new Map();
+    let section = '';
+    let surfaces = [];
+    let colour = null;
+    let enabled = true;
+    const close = () => {
+      if (!colour || !enabled) return;
+      for (const name of surfaces) {
+        if (!out.has(name.toLowerCase())) out.set(name.toLowerCase(), colour);
+      }
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const heading = LAMP_SECTION.exec(line);
+      if (heading || line.trimStart().startsWith('[')) {
+        close();
+        section = heading ? heading[1] : '';
+        surfaces = [];
+        colour = null;
+        enabled = true;
+        continue;
+      }
+      if (!section) continue;
+      const setting = LAMP_KEY.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      if (key === 'SURFACE') {
+        surfaces = value.split(',').map((n) => n.trim()).filter(Boolean);
+      } else if (key === 'EXTRA_GLASS_COLORIZATION') {
+        enabled = !['0', '0.0', 'false', 'False'].includes(value);
+      } else {
+        const parts = value.split(',').map((p) => p.trim()).filter(Boolean);
+        if (parts.length < 3) continue;
+        const rgb = parts.slice(0, 3).map(Number);
+        if (rgb.some((c) => !Number.isFinite(c))) continue;
+        colour = rgb.map((c) => Math.min(Math.max(c, 0), 1));
+      }
+    }
+    close();
+    return out;
+  }
+
   const node = (name, props = [], children = []) => ({ name, props, children });
   const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
   const I = (value) => ({ code: 'I', typeName: 'int32', value: value | 0 });
@@ -876,7 +949,7 @@ const FbxKn5 = (function () {
     };
   }
 
-  return { looksLikeKn5, parse, placementOf, NODE_CLASSES };
+  return { looksLikeKn5, lensColours, parse, placementOf, NODE_CLASSES };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxKn5;
