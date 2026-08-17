@@ -1618,12 +1618,38 @@ apart when it is told to, and written out as an unfiltered PNG over
 `CompressionStream`. That gives up the compression a filtered encoder would
 find, and buys an export whose textures are the ones that went in.
 
+A picture whose alpha channel says nothing is written without one. A quarter of
+the bytes of a car's textures are 255 repeated four million times, deflating is
+what an export spends its time on, and PNG has a colour type that means exactly
+this; 54 of an Audi S8's 96 pictures take it. A picture with an alpha that
+matters keeps it, which was the whole reason for writing the file here.
+
+**Where an export's time goes**, measured on a car rather than guessed at:
+nine tenths of it is `CompressionStream`, which is the platform's own deflate
+and is one thread of it. Everything else in the writer — packing the rows,
+scanning the alpha, the CRCs, joining the chunks — comes to under a fifth of a
+second against three and a half. So the deflate alone goes to a handful of
+workers, one buffer across and one back, and the pictures are worked through
+several at a time rather than one after another. Neither change is worth
+anything without the other: workers with one picture in flight leave five of
+them idle, and six in flight against one deflate thread is the same queue it
+was. Together an Audi S8 exports in 1.9 seconds where it took 6.1, and a
+Renault 5 Turbo in 2.0 where it took 7.8. The worker is written out as text and
+started from a `blob:` URL, because a page that is one file has nowhere else to
+point one — and where there are no workers at all, the same deflate happens on
+the page's own thread and the export is only slower.
+
 **The grain goes into the picture.** `txDetail` is tiled — twenty-five or a
 hundred times across the panel it covers — and neither glTF nor FBX has a
 second set of coordinates to tile a map by. So it travels the only way it can:
 multiplied into the base colour before the file is written, exactly as the
 shader multiplies it and in the same light, with the grain taken as neutral at
-its own average. Left out instead, the whole of a car's interior exports flat —
+its own average. On the card, because that is what the multiply is — one output
+texel per fragment, reading one texel of the picture and one of the grain — and
+because done in a loop it was the slowest thing in an export. Where there is no
+card to do it there is a loop that does, and the two agree to the byte: baked
+both ways on a real GPU and on a software rasteriser, no texel of an Audi's or
+a Renault's differs by one. Left out instead, the whole of a car's interior exports flat —
 which was the state of it until now, and on an Audi S8 that is thirty-eight
 materials arriving as grey plastic where there was leather, carpet and carbon.
 

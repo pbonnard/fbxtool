@@ -150,6 +150,97 @@ async function main() {
   await page.goto(`file://${PAGE}`);
   await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
 
+  /* Every picture written at once, and each one still itself.
+   *
+   * The deflating an export spends its time on is handed to a handful of
+   * workers, several pictures in the air together, and each answer has to find
+   * its way back to the picture that asked. Matched to the wrong one they
+   * would not fail — they would swap, and a car would export with its carpet
+   * on the bonnet and nothing anywhere saying so. Node has no workers, so the
+   * unit tests exercise the other path; this is the one that exercises this.
+   *
+   * Read back by inflating what was written, which is the only reading that
+   * proves the bytes rather than the intent.
+   */
+  console.log('the pictures an export writes, all at once');
+  const routed = await page.evaluate(async () => {
+    const many = 12;
+    const edge = 96;
+    const made = [];
+    for (let n = 0; n < many; n++) {
+      const pixels = new Uint8ClampedArray(edge * edge * 4);
+      for (let at = 0; at < pixels.length; at += 4) {
+        // Distinct per picture and per texel, so a swap cannot look like a
+        // match and neither can a stuck row.
+        pixels[at] = (n * 21 + at) & 255;
+        pixels[at + 1] = (n * 37 + (at >> 4)) & 255;
+        pixels[at + 2] = (n * 11) & 255;
+        pixels[at + 3] = 255;
+      }
+      made.push(pixels);
+    }
+    const written = await Promise.all(made.map((p) => FbxPng.encode(p, edge, edge)));
+
+    const inflate = async (png) => {
+      const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+      let at = 8;
+      let colour = 0;
+      const idat = [];
+      while (at + 8 <= png.length) {
+        const length = view.getUint32(at);
+        const tag = String.fromCharCode(...png.subarray(at + 4, at + 8));
+        if (tag === 'IHDR') colour = png[at + 8 + 9];
+        if (tag === 'IDAT') idat.push(png.subarray(at + 8, at + 8 + length));
+        at += 12 + length;
+      }
+      const stream = new Blob(idat).stream()
+        .pipeThrough(new DecompressionStream('deflate'));
+      const reader = stream.getReader();
+      const parts = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        total += value.length;
+      }
+      const raw = new Uint8Array(total);
+      let to = 0;
+      for (const part of parts) { raw.set(part, to); to += part.length; }
+      return { raw, colour };
+    };
+
+    let wrong = 0;
+    let solid = 0;
+    for (let n = 0; n < many; n++) {
+      if (!written[n]) { wrong++; continue; }
+      const { raw, colour } = await inflate(written[n]);
+      if (colour === 2) solid++;
+      const channels = colour === 2 ? 3 : 4;
+      const stride = edge * channels;
+      for (let y = 0; y < edge && wrong === 0; y++) {
+        // The filter byte in front of each row says the row is not filtered.
+        if (raw[y * (stride + 1)] !== 0) { wrong++; break; }
+        for (let x = 0; x < edge; x++) {
+          const from = y * (stride + 1) + 1 + x * channels;
+          const was = (y * edge + x) * 4;
+          for (let k = 0; k < 3; k++) {
+            if (raw[from + k] !== made[n][was + k]) { wrong++; break; }
+          }
+          if (wrong) break;
+        }
+      }
+    }
+    return { many, wrong, solid };
+  });
+  check('every picture written at once comes back as itself',
+    routed.wrong === 0, `${routed.many - routed.wrong} of ${routed.many}`);
+  /* And without an alpha channel, since none of them has one. A quarter of the
+   * bytes of a car's textures are an alpha of 255 repeated, and deflating that
+   * is time an export spends saying nothing. */
+  check('and without an alpha channel none of them needed',
+    routed.solid === routed.many, `${routed.solid} of ${routed.many}`);
+
   for (const entry of files) {
     const group = entry.split('+').every((f) => fs.existsSync(f)) ? entry.split('+') : [entry];
     console.log(group.map((f) => path.basename(f)).join(' + '));

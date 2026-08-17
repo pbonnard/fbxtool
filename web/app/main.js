@@ -2397,20 +2397,220 @@
    */
   function resolveGrain(pixels, width, height, wide, tall) {
     const { linear } = srgb();
-    const out = new Float32Array(wide * tall * 3);
+    // Four channels rather than three: this is uploaded to a card as it is,
+    // and a fourth channel is what spares it a repacking on the way.
+    const out = new Float32Array(wide * tall * 4);
     const counts = new Float32Array(wide * tall);
     for (let y = 0; y < height; y++) {
       const row = Math.min(tall - 1, Math.floor(y * tall / height)) * wide;
       for (let x = 0; x < width; x++) {
         const at = (x + y * width) * 4;
         const cell = row + Math.min(wide - 1, Math.floor(x * wide / width));
-        for (let k = 0; k < 3; k++) out[cell * 3 + k] += linear[pixels[at + k]];
+        for (let k = 0; k < 3; k++) out[cell * 4 + k] += linear[pixels[at + k]];
         counts[cell] += 1;
       }
     }
     for (let cell = 0; cell < counts.length; cell++) {
       const many = counts[cell] || 1;
-      for (let k = 0; k < 3; k++) out[cell * 3 + k] /= many;
+      for (let k = 0; k < 3; k++) out[cell * 4 + k] /= many;
+      out[cell * 4 + 3] = 1;
+    }
+    return out;
+  }
+
+  /* The multiply itself, on the card that was going to draw it anyway.
+   *
+   * Written as a fragment shader because that is what it is: one output texel
+   * per fragment, reading one texel of the picture and one of the grain. Done
+   * in JS it is the slowest thing in an export — two seconds of an Audi's five
+   * and a half, four of a Renault's eight — and it is the one part of the work
+   * a card does without being asked twice.
+   *
+   * The light comes out right for free here. Both pictures are uploaded as
+   * `SRGB8_ALPHA8`, so the sampler decodes them; the target is `SRGB8_ALPHA8`
+   * too, so the write encodes the answer back. Which is the same arrangement
+   * the viewer draws under, and the reason this agrees with the screen.
+   */
+  const BAKE_VERTEX = `#version 300 es
+    void main() {
+      /* One triangle covering the target, from the vertex number alone: there
+       * is nothing to send and nothing to bind. */
+      vec2 corner = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+      gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+    }`;
+
+  const BAKE_FRAGMENT = `#version 300 es
+    precision highp float;
+    uniform highp sampler2D uPicture;
+    uniform highp sampler2D uTile;
+    uniform vec2 uOut;
+    uniform vec2 uPictureSize;
+    uniform vec2 uTileSize;
+    uniform float uRepeats;
+    uniform float uStrength;
+    out vec4 colour;
+    void main() {
+      /* Both texels chosen by the same arithmetic the fallback uses, so the
+       * two paths write the same file. A fetch rather than a sample: the
+       * picture is resized by which texel is asked for, and the grain has
+       * already been resolved to the size one tile of it has room for. */
+      ivec2 at = ivec2(gl_FragCoord.xy);
+      ivec2 from = ivec2(vec2(at) * uPictureSize / uOut);
+      vec4 base = texelFetch(uPicture,
+        min(from, ivec2(uPictureSize) - 1), 0);
+      vec2 tiled = (vec2(at) + 0.5) / uOut * uRepeats;
+      ivec2 cell = ivec2(fract(tiled) * uTileSize);
+      vec3 grain = texelFetch(uTile, min(cell, ivec2(uTileSize) - 1), 0).rgb;
+      colour = vec4(base.rgb * min(vec3(4.0), grain * uStrength), base.a);
+    }`;
+
+  //: The context the bake runs in, and what it needs bound. Made once.
+  let baker = null;
+
+  function bakeContext() {
+    if (baker !== null) return baker;
+    baker = false;
+    const gl = document.createElement('canvas')
+      .getContext('webgl2', { alpha: true, premultipliedAlpha: false });
+    if (!gl) return baker;
+    const compile = (kind, source) => {
+      const shader = gl.createShader(kind);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
+    };
+    const vertex = compile(gl.VERTEX_SHADER, BAKE_VERTEX);
+    const fragment = compile(gl.FRAGMENT_SHADER, BAKE_FRAGMENT);
+    if (!vertex || !fragment) return baker;
+    const program = gl.createProgram();
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return baker;
+    const at = (name) => gl.getUniformLocation(program, name);
+    baker = {
+      gl,
+      program,
+      vao: gl.createVertexArray(),
+      uniforms: {
+        picture: at('uPicture'), tile: at('uTile'), out: at('uOut'),
+        pictureSize: at('uPictureSize'), tileSize: at('uTileSize'),
+        repeats: at('uRepeats'), strength: at('uStrength'),
+      },
+    };
+    return baker;
+  }
+
+  /**
+   * The picture and its grain multiplied together on the card.
+   *
+   * Hands back the same bytes the fallback below would, or nothing at all if
+   * anything about the card says no — a context that will not be made, a
+   * picture past what it will hold, a framebuffer it will not complete. There
+   * is no half-done state to unpick: the answer is read back or it is not.
+   */
+  function bakeOnCard(picture, tile, wide, tall, width, height, repeats, strength) {
+    const made = bakeContext();
+    if (!made) return null;
+    const { gl, program, uniforms } = made;
+    const limit = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (Math.max(width, height, picture.width, picture.height, wide, tall) > limit) {
+      return null;
+    }
+    const pictureTexture = gl.createTexture();
+    const tileTexture = gl.createTexture();
+    const target = gl.createTexture();
+    const frame = gl.createFramebuffer();
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, pictureTexture);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      // Decoded by the sampler, which is where the light gets sorted out.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, picture.width, picture.height,
+        0, gl.RGBA, gl.UNSIGNED_BYTE, picture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      // The grain already resolved and already linear, so it goes up as it is.
+      gl.bindTexture(gl.TEXTURE_2D, tileTexture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, wide, tall, 0,
+        gl.RGBA, gl.FLOAT, tile);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      gl.bindTexture(gl.TEXTURE_2D, target);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, height, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D, target, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        return null;
+      }
+
+      gl.useProgram(program);
+      gl.bindVertexArray(made.vao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, pictureTexture);
+      gl.uniform1i(uniforms.picture, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, tileTexture);
+      gl.uniform1i(uniforms.tile, 1);
+      gl.uniform2f(uniforms.out, width, height);
+      gl.uniform2f(uniforms.pictureSize, picture.width, picture.height);
+      gl.uniform2f(uniforms.tileSize, wide, tall);
+      gl.uniform1f(uniforms.repeats, repeats);
+      gl.uniform1f(uniforms.strength, strength);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.viewport(0, 0, width, height);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      const out = new Uint8ClampedArray(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return gl.getError() === gl.NO_ERROR ? out : null;
+    } catch (error) {
+      return null;                       // a card that will not: the loop will
+    } finally {
+      gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.deleteTexture(pictureTexture);
+      gl.deleteTexture(tileTexture);
+      gl.deleteTexture(target);
+      gl.deleteFramebuffer(frame);
+    }
+  }
+
+  /** The same multiply where there is no card to do it: texel by texel. */
+  function bakeInJs(base, picture, tile, wide, tall, width, height, repeats, strength) {
+    const { linear, encoded } = srgb();
+    const out = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      const from = Math.min(picture.height - 1,
+        Math.floor(y * picture.height / height)) * picture.width;
+      /* Where in its own tile the grain has got to. Both pictures are read the
+       * same way up, so this is the shader's `vUv * tiling` said in rows and
+       * columns, and no flip enters into it. */
+      const gv = (y + 0.5) / height * repeats;
+      const row = Math.min(tall - 1, Math.floor((gv - Math.floor(gv)) * tall)) * wide;
+      for (let x = 0; x < width; x++) {
+        const at = (from + Math.min(picture.width - 1,
+          Math.floor(x * picture.width / width))) * 4;
+        const gu = (x + 0.5) / width * repeats;
+        const cell = (row + Math.min(wide - 1,
+          Math.floor((gu - Math.floor(gu)) * wide))) * 4;
+        const to = (x + y * width) * 4;
+        for (let k = 0; k < 3; k++) {
+          const lit = linear[base[at + k]] * Math.min(4, tile[cell + k] * strength);
+          out[to + k] = encoded[lit >= 1 ? 65535 : (lit * 65535) | 0];
+        }
+        out[to + 3] = base[at + 3];
+      }
     }
     return out;
   }
@@ -2435,12 +2635,14 @@
    * repeat is the whole reason a grain was allowed to be small. So the bake is
    * done at whichever picture is larger, and one tile of the grain gets the
    * room that leaves it.
+   *
+   * Nothing is handed back where nothing needed doing — a grain with no room
+   * left to say anything in, which is what a tiling in the thousands comes to
+   * — and the caller writes the picture it already had.
    */
   async function bakeGrain(picture, grain, tiling, scale) {
-    const base = pixelsOf(picture);
     const over = pixelsOf(grain);
-    if (!base || !over) return null;
-    const { linear, encoded } = srgb();
+    if (!over) return null;
     const width = Math.min(BAKE_LIMIT, Math.max(picture.width, grain.width));
     const height = Math.min(BAKE_LIMIT, Math.max(picture.height, grain.height));
     const repeats = Math.max(tiling, 1e-4);
@@ -2454,31 +2656,90 @@
      * which asks for ten and gets eight. */
     const strength = Math.min(FbxViewer.GRAIN_CEILING,
       Math.max(FbxViewer.GRAIN_FLOOR, scale));
-    const out = new Uint8ClampedArray(width * height * 4);
-    for (let y = 0; y < height; y++) {
-      const from = Math.min(picture.height - 1,
-        Math.floor(y * picture.height / height)) * picture.width;
-      /* Where in its own tile the grain has got to. Both pictures are read the
-       * same way up, so this is the shader's `vUv * tiling` said in rows and
-       * columns, and no flip enters into it. */
-      const gv = (y + 0.5) / height * repeats;
-      const row = Math.min(tall - 1, Math.floor((gv - Math.floor(gv)) * tall)) * wide;
-      for (let x = 0; x < width; x++) {
-        const at = (from + Math.min(picture.width - 1,
-          Math.floor(x * picture.width / width))) * 4;
-        const gu = (x + 0.5) / width * repeats;
-        const cell = (row + Math.min(wide - 1,
-          Math.floor((gu - Math.floor(gu)) * wide))) * 3;
-        const to = (x + y * width) * 4;
-        for (let k = 0; k < 3; k++) {
-          const lit = linear[base[at + k]] * Math.min(4, tile[cell + k] * strength);
-          out[to + k] = encoded[lit >= 1 ? 65535 : (lit * 65535) | 0];
-        }
-        out[to + 3] = base[at + 3];
-      }
+    /* A grain that resolved to one texel of its own average is no grain: every
+     * output texel would be multiplied by the same number, and that number is
+     * one, because dividing a thing by its own average is what `strength` is.
+     * Cars tile grains up to 250,000 times across a panel, so this is not a
+     * corner — it is most of what a tiling that high means. The picture goes
+     * out as it already was, encoded once, rather than being copied. */
+    if (wide === 1 && tall === 1 && flatEnough(tile, strength)) return null;
+    let out = bakeOnCard(picture, tile, wide, tall, width, height, repeats, strength);
+    if (!out) {
+      const base = pixelsOf(picture);
+      if (!base) return null;
+      out = bakeInJs(base, picture, tile, wide, tall, width, height, repeats, strength);
     }
     const bytes = await FbxPng.encode(out, width, height);
     return bytes ? { bytes, hasAlpha: anyAlpha(out) } : null;
+  }
+
+  /**
+   * The same bake done both ways, for holding the two against each other.
+   *
+   * A card and a loop are two implementations of one multiply, and the file
+   * that leaves depends on which of them ran. So the loaded car's grained
+   * materials are baked twice here and the answers compared texel by texel —
+   * the shape of check the rest of this tool applies to its pairs of readers,
+   * pointed at the one pair that is chosen by what the machine happens to
+   * have.
+   *
+   * They differ where the sRGB curve is quantised on the way out, and by no
+   * more than that: the card walks the real curve, the loop reads a table of
+   * sixteen-bit steps. Anything past a step of eight bits is a disagreement.
+   */
+  async function bakeBothWays(limit = 4) {
+    const out = [];
+    for (const entry of currentPalette || []) {
+      if (out.length >= limit) break;
+      const request = entry.textures && entry.textures.detail;
+      if (!request || !entry.texture || !(entry.detailTiling > 0)) continue;
+      const picture = await decodeTexture(entry.texture, suppliedImages);
+      const grain = await decodeTexture(request, suppliedImages);
+      const over = picture && grain && pixelsOf(grain);
+      const base = over && pixelsOf(picture);
+      if (!base) continue;
+      const width = Math.min(BAKE_LIMIT, Math.max(picture.width, grain.width));
+      const height = Math.min(BAKE_LIMIT, Math.max(picture.height, grain.height));
+      const repeats = Math.max(entry.detailTiling, 1e-4);
+      const wide = Math.max(1, Math.min(grain.width, Math.round(width / repeats)));
+      const tall = Math.max(1, Math.min(grain.height, Math.round(height / repeats)));
+      const tile = resolveGrain(over, grain.width, grain.height, wide, tall);
+      const strength = Math.min(FbxViewer.GRAIN_CEILING, Math.max(
+        FbxViewer.GRAIN_FLOOR,
+        typeof entry.detailScale === 'number' ? entry.detailScale : 1));
+      const card = bakeOnCard(picture, tile, wide, tall, width, height, repeats, strength);
+      if (!card) { out.push({ name: entry.name, card: false }); continue; }
+      const loop = bakeInJs(base, picture, tile, wide, tall, width, height,
+        repeats, strength);
+      let worst = 0;
+      let total = 0;
+      for (let at = 0; at < loop.length; at++) {
+        const gap = Math.abs(card[at] - loop[at]);
+        if (gap > worst) worst = gap;
+        total += gap;
+      }
+      out.push({
+        name: entry.name, card: true, width, height, tile: `${wide}x${tall}`,
+        worst, mean: +(total / loop.length).toFixed(3),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Whether a grain resolved to a single texel changes anything at all.
+   *
+   * Within half a step of eight bits at the brightest a picture goes, which is
+   * where a factor shows first. A grain resolved to one texel is *usually*
+   * exactly neutral — its one texel is its own average and `strength` is one
+   * over that — but a grain whose average was clamped at either end is not,
+   * and that one has to be drawn.
+   */
+  function flatEnough(tile, strength) {
+    for (let k = 0; k < 3; k++) {
+      if (Math.abs(Math.min(4, tile[k] * strength) - 1) > 1 / 512) return false;
+    }
+    return true;
   }
 
   /**
@@ -2506,9 +2767,18 @@
     const keyOf = (request) => `${wearing ? wearing.name : ''}:`
       + (request.embedded ? `embedded:${request.name}` : `file:${baseName(request.path)}`);
 
-    const bytesFor = async (request) => {
-      const key = keyOf(request);
-      if (read.has(key)) return read.get(key);
+    /* What the cache holds is the work, not what it came to.
+     *
+     * The pictures are read at the same time as each other below, so two
+     * materials wearing one can ask for it before either answer exists. Held
+     * as results, both would miss and the picture would be decoded and encoded
+     * twice; held as promises, the second asker waits on the first's. */
+    const once = (key, work) => {
+      if (!read.has(key)) read.set(key, work());
+      return read.get(key);
+    };
+
+    const bytesFor = (request) => once(keyOf(request), async () => {
       /* The skin's own picture first, where it has one for this texture.
        *
        * A picture already in a format glTF allows is written straight across
@@ -2532,9 +2802,8 @@
           image = { bytes: encoded.bytes, mimeType: 'image/png', hasAlpha: encoded.hasAlpha };
         }
       }
-      read.set(key, image);
       return image;
-    };
+    });
 
     const withWrap = (image, request) => ({
       ...image, wrapS: request.wrapS, wrapT: request.wrapT,
@@ -2549,40 +2818,63 @@
      * a bake per material would write that same picture out thirty-eight
      * times.
      */
-    const grainedFor = async (entry, request) => {
+    const grainedFor = (entry, request) => {
       const tiling = entry.detailTiling;
       const scale = typeof entry.detailScale === 'number' ? entry.detailScale : 1;
       const key = `grain:${keyOf(entry.texture)}:${keyOf(request)}:${tiling}:${scale}`;
-      if (read.has(key)) return read.get(key);
-      let image = null;
-      const picture = await decodeTexture(entry.texture, suppliedImages);
-      const grain = await decodeTexture(request, suppliedImages);
-      if (picture && grain) {
-        const baked = await bakeGrain(picture, grain, tiling, scale);
-        if (baked) {
-          image = { bytes: baked.bytes, mimeType: 'image/png', hasAlpha: baked.hasAlpha };
+      return once(key, async () => {
+        let image = null;
+        const picture = await decodeTexture(entry.texture, suppliedImages);
+        const grain = await decodeTexture(request, suppliedImages);
+        if (picture && grain) {
+          const baked = await bakeGrain(picture, grain, tiling, scale);
+          if (baked) {
+            image = {
+              bytes: baked.bytes, mimeType: 'image/png', hasAlpha: baked.hasAlpha,
+            };
+          }
         }
-      }
-      // A grain that will not decode leaves the picture as it was, which is
-      // the picture without it rather than no picture at all.
-      if (!image) image = await bytesFor(entry.texture);
-      read.set(key, image);
-      return image;
+        /* A grain that will not decode, or one with nothing left to say,
+         * leaves the picture as it was — which is the picture without it
+         * rather than no picture at all, and is fetched under the picture's
+         * own key, so a car whose grains all come to nothing writes each of
+         * its pictures once. */
+        if (!image) image = await bytesFor(entry.texture);
+        return image;
+      });
     };
 
     /** A height map as the normal map glTF's normal slot has to hold. */
-    const normalsFor = async (request) => {
-      const key = `normal:${request.embedded || baseName(request.path)}`;
-      if (read.has(key)) return read.get(key);
-      const encoded = await encodeNormals(
-        await decodeTexture(request, suppliedImages), BUMP_RELIEF);
-      const image = encoded
-        ? { bytes: encoded.bytes, mimeType: 'image/png', hasAlpha: false } : null;
-      read.set(key, image);
-      return image;
-    };
+    const normalsFor = (request) => once(
+      `normal:${request.embedded || baseName(request.path)}`, async () => {
+        const encoded = await encodeNormals(
+          await decodeTexture(request, suppliedImages), BUMP_RELIEF);
+        return encoded
+          ? { bytes: encoded.bytes, mimeType: 'image/png', hasAlpha: false } : null;
+      });
 
+    /* Which material writes which name, decided here and in order.
+     *
+     * A name is what everything downstream finds a panel by, and two materials
+     * may carry one: the first to state a picture is the one that writes it,
+     * which is what reading the list in order came to before this read several
+     * at a time. Settled before any of the work starts, so the file does not
+     * depend on which picture finished decoding first. */
+    const spoken = new Set();
+    const mapped = new Set();
+    const work = [];
     for (const entry of palette) {
+      // An image left out of the palette is left out of the file: that is what
+      // dropping it was for.
+      const writes = !!(entry.texture && wanted(entry, 'baseColor')
+        && !spoken.has(entry.name));
+      if (writes) spoken.add(entry.name);
+      const maps = !!(entry.textures && !mapped.has(entry.name));
+      if (maps) mapped.add(entry.name);
+      if (writes || maps) work.push({ entry, writes, maps });
+    }
+
+    async function forMaterial({ entry, writes, maps }) {
       /* Whether this material's grain is going into its picture. Neither glTF
        * nor FBX has a slot to tile a second map by, so baked in is the only
        * way it travels — and left out entirely a car's leather, carpet and
@@ -2590,14 +2882,12 @@
       const grain = entry.textures && entry.textures.detail;
       const bakes = !!(grain && entry.texture && entry.detailTiling > 0
         && wanted(entry, 'detail') && wanted(entry, 'baseColor'));
-      // An image left out of the palette is left out of the file: that is what
-      // dropping it was for.
-      if (entry.texture && wanted(entry, 'baseColor') && !images.has(entry.name)) {
+      if (writes) {
         const image = bakes ? await grainedFor(entry, grain) : await bytesFor(entry.texture);
         if (image) images.set(entry.name, withWrap(image, entry.texture));
       }
-      if (entry.textures && !textures.has(entry.name)) {
-        const maps = [];
+      if (maps) {
+        const written = [];
         for (const [slot, request] of Object.entries(entry.textures)) {
           if (!wanted(entry, slot)) continue;
           // A grain already multiplied into the picture is not sent a second
@@ -2610,11 +2900,26 @@
           // same differences the viewer shades it with, it says what it meant.
           const image = slot === 'normal' && !entry.bumpIsNormalMap
             ? await normalsFor(request) : await bytesFor(request);
-          if (image) maps.push({ slot, ...withWrap(image, request) });
+          if (image) written.push({ slot, ...withWrap(image, request) });
         }
-        if (maps.length) textures.set(entry.name, maps);
+        if (written.length) textures.set(entry.name, written);
       }
     }
+
+    /* Several at a time, because the slow part is not this thread.
+     *
+     * Every picture that is not already a PNG or a JPEG goes out through
+     * `CompressionStream`, which is the platform deflating on a thread of its
+     * own — and awaited one after another, that thread does one picture while
+     * nothing else happens. A car has a hundred of them. Bounded rather than
+     * let loose: each one in flight is holding a decoded picture and a baked
+     * one, and a car whose pictures are 2048 square would otherwise have a
+     * hundred of each in the air at once. */
+    const AT_ONCE = 6;
+    let next = 0;
+    await Promise.all(Array.from({ length: AT_ONCE }, async () => {
+      while (next < work.length) await forMaterial(work[next++]);
+    }));
     return { images, textures };
   }
 
@@ -4407,6 +4712,9 @@
       get partTable() { return partTable; },
       //: The skins the folder brought, and what each paints.
       get skins() { return skinsOffered.slice(); },
+      //: The two ways a grain is baked into a picture, held against each
+      //: other on whichever car is loaded. See `bakeBothWays`.
+      bakeBothWays,
       get selectedPart() { return selectedPart; },
       selectPart: setSelectedPart,
       get edits() { return editSummary(); },

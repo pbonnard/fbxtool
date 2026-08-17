@@ -114,6 +114,19 @@ async function main() {
   check('and is no darker overall than without it',
     grained[1] > plain[1] * 0.7, `rgb(${grained}) against rgb(${plain})`);
 
+  /* And the two ways of doing the multiply, held against each other.
+   *
+   * The card does it where there is a card and a loop does it where there is
+   * not, which means the file that leaves depends on what the machine has.
+   * They are the same arithmetic on the same texels, so they must come to the
+   * same bytes — and on a machine with a real GPU and on this software one
+   * alike, they do, exactly. */
+  const both = await page.evaluate(() => window.fbxtool.bakeBothWays(4));
+  check('the card and the loop bake the same picture',
+    both.length > 0 && both.every((one) => one.card && one.worst === 0),
+    both.map((one) => `${one.name} ${one.card ? `worst ${one.worst}` : 'no card'}`)
+      .join(', ') || 'nothing grained');
+
   const flat = await load(page, flatFile);
   /* A grain that is its own average is no grain: it says nothing differs from
    * the average anywhere, so the panel is the grey its colour map is. Read in
