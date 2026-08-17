@@ -130,6 +130,10 @@ const FbxReport = (function () {
       pairs.push(['Metals', `${number(e.metals)} reflect more facing you than a `
         + 'dielectric can']);
     }
+    if (e.dimmed) {
+      pairs.push(['Dimmed', `${number(e.dimmed)} take less of the light than a plainly `
+        + 'lit surface, down to none at all']);
+    }
     if ((e.shaders || []).length) {
       pairs.push(['Shaders', e.shaders.slice(0, 6).join(', ')
         + (e.shaders.length > 6 ? ' …' : '')]);

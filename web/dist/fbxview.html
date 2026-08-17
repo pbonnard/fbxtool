@@ -628,6 +628,10 @@ ul.record-tree .count { color: var(--muted); }
     <canvas id="viewport"></canvas>
     <div class="viewport-controls">
       <select id="geometry-select" title="Geometry to display" disabled></select>
+      <!-- A .kn5 holds the car unpainted: everything under skins/<name>/
+           beside it replaces a texture of the same name. Which skin it wears
+           is the folder's question, so it is asked here. -->
+      <select id="skin-select" title="Skin to wear" hidden></select>
       <select id="mode-select" title="Shading mode">
         <option value="0">File colours</option>
         <option value="1">Index colours</option>
@@ -5182,6 +5186,40 @@ const FbxKn5 = (function () {
       / (METAL_FLOOR - DIELECTRIC_CEILING));
   }
 
+  /* What a plainly lit surface takes from the light: `ksAmbient` and
+   * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
+   * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
+   * — 278 of them, one in six, and the value the game's own editor starts a
+   * material at. */
+  const LIGHT_AMBIENT = 0.5;
+  const LIGHT_DIFFUSE = 0.6;
+
+  /**
+   * How much of the light a material takes, against a plainly lit one.
+   *
+   * `ksAmbient` and `ksDiffuse` weight the two halves of the game's own
+   * lighting rather than tinting anything. Both halves are diffuse, so in a
+   * viewer with one fixed light the two weights have nowhere to go but the
+   * albedo, where they are the same arithmetic: dimming the light that reaches
+   * a surface and dimming the surface come to the same picture.
+   *
+   * This is the whole of why an Audi S8 comes up white from end to end. Its
+   * paint is 0.4 and 0.4 and its wheels are 0.03 and 0.01; its headlight
+   * housings are nothing at all. The pictures under those are grey panel maps
+   * — the colour was never in the picture — so read without the weights the
+   * rims, the lamps and the carbon mirror caps all draw as bright as the body,
+   * and the body draws brighter than the game ever shows it.
+   *
+   * A quarter of them ask for more light than a plainly lit surface gets,
+   * which a dashboard or a lamp lens does on purpose. A diffuse surface cannot
+   * return more than it was given, so that is where this stops.
+   */
+  function lightWeight(material) {
+    const weight = (scalarOf(material, 'ksAmbient', LIGHT_AMBIENT)
+      + scalarOf(material, 'ksDiffuse', LIGHT_DIFFUSE)) / (LIGHT_AMBIENT + LIGHT_DIFFUSE);
+    return Math.min(Math.max(weight, 0), 1);
+  }
+
   const node = (name, props = [], children = []) => ({ name, props, children });
   const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
   const I = (value) => ({ code: 'I', typeName: 'int32', value: value | 0 });
@@ -5590,6 +5628,7 @@ const FbxKn5 = (function () {
 
     /* ---- materials */
     let metals = 0;
+    let dimmed = 0;
     const materialUids = materials.map((material) => {
       const id = uid();
       /* What comes back facing you. The game's shaders spell a Schlick Fresnel
@@ -5604,11 +5643,16 @@ const FbxKn5 = (function () {
       /* Split between the two halves of the surface the way every importer
        * here does: what is left of the diffuse once the metal has taken its
        * share, and a reflectance that is the dielectric's on that share and the
-       * conductor's own on the rest. A kn5 material has no colour of its own —
-       * `txDiffuse` is the albedo, and `ksAmbient`/`ksDiffuse` weight the
-       * ambient and direct halves of the game's own lighting rather than
-       * tinting anything — so the colour being split is white. */
-      const diffuse = 1 - metal;
+       * conductor's own on the rest.
+       *
+       * A kn5 material states no colour of its own — `txDiffuse` is the albedo
+       * — but it does state how much of the light it takes, and that is a
+       * greyscale the picture is read through. So the colour being split is
+       * that weight rather than white, and it multiplies the map instead of
+       * standing in for one. */
+      const weight = lightWeight(material);
+      if (weight < 0.999) dimmed += 1;
+      const diffuse = (1 - metal) * weight;
       const specular = facing * (1 - metal) + metal;
       const props = [
         p70('DiffuseColor', 'Color', D(diffuse), D(diffuse), D(diffuse)),
@@ -5620,6 +5664,11 @@ const FbxKn5 = (function () {
       props.push(p70('Opacity', 'Number', D(1)));
       props.push(p70('AlphaMode', 'KString', S(alphaMode)));
       props.push(p70('ShaderName', 'KString', S(material.shader)));
+      // And that the colour above is read through the picture rather than
+      // replaced by it, which is the usual way round. Everything a kn5 states
+      // about a surface is stated for the whole of it and the picture is the
+      // pattern, so the two multiply.
+      props.push(p70('TintsTexture', 'Bool', I(1)));
       if (material.alphaTested) {
         props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
       }
@@ -5859,6 +5908,7 @@ const FbxKn5 = (function () {
         materials: materials.length,
         materialsUsed: scene.used.size,
         metals,
+        dimmed,
         shaders: [...new Set(materials.map((m) => m.shader))].sort(),
         nodes: scene.nodes,
         meshes: scene.meshes,
@@ -5882,6 +5932,352 @@ const FbxKn5 = (function () {
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxKn5;
+
+// ---- skins.js ----------------------------------------------------------
+/* The paint jobs that sit beside an Assetto Corsa car.
+ *
+ * A `.kn5` carries one set of textures and the game puts another over the top
+ * before it draws. Everything under `skins/<name>/` replaces the texture of
+ * that name for as long as that skin is chosen, so what is *in* the file is
+ * the car unpainted: an Audi S8's own textures are ambient occlusion over bare
+ * grey, and its thirteen skins are what make it Alpine White or Sakhir Orange.
+ *
+ * Two files in a skin folder say more than the pictures do, and both are the
+ * skin's own — nothing here needs the game installed to read them:
+ *
+ *   ext_config.ini   `CarPaintMaterial = booody_aooo` — which material of the
+ *                    car is its paint. Custom Shaders Patch reads this to know
+ *                    what to hand its car-paint shader.
+ *   cm_skin.json     Content Manager's `carPaint.color`, as `#AARRGGBB` —
+ *                    #FF1A2025 for Azurite Black Metallic, #FFFFFFFF for
+ *                    Alpine White — beside its gloss and its reflectivity.
+ *
+ * Neither is always there, and a config copied from another car names a
+ * material this one has not got. Both are read for what they say and checked
+ * against the model rather than believed: a skin that names no material, or
+ * names one that is not there, still brings its textures.
+ */
+'use strict';
+
+const FbxSkins = (function () {
+  //: `.../skins/<name>/<file>` — the folder a skin is, wherever it was dropped.
+  const SKIN_PATH = /(?:^|\/)skins\/([^/]+)\/[^/]+$/i;
+  const IMAGE = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds)$/i;
+
+  /** The skin a path belongs to, or null for a file outside one. */
+  function skinOf(path) {
+    const found = SKIN_PATH.exec(String(path).replace(/\\/g, '/'));
+    return found ? found[1] : null;
+  }
+
+  /**
+   * A colour as an `<input type="color">` spells it, alpha dropped.
+   *
+   * Content Manager writes `#AARRGGBB`, so the first pair is the alpha and
+   * taking the first six characters would paint every car with its own
+   * opacity — #FF1A2025 is a near-black blue and #FF1A20 is a red.
+   */
+  function rgbHex(value) {
+    const text = String(value || '').trim().replace(/^#/, '');
+    if (!/^[0-9a-f]+$/i.test(text)) return null;
+    const lower = text.toLowerCase();
+    if (lower.length === 8) return `#${lower.slice(2)}`;
+    if (lower.length === 6) return `#${lower}`;
+    if (lower.length === 3) return `#${[...lower].map((c) => c + c).join('')}`;
+    return null;
+  }
+
+  /**
+   * Which materials a config calls the car's paint, in the order it says them.
+   *
+   * Two spellings for the one thing, and a car uses whichever its author did:
+   * `CarPaintMaterial = booody_aooo` on an Audi, and a `[Material_CarPaint_*]`
+   * section with `Materials = body` on a Renault, once per paint. The order
+   * matters — it is what pairs them with the colours.
+   *
+   * The rest of the file is `[INCLUDE]`s of things that live inside Custom
+   * Shaders Patch rather than beside the car, so only what is written here is
+   * read and the rest is left where it is.
+   */
+  function paintMaterials(text) {
+    const out = [];
+    let section = '';
+    const add = (list) => {
+      for (const name of String(list).split(',')) {
+        const trimmed = name.trim();
+        if (trimmed && !out.includes(trimmed)) out.push(trimmed);
+      }
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const heading = /^\s*\[([^\]]*)\]/.exec(line);
+      if (heading) { section = heading[1]; continue; }
+      const setting = /^[ \t]*(CarPaintMaterial|Materials)[ \t]*=([^;]*)/i.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toLowerCase();
+      // `Materials` is a key half the sections in the file use, so it only
+      // means the paint inside a section that says it is the paint.
+      if (key === 'carpaintmaterial' || /^material_carpaint/i.test(section)) {
+        add(setting[2]);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Every colour Content Manager's `cm_skin.json` states, in the order it does.
+   *
+   * One car calls its paint `carPaint` and another `extBody1`, `extBody2` and
+   * `extRims1` — a Renault 5 states three and its config names three materials
+   * to match, `body`, `body2` and `rim_colored`, in that order and with the
+   * names corroborating. So the two lists are paired by position, which is the
+   * only thing they share and is what the game does with them.
+   *
+   * A section without a colour is not a paint: the same file carries the
+   * carpet, the interior and the driver's suit.
+   */
+  function paintColours(text) {
+    let data;
+    try {
+      data = JSON.parse(String(text));
+    } catch (error) {
+      return [];
+    }
+    if (!data || typeof data !== 'object') return [];
+    const out = [];
+    for (const [key, value] of Object.entries(data)) {
+      if (!value || typeof value !== 'object' || value.color === undefined) continue;
+      const hex = rgbHex(value.color);
+      if (!hex) continue;
+      out.push({
+        key,
+        hex,
+        // A slot that says its paint is off is one whose colour lives in the
+        // texture instead, and putting the colour on as well paints it twice.
+        enabled: value.enabled !== false,
+        gloss: typeof value.gloss === 'number' ? value.gloss : null,
+        reflection: typeof value.reflection === 'number' ? value.reflection : null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The colours a skin's own `ext_config.ini` states, for the ones with no
+   * `cm_skin.json` to state them in.
+   *
+   * A chameleon paint is two: `ChameleonColorA` facing you and
+   * `ChameleonColorB` at a grazing angle, each with an opacity after it. Only
+   * the first is taken — there is one albedo here and A is what the car looks
+   * like from where you are standing. A Clio V6's Illiad Blue is `#33007f`
+   * turning to yellow at the edges, and read without it the car is white.
+   *
+   * A section that names the skins it is for is only for those: one folder's
+   * config can carry a block written for another.
+   */
+  function configColours(text, name) {
+    const out = [];
+    let section = '';
+    let mine = true;
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const heading = /^\s*\[([^\]]*)\]/.exec(line);
+      if (heading) { section = heading[1]; mine = true; continue; }
+      if (!/^material_carpaint/i.test(section)) continue;
+      const setting = /^[ \t]*([A-Za-z]+)[ \t]*=([^;]*)/.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toLowerCase();
+      const value = setting[2].trim();
+      if (key === 'skins') {
+        mine = value.split(',').some((s) => s.trim().toLowerCase() === String(name).toLowerCase());
+      } else if (key === 'chameleoncolora' && mine) {
+        const hex = rgbHex(value.split(',')[0]);
+        if (hex) out.push({ key, hex, enabled: true, gloss: null, reflection: null });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The colour of the paint chip a skin carries a picture of.
+   *
+   * `livery.png` is the swatch Content Manager shows beside a skin's name: a
+   * rounded square of the paint with a gloss sweeping over it, sixty-four
+   * pixels square, and every one of the 189 skins to hand has one. It is a
+   * picture rather than a statement, so it is read last and only where nothing
+   * was stated — but read, it is exact. A Champagne Quartz chip is 1874 pixels
+   * of #565D6B and its `cm_skin.json` says #565D6B.
+   *
+   * Two things make a plain average the wrong reading. The gloss is a wide
+   * bright sweep, and under some of them is a band of dark reflection — a
+   * Renault 5's Blanc Perle chip is white over black, and averaged it is a
+   * mid-grey nobody painted. So this takes the commonest colour rather than
+   * the mean, over the upper half where the paint is: colours are gathered
+   * into 32 steps a channel, the fullest bucket wins, and what is returned is
+   * the average of what fell in it — which for a flat chip is the one colour
+   * it is drawn in, to the unit.
+   *
+   * *pixels* is RGBA, four bytes to a pixel, top row first.
+   */
+  function chipColour(pixels, width, height) {
+    if (!pixels || !width || !height) return null;
+    if (pixels.length < width * height * 4) return null;
+    // A big picture is sampled rather than counted: a few cars carry the whole
+    // livery sheet here instead of a chip, at two thousand pixels square.
+    const step = Math.max(1, Math.ceil(Math.max(width, height) / 256));
+    const rows = Math.max(1, Math.round(height / 2));
+    const buckets = new Map();
+    let best = null;
+    for (let y = 0; y < rows; y += step) {
+      for (let x = 0; x < width; x += step) {
+        const at = (y * width + x) * 4;
+        // A transparent corner is the chip's rounding, not a colour it is.
+        if (pixels[at + 3] < 128) continue;
+        const r = pixels[at];
+        const g = pixels[at + 1];
+        const b = pixels[at + 2];
+        const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+        let bucket = buckets.get(key);
+        if (!bucket) { bucket = [0, 0, 0, 0]; buckets.set(key, bucket); }
+        bucket[0] += r; bucket[1] += g; bucket[2] += b; bucket[3] += 1;
+        if (!best || bucket[3] > best[3]) best = bucket;
+      }
+    }
+    if (!best) return null;
+    const hex = (v) => Math.round(v / best[3]).toString(16).padStart(2, '0');
+    return `#${hex(best[0])}${hex(best[1])}${hex(best[2])}`;
+  }
+
+  /** The first colour a skin states, which most of them state only one of. */
+  function paintColour(text) {
+    const found = paintColours(text);
+    return found.length ? { hex: found[0].hex, enabled: found[0].enabled,
+      gloss: found[0].gloss, reflection: found[0].reflection } : null;
+  }
+
+  /**
+   * Group supplied files into the skins they came from.
+   *
+   * *pathOf* answers where a file was, since a `File` on its own only knows
+   * its name — a directory picker fills in `webkitRelativePath` and a folder
+   * drop has to be followed as it is walked.
+   */
+  function group(files, pathOf) {
+    const skins = new Map();
+    for (const file of files) {
+      const name = skinOf(pathOf(file));
+      if (!name) continue;
+      if (!skins.has(name)) {
+        skins.set(name, { name, images: new Map(), config: null, meta: null });
+      }
+      const skin = skins.get(name);
+      const plain = file.name.toLowerCase();
+      if (plain === 'ext_config.ini') skin.config = file;
+      else if (plain === 'cm_skin.json') skin.meta = file;
+      else if (IMAGE.test(file.name)) skin.images.set(plain, file);
+    }
+    return skins;
+  }
+
+  /**
+   * Read what a skin states, and hold it against the car it is for.
+   *
+   * *worn* is every texture name the model names and *materials* every
+   * material it has, both lowercased. A skin is worth offering for the
+   * pictures it replaces even when it says nothing else; one that names a
+   * material the car has not got — a config copied from another car, which
+   * happens — keeps its textures and loses only its colour.
+   */
+  async function read(skin, { worn }) {
+    const config = skin.config ? await skin.config.text() : '';
+    let colours = skin.meta ? paintColours(await skin.meta.text()) : [];
+    // Half of them have no `cm_skin.json` at all and say it in their config.
+    if (!colours.length && config) colours = configColours(config, skin.name);
+    return {
+      name: skin.name,
+      images: skin.images,
+      replaces: [...skin.images.keys()].filter((n) => worn.has(n)).length,
+      named: config ? paintMaterials(config) : [],
+      colours,
+      /* And the picture of the paint, for the ones that state no colour at
+       * all. Sixty-nine of the 189 skins to hand are in that position —
+       * an Audi's Sakhir Orange says `#FFFFFF` and switches it off, and its
+       * Silver Pearl has no `carPaint` section to say anything in — so read
+       * from what they do say, those cars come up white. Handed back rather
+       * than opened here: the pixels are the caller's to fetch. */
+      livery: colours.some((c) => c.enabled)
+        ? null : (skin.images.get('livery.png') || null),
+      paints: [],
+    };
+  }
+
+  /**
+   * Take the colour of a skin's chip as the colour it states, having none.
+   *
+   * Last of the three, and only where the other two said nothing: a picture is
+   * weaker evidence than a setting, and where both are there they disagree
+   * about a third of the time — usually because the setting is Content
+   * Manager's untouched white and the chip is the paint.
+   */
+  function fromChip(skin, hex) {
+    if (!hex || skin.colours.some((c) => c.enabled)) return skin;
+    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
+    return skin;
+  }
+
+  /**
+   * Which of the car's materials wear which of a skin's colours.
+   *
+   * One colour is the car's, however many materials the paint is spread over:
+   * a Clio V6 names `wccarbody` and `aleron` — its body and its spoiler — and
+   * states the one colour for both. Several are paired by order, which is the
+   * only thing the two lists share.
+   */
+  function pair(named, colours, materials) {
+    const out = [];
+    for (let at = 0; at < named.length; at++) {
+      const colour = colours.length === 1 ? colours[0] : colours[at];
+      if (!colour || !colour.enabled) continue;
+      if (!materials.has(named[at].toLowerCase())) continue;
+      out.push({ material: named[at], hex: colour.hex });
+    }
+    return out;
+  }
+
+  /**
+   * Settle what a car's paint is called, and put each skin's colour on it.
+   *
+   * Three places say so, in the order they are trusted: the skin's own config;
+   * the car's `extension/ext_config.ini`, since half of them declare it once
+   * for the whole car; and last what the car's *other* skins agree it is.
+   *
+   * That last one is a reading of the folder rather than of one file, and it
+   * is what a folder of skins usually needs. An Audi S8 has thirteen: three
+   * name `booody_aooo`, which the car has, and five name `carpaint`, which it
+   * has not — configs copied from another car, colour and all. Left there,
+   * those five state a perfectly good colour and put it nowhere. Only a skin
+   * that names nothing the car has is answered this way, and only from names
+   * its own siblings used.
+   */
+  function settle(skins, { materials, fallback }) {
+    const known = [];
+    for (const skin of skins) {
+      for (const name of skin.named) {
+        if (materials.has(name.toLowerCase()) && !known.includes(name)) known.push(name);
+      }
+    }
+    for (const skin of skins) {
+      let named = skin.named.filter((n) => materials.has(n.toLowerCase()));
+      if (!named.length) named = (fallback || []).filter((n) => materials.has(n.toLowerCase()));
+      if (!named.length) named = known;
+      skin.paints = pair(named, skin.colours, materials);
+    }
+    return skins;
+  }
+
+  return { group, read, settle, pair, skinOf, rgbHex, paintMaterials, paintColour, paintColours,
+    configColours, chipColour, fromChip };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;
 
 // ---- psd.js ------------------------------------------------------------
 /* Reader for the flattened image inside a Photoshop document — `.psd`.
@@ -6882,6 +7278,7 @@ const FbxAnalyze = (function () {
     ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum)$/i],
     ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
+    ['detail', /^(txdetail|detail|detailmap|detailtexture)$/i],
   ];
 
   /**
@@ -8743,6 +9140,10 @@ const FbxReport = (function () {
       pairs.push(['Metals', `${number(e.metals)} reflect more facing you than a `
         + 'dielectric can']);
     }
+    if (e.dimmed) {
+      pairs.push(['Dimmed', `${number(e.dimmed)} take less of the light than a plainly `
+        + 'lit surface, down to none at all']);
+    }
     if ((e.shaders || []).length) {
       pairs.push(['Shaders', e.shaders.slice(0, 6).join(', ')
         + (e.shaders.length > 6 ? ' …' : '')]);
@@ -9413,6 +9814,7 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uFinish;
   // Bump and normal maps, linear for the same reason.
   uniform highp sampler2DArray uBump;
+  uniform highp sampler2DArray uDetail;
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -9585,11 +9987,15 @@ ${SHADOW_LOOKUP}
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
+      // Whether the colour tints the texture or the texture replaces it.
+      bool tinted = texelFetch(uPalette, ivec2(slot, 3), 0).a > 0.5;
       if (uUseTextures == 1 && layer >= 0) {
         // A bound diffuse texture replaces the flat colour, as most DCC tools
-        // and viewers treat it. The sampler is sRGB, so this is already linear.
+        // and viewers treat it — unless the material says the colour is a tint
+        // to be multiplied through it, which is how a car's paint is stated.
+        // The sampler is sRGB, so this is already linear.
         vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
-        albedo = painted.rgb;
+        albedo = tinted ? painted.rgb * albedo : painted.rgb;
         /* …and its fourth channel is how much of the surface is there, for a
          * material that said that is where its transparency lives.
          *
@@ -9603,6 +10009,27 @@ ${SHADOW_LOOKUP}
          * drawn at all. */
         if (alphaMode == 2 && painted.a <= max(alphaCutoff, 1.0 / 255.0)) discard;
         if (alphaMode == 1) opacity *= painted.a;
+
+        /* The grain tiled over it, where the material wears one.
+         *
+         * A game's interior is one atlas of flat panels with the leather, the
+         * carpet and the carbon laid over them — tiled sixty or a hundred
+         * times across, so the picture underneath is the shape and the grain
+         * is the surface.
+         *
+         * Taken as neutral at its own average, since the file says how many
+         * times to tile it and not how much of it to mix in. The two readings
+         * are far apart: a Mercedes E63's paint wears a grain averaging 0.24,
+         * so multiplied straight its white body comes out graphite. This way
+         * the colour a car was authored stays where it was, and what arrives
+         * is the grain and the cast of the picture. */
+        vec4 grain = texelFetch(uPalette, ivec2(slot, 5), 0);
+        int detailLayer = int(grain.r + 0.5) - 1;
+        if (detailLayer >= 0) {
+          vec3 tiled = texture(uDetail,
+            vec3(vUv * max(grain.g, 1e-4), float(detailLayer))).rgb;
+          albedo *= clamp(tiled * grain.b, 0.0, 4.0);
+        }
       }
       /* A metallic-roughness map, where the material has one.
        *
@@ -9924,6 +10351,7 @@ ${SHADOW_LOOKUP}
         textures: gl.getUniformLocation(program, 'uTextures'),
         finish: gl.getUniformLocation(program, 'uFinish'),
         bump: gl.getUniformLocation(program, 'uBump'),
+        detail: gl.getUniformLocation(program, 'uDetail'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -10090,6 +10518,8 @@ ${SHADOW_LOOKUP}
       this.finishLayers = 0;
       this.bumpArray = gl.createTexture();
       this.bumpLayers = 0;
+      this.detailArray = gl.createTexture();
+      this.detailLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -10175,7 +10605,7 @@ ${SHADOW_LOOKUP}
       this.transparentMaterials = 0;
       if (!materials.length) { this.dirty = true; return; }
       const width = materials.length;
-      const data = new Float32Array(width * 5 * 4);
+      const data = new Float32Array(width * 6 * 4);
       materials.forEach((material, i) => {
         const rgb = material.colour || [0.72, 0.73, 0.76];
         const specular = material.specular || [0.04, 0.04, 0.04];
@@ -10206,6 +10636,15 @@ ${SHADOW_LOOKUP}
         data[(width * 3 + i) * 4 + 1] = typeof material.bumpStrength === 'number'
           ? Math.max(0, material.bumpStrength) : 1;
         data[(width * 3 + i) * 4 + 2] = material.bumpIsNormalMap ? 1 : 0;
+        /* Whether this material's colour tints its texture or is replaced by
+         * it. Replaced, ordinarily — that is what most tools and viewers do
+         * with a bound diffuse map, and a file's flat colour is a stand-in for
+         * the picture rather than a thing to multiply through it. But the map
+         * under a car's paint is the panels in white on black, and the colour
+         * is what the game multiplies through it: replaced by the colour the
+         * shut lines and the badge go with it, replaced by the map the car is
+         * white whichever skin is on. */
+        data[(width * 3 + i) * 4 + 3] = material.tintTexture ? 1 : 0;
         // The clear coat: how much of it comes back facing you, and how
         // polished it is. Nothing at zero, which is every surface without one.
         data[(width * 4 + i) * 4] = typeof material.coat === 'number'
@@ -10223,13 +10662,29 @@ ${SHADOW_LOOKUP}
         data[(width * 4 + i) * 4 + 2] = mode;
         data[(width * 4 + i) * 4 + 3] = typeof material.alphaCutoff === 'number'
           ? Math.min(1, Math.max(0, material.alphaCutoff)) : 0.5;
+        /* The grain tiled over the surface, and how many times across it.
+         *
+         * A game's interior is one atlas of flat panels with the leather, the
+         * carpet and the carbon laid over them a hundred times across — an
+         * Audi S8 has thirty-eight materials wearing one, and it is where nine
+         * of the fifteen files in each of its skins go. Without it the cabin
+         * is the atlas: flat grey shapes, and a skin that changes nothing. */
+        const detailLayer = Number.isInteger(material.detailLayer)
+          ? material.detailLayer : -1;
+        data[(width * 5 + i) * 4] = Math.max(0, detailLayer + 1);
+        data[(width * 5 + i) * 4 + 1] = typeof material.detailTiling === 'number'
+          ? Math.max(0, material.detailTiling) : 1;
+        // Taken as neutral at its own average, so a grain changes the surface
+        // and not how bright the car is.
+        data[(width * 5 + i) * 4 + 2] = typeof material.detailScale === 'number'
+          ? Math.min(8, Math.max(0.1, material.detailScale)) : 1;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
         }
       });
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 5, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 6, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;
@@ -10271,6 +10726,15 @@ ${SHADOW_LOOKUP}
     async setBumpTextures(images, edge = 1024) {
       this.bumpLayers = images.length;
       return this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
+    }
+
+    /**
+     * The grain a surface is tiled over with, which is a picture and not a
+     * measurement — so sRGB, as the base colour is.
+     */
+    async setDetailTextures(images, edge = 1024) {
+      this.detailLayers = images.length;
+      return this._uploadArray(this.detailArray, images, this.gl.SRGB8_ALPHA8, edge);
     }
 
     async _uploadArray(target, images, internalFormat, edge = 1024) {
@@ -10833,12 +11297,16 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE5);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.bumpArray);
       gl.uniform1i(this.uniforms.bump, 5);
+      gl.activeTexture(gl.TEXTURE6);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.detailArray);
+      gl.uniform1i(this.uniforms.detail, 6);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
-        ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0)
+        ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0
+          || this.detailLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,
@@ -10897,6 +11365,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     canvas: $('viewport'),
     meshInfo: $('mesh-info'),
     geometrySelect: $('geometry-select'),
+    skinSelect: $('skin-select'),
     modeSelect: $('mode-select'),
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
@@ -10952,6 +11421,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   let lastSurvey = null;
   /** Image files the user supplied, keyed by lowercased basename. */
   const suppliedImages = new Map();
+  /** Skin folders the user supplied, keyed by the folder's own name. */
+  const suppliedSkins = new Map();
+  /** The one that is on, read and held against the car it is for. */
+  let wearing = null;
+  /** Every skin worth offering for the car that is open. */
+  let skinsOffered = [];
+  /** What the car's own extension config calls its paint, for skins that
+   *  do not say — read from beside the car rather than from inside the game. */
+  let carPaintNames = [];
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
   /** Binary payloads a .gltf points at, keyed the same way. */
@@ -11038,37 +11516,51 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       .filter(Boolean);
   }
 
+  /* Where a dropped file was, which a `File` on its own does not know.
+   *
+   * A directory picker fills in `webkitRelativePath`; a folder drop hands over
+   * entries and the path has to be kept as they are walked. It matters because
+   * a car's skins are told apart by the folder they are in and by nothing
+   * else: every one of them holds a `leather_1.dds`. */
+  const droppedPaths = new WeakMap();
+
+  const pathOf = (file) => file.webkitRelativePath || droppedPaths.get(file) || file.name;
+
   /** Every file under what was dropped, folders walked through. */
   async function collectDropped(entries, plain) {
     if (!entries.length) return plain;
     const out = [];
     const fileOf = (entry) => new Promise((resolve) => entry.file(resolve, () => resolve(null)));
 
-    const walk = async (entry, depth) => {
+    const walk = async (entry, depth, under) => {
       if (out.length >= DROP_LIMIT || depth > DROP_DEPTH) return;
       if (entry.isFile) {
         const file = await fileOf(entry);
-        if (file) out.push(file);
+        if (file) {
+          droppedPaths.set(file, under ? `${under}/${file.name}` : file.name);
+          out.push(file);
+        }
         return;
       }
       if (!entry.isDirectory) return;
       const reader = entry.createReader();
+      const inside = under ? `${under}/${entry.name}` : entry.name;
       // readEntries hands back a batch at a time and an empty one at the end,
       // so it has to be asked until it says there is no more.
       for (;;) {
         const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
         if (!batch.length) break;
-        for (const child of batch) await walk(child, depth + 1);
+        for (const child of batch) await walk(child, depth + 1, inside);
         if (out.length >= DROP_LIMIT) break;
       }
     };
 
-    for (const entry of entries) await walk(entry, 0);
+    for (const entry of entries) await walk(entry, 0, '');
     return out.length ? out : plain;
   }
 
   //: What counts as something a model needs rather than something beside it.
-  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds|mtl|bin|json)$/i;
+  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds|mtl|bin|json|ini)$/i;
 
   /**
    * As much of a folder as is worth reading, models and their companions first.
@@ -11211,6 +11703,31 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const payloads = list.filter((f) => /\.bin$/i.test(f.name));
     const assignments = list.filter((f) => /\.json$/i.test(f.name));
     for (const image of images) suppliedImages.set(image.name.toLowerCase(), image);
+
+    /* A new model is a new car, and what stood beside the last one does not
+     * stand beside this one: skins left in the picker would offer another
+     * car's paint, and its `extension/ext_config.ini` would name another car's
+     * materials. What arrives *without* a model is an addition to whatever is
+     * open — a texture that was missing, a skin folder dropped afterwards — so
+     * only something that could be a model clears them.
+     */
+    if (list.some((file) => !COMPANION_NAMES.test(file.name))) {
+      suppliedSkins.clear();
+      carPaintNames = [];
+    }
+    // The paint jobs beside the car, kept apart by the folder each was in.
+    for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
+    /* And the car's own `extension/ext_config.ini`, since half of them declare
+     * which material is the paint once for the whole car rather than once per
+     * skin — a Renault 5 names `body`, `body2` and `rim_colored` there and its
+     * skins name none. */
+    for (const file of list) {
+      const where = pathOf(file).replace(/\\/g, '/');
+      if (!/(^|\/)extension\/ext_config\.ini$/i.test(where)) {
+        continue;
+      }
+      carPaintNames = FbxSkins.paintMaterials(await file.text());
+    }
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
     }
@@ -11382,9 +11899,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     await viewer.setTextures(textures.images);
     await viewer.setFinishTextures(textures.finish);
     await viewer.setBumpTextures(textures.bump);
+    await viewer.setDetailTextures(textures.detail);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
-      && textures.finish.length === 0 && textures.bump.length === 0;
+      && textures.finish.length === 0 && textures.bump.length === 0
+      && textures.detail.length === 0;
     return textures;
   }
 
@@ -11478,6 +11997,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     dom.exportGltf.disabled = true;
     dom.geometrySelect.innerHTML = '';
     dom.geometrySelect.disabled = true;
+    dom.skinSelect.innerHTML = '';
+    dom.skinSelect.hidden = true;
+    skinsOffered = [];
+    wearing = null;
     dom.explodeSlider.value = '0';
     dom.explodeSlider.disabled = true;
     dom.meshInfo.textContent = 'no file loaded';
@@ -11580,6 +12103,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         + `${doc.parseMilliseconds.toFixed(0)} ms`;
       setStatus(label, doc.warnings.length ? 'warn' : 'ok');
       // Last, and awaited: building a scene is the slow half of a load.
+      await populateSkins(doc);
       await populateGeometry(doc);
     } catch (error) {
       console.error(error);
@@ -12719,6 +13243,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     currentPalette = palette;
     currentMesh = mesh;
     dom.exportGltf.disabled = !mesh || !mesh.triangleCount;
+    // The skin's paint under the user's own edits and over the file's: a car
+    // wears what it was given until somebody says otherwise.
+    paintFromSkin(palette);
     // Settings first, grouping second: a renamed material has to be grouped
     // and sorted under the name it now goes by.
     FbxPalette.apply(palette, materialOverrides);
@@ -12726,6 +13253,62 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     materialGroups = FbxPalette.groups(palette, slotTriangles);
     viewer.setPalette(palette);
     renderMaterials();
+  }
+
+  /**
+   * Put the colour a skin states on the material it names.
+   *
+   * A skin's `cm_skin.json` gives the paint as `#AARRGGBB` and its
+   * `ext_config.ini` says which of the car's materials that paint is —
+   * `booody_aooo` on an Audi S8, which is the name somebody typed once and
+   * the game has used ever since. Both are the skin's own, so a car and the
+   * folder it came in are enough; nothing here needs the game installed.
+   *
+   * A skin that says its paint is off keeps the colour in its texture instead,
+   * and one whose config was copied from another car names a material this one
+   * has not got. Neither is painted over — they still bring their pictures.
+   */
+  function paintFromSkin(palette) {
+    const paints = new Map(((wearing && wearing.paints) || [])
+      .map((paint) => [paint.material, paint]));
+    for (const entry of palette) {
+      const file = entry.fromFile;
+      if (!file) continue;
+      // What the car was before any skin went on, so taking one off puts it
+      // back rather than leaving the last one's colour behind.
+      if (!entry.unpainted) {
+        entry.unpainted = { colour: file.colour.slice(), base: file.base.slice(),
+          tint: entry.tintTexture === true };
+      }
+      const paint = paints.get(file.name);
+      if (paint) {
+        /* The paint goes on over what the material already was, rather than
+         * in place of it. A car's body states how much of the light it takes
+         * the same as every other material does — an Audi's is 0.4 and 0.4,
+         * three-quarters of a plainly lit surface — and a skin says what
+         * colour it is, not how bright. Taken as a replacement, painting a
+         * car white makes it brighter than the car it was painted on. */
+        const weight = entry.unpainted.colour;
+        const colour = FbxPalette.fromHex(paint.hex)
+          .map((c, at) => c * (weight[at] === undefined ? 1 : weight[at]));
+        file.colour = colour.slice();
+        file.base = colour.slice();
+        /* And it tints the texture rather than replacing it.
+         *
+         * The map under a car's paint is the panels in white on black — an
+         * Audi's `Skin_00.dds` is exactly that — because the colour is what
+         * the game multiplies through it. Replaced by the colour the shut
+         * lines and the badge go with it; replaced by the map the car is
+         * white whichever skin is on. */
+        entry.tintTexture = true;
+      } else {
+        file.colour = entry.unpainted.colour.slice();
+        file.base = entry.unpainted.base.slice();
+        // Back to whichever way round the file itself said, which for a
+        // game's material is through the picture either way.
+        entry.tintTexture = entry.unpainted.tint;
+      }
+    }
   }
 
   /** Group the palette again, without counting the triangles again. */
@@ -13591,6 +14174,26 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         alphaCutoff: look.alphaCutoff,
       },
       texture: baseColor || null,
+      /* How many times the grain is tiled across the surface.
+       *
+       * The game states it beside the map, and it is the whole of what makes a
+       * detail map a detail: the same leather at 1 is a stretched sheet and at
+       * 60 is leather. A material that says it wears none has none, whatever
+       * map it also names — an Audi S8 has four such, and drawn they would be
+       * a sheet of carbon over a plain grey panel. */
+      detailTiling: props.useDetail === 0 ? 0
+        : (typeof props.detailUVMultiplier === 'number'
+          ? props.detailUVMultiplier : 1),
+      /* Whether the colour is read through the picture or replaced by it.
+       *
+       * Most files mean the second: a flat colour is a stand-in for the map
+       * that was not written beside it. A game's material means the first —
+       * everything it states about a surface is stated for the whole of it,
+       * and the picture is the pattern rather than the paint. An Audi S8's
+       * wheels are a grey panel map at three per cent of the light, and drawn
+       * either way round they are the difference between black rims and
+       * white ones. */
+      tintTexture: props.TintsTexture === 1 || props.TintsTexture === true,
       // The maps this tool does not show, kept as they were read.
       textures: rest,
       layer: -1,
@@ -13782,6 +14385,19 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
   async function decodeTexture(request, supplied) {
+    /* The skin first, if one is on.
+     *
+     * This is the one place a supplied file beats an embedded one, and it is
+     * the game's own rule rather than a preference: a `.kn5` holds the car
+     * unpainted and everything under `skins/<name>/` replaces the texture of
+     * that name for as long as that skin is chosen. Which skin is the question
+     * the folder is asking, so nothing is chosen here until somebody does.
+     */
+    const wornFile = wearing && wearing.images.get(baseName(request.path || request.name));
+    if (wornFile) {
+      const painted = await decodeSupplied(wornFile);
+      if (painted) return painted;
+    }
     if (request.embedded) {
       if (looksLikeKtx2(request.embedded)) return decodeKtx2(request.embedded);
       if (FbxPsd.looksLikePsd(request.embedded)) return decodePsd(request.embedded);
@@ -13794,7 +14410,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       }
     }
     const file = supplied.get(baseName(request.path));
-    if (!file) return null;
+    return file ? decodeSupplied(file) : null;
+  }
+
+  /** One file from disk as an image, whichever of the four kinds it is. */
+  async function decodeSupplied(file) {
     if (/\.ktx2$/i.test(file.name)) {
       return decodeKtx2(new Uint8Array(await file.arrayBuffer()));
     }
@@ -13926,6 +14546,75 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     }
   }
 
+  /**
+   * How bright a detail texture is on average, as a thumbnail sees it.
+   *
+   * A detail map is a *grain*: what it says is where the surface is lighter or
+   * darker than itself, tiled dozens of times across a panel. What it does not
+   * say is how much of it the game mixes in, and the two readings are far
+   * apart — a Mercedes E63's paint wears one averaging 0.24, so multiplied
+   * straight its white body comes out graphite, and an Audi's leather wears
+   * one at 0.28. So each is taken as neutral at its own average, and only what
+   * differs from that shows. The colour a car was authored stays where it was,
+   * and the grain and the cast of the picture arrive on top of it.
+   */
+  function detailScale(image, edge = 32) {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = edge;
+      canvas.height = edge;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(image, 0, 0, edge, edge);
+      const pixels = context.getImageData(0, 0, edge, edge).data;
+      /* Averaged in linear light, which is where the shader multiplies.
+       *
+       * A canvas hands back what the file holds — display-encoded — and the
+       * sampler undoes that encoding before the shader sees it. Averaged as
+       * read, a grain at 0.24 comes out five times too dark once its own
+       * average is divided back out, and a white Mercedes draws graphite. */
+      let total = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        total += (FbxPalette.fromSrgb(pixels[i] / 255)
+          + FbxPalette.fromSrgb(pixels[i + 1] / 255)
+          + FbxPalette.fromSrgb(pixels[i + 2] / 255)) / 3;
+      }
+      const mean = total / (pixels.length / 4);
+      // A map that reads as nothing at all is left alone rather than dividing
+      // by it: an alpha of zero comes back black through a canvas.
+      return mean > 0.02 ? 1 / mean : 1;
+    } catch (error) {
+      return 1;                       // unreadable pixels: take it as it comes
+    }
+  }
+
+  /**
+   * The colour of a skin's paint chip, from the file it came in.
+   *
+   * Drawn at its own size and read back straight: a chip is sixty-four pixels
+   * square and the point of it is the one flat colour most of it is, which a
+   * resize would blend away. A canvas premultiplies, so the transparent
+   * rounding at its corners comes back as black — which is why the reading
+   * skips anything not solidly there.
+   */
+  async function chipColour(file) {
+    try {
+      const image = await decodeSupplied(file);
+      if (!image) return null;
+      const width = Math.min(image.width || 0, 2048);
+      const height = Math.min(image.height || 0, 2048);
+      if (!width || !height) return null;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(0, 0, width, height).data;
+      return FbxSkins.chipColour(pixels, width, height);
+    } catch (error) {
+      return null;                        // unreadable picture: nothing stated
+    }
+  }
+
   async function resolveTextures(palette) {
     const base = await resolveLayer(palette,
       (m) => (wanted(m, 'baseColor') ? m.texture : null), 'layer');
@@ -13934,26 +14623,111 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         ? m.textures.metallicRoughness : null), 'finishLayer');
     const relief = await resolveLayer(palette,
       (m) => (wanted(m, 'normal') && m.textures ? m.textures.normal : null), 'bumpLayer');
+    const grain = await resolveLayer(palette,
+      (m) => (wanted(m, 'detail') && m.detailTiling && m.textures
+        ? m.textures.detail : null), 'detailLayer');
     // Which kind each layer turned out to be, and how hard to take it. A
     // normal map states its own slopes and is taken as written; a height has
     // to be turned into one, and the strength is what says how deep it reads.
     const kinds = relief.images.map((image) => looksLikeNormalMap(image));
+    const scales = grain.images.map((image) => detailScale(image));
     for (const material of palette) {
       const layer = material.bumpLayer;
       material.bumpIsNormalMap = layer >= 0 ? kinds[layer] : false;
       material.bumpStrength = material.bumpIsNormalMap ? 1 : BUMP_RELIEF;
+      material.detailScale = material.detailLayer >= 0
+        ? scales[material.detailLayer] : 1;
     }
     return {
       images: base.images,
       requested: base.requested,
       // A map that was named and did not arrive is worth saying so about,
       // whichever of the three it was.
-      missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing])],
+      missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing,
+        ...grain.missing])],
       unreadable: [...new Set([...base.unreadable, ...finish.unreadable,
-        ...relief.unreadable])],
+        ...relief.unreadable, ...grain.unreadable])],
       finish: finish.images,
       bump: relief.images,
+      detail: grain.images,
     };
+  }
+
+  /**
+   * Offer the skins that came with the car, and say what each one brings.
+   *
+   * A skin is worth offering for the pictures it replaces even when it says
+   * nothing else, so what is counted is how many of the textures this model
+   * names it has — a skin holding fifteen of an Audi's hundred and nineteen is
+   * the fifteen that make it Alpine White. One that brings none of them is
+   * for another car and is left out.
+   */
+  async function populateSkins(doc) {
+    dom.skinSelect.innerHTML = '';
+    wearing = null;
+    if (!suppliedSkins.size || !doc || doc.format !== 'kn5') {
+      dom.skinSelect.hidden = true;
+      return;
+    }
+    const objects = FbxAnalyze.child(doc.root, 'Objects');
+    const named = (type) => (objects ? objects.children : [])
+      .filter((entry) => entry.name === type)
+      .map((entry) => String(entry.props[1].value).split('\u0000')[0]);
+    const worn = new Set(named('Video').map((n) => n.toLowerCase()));
+    const materials = new Set(named('Material').map((n) => n.toLowerCase()));
+
+    const read = [];
+    for (const skin of suppliedSkins.values()) {
+      const state = await FbxSkins.read(skin, { worn });
+      // And where it stated no colour, the colour of the chip it carries a
+      // picture of, which is the only thing left saying what it is.
+      if (state.livery) FbxSkins.fromChip(state, await chipColour(state.livery));
+      read.push(state);
+    }
+    FbxSkins.settle(read, { materials, fallback: carPaintNames });
+    const offered = read.filter((skin) => skin.replaces > 0)
+      .sort((a, b) => b.replaces - a.replaces || a.name.localeCompare(b.name));
+    if (!offered.length) {
+      dom.skinSelect.hidden = true;
+      return;
+    }
+    skinsOffered = offered;
+    const bare = document.createElement('option');
+    bare.value = '';
+    bare.textContent = 'No skin — as the file has it';
+    dom.skinSelect.appendChild(bare);
+    for (const skin of offered) {
+      const option = document.createElement('option');
+      option.value = skin.name;
+      option.textContent = `${skin.name} — ${skin.replaces} texture`
+        + `${skin.replaces === 1 ? '' : 's'}`
+        + (skin.paints.length ? ` + ${skin.paints.length} paint`
+          + `${skin.paints.length === 1 ? '' : 's'}` : '');
+      dom.skinSelect.appendChild(option);
+    }
+    dom.skinSelect.hidden = false;
+    dom.skinSelect.value = '';
+  }
+
+  /** Put a skin on, or take the one that is on off, and draw it again. */
+  async function wearSkin(name) {
+    wearing = skinsOffered.find((skin) => skin.name === name) || null;
+    if (!currentPalette.length) return;
+    setStatus(wearing ? `Putting ${wearing.name} on…` : 'Taking the skin off…');
+    const textures = await refreshTextures();
+    // The paint is a palette setting rather than a texture, so it goes on with
+    // the palette rather than with the images.
+    paintFromSkin(currentPalette);
+    FbxPalette.apply(currentPalette, materialOverrides);
+    viewer.setPalette(currentPalette);
+    renderMaterials();
+    setStatus(wearing
+      ? `${wearing.name}: ${wearing.replaces} texture(s) over the top of the car`
+        + (wearing.paints.length
+          ? `, and its paint on ${wearing.paints.map((p) => p.material).join(', ')}`
+          : '')
+      : 'The car as the file has it.');
+    return textures;
   }
 
   function populateGeometry(doc) {
@@ -14132,9 +14906,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       await viewer.setTextures(textures.images);
       await viewer.setFinishTextures(textures.finish);
       await viewer.setBumpTextures(textures.bump);
+    await viewer.setDetailTextures(textures.detail);
+      await viewer.setDetailTextures(textures.detail);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
-        && textures.finish.length === 0 && textures.bump.length === 0;
+        && textures.finish.length === 0 && textures.bump.length === 0
+        && textures.detail.length === 0;
       applyUpAxis(built.mesh);
 
       const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
@@ -14342,9 +15119,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       await viewer.setTextures(textures.images);
       await viewer.setFinishTextures(textures.finish);
       await viewer.setBumpTextures(textures.bump);
+    await viewer.setDetailTextures(textures.detail);
+      await viewer.setDetailTextures(textures.detail);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
-        && textures.finish.length === 0 && textures.bump.length === 0;
+        && textures.finish.length === 0 && textures.bump.length === 0
+        && textures.detail.length === 0;
 
       const chosen = applyUpAxis(mesh);
 
@@ -14424,6 +15204,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const candidates = FbxAnalyze.findAllGeometry(currentDoc);
       const entry = candidates[Number(dom.geometrySelect.value)];
       if (entry) showGeometry(entry);
+    });
+    dom.skinSelect.addEventListener('change', () => {
+      wearSkin(dom.skinSelect.value).catch((error) => {
+        setStatus(`could not put that skin on: ${error.message}`, 'error');
+      });
     });
     dom.modeSelect.addEventListener('change', () => {
       modeChosen = true;

@@ -2508,6 +2508,33 @@ def _kn5_text(value: str) -> bytes:
     return struct.pack("<I", len(raw)) + raw
 
 
+def livery_png(rows, *, alpha: bool = True) -> bytes:
+    """A paint chip as Content Manager writes one: an eight-bit PNG.
+
+    *rows* is a list of rows, each a list of ``(r, g, b)`` or ``(r, g, b, a)``.
+    Written unfiltered, one row at a time, which is what a picture this small
+    comes out as.
+    """
+    height = len(rows)
+    width = len(rows[0])
+    channels = 4 if alpha else 3
+    raw = bytearray()
+    for row in rows:
+        raw.append(0)                     # filter: none
+        for pixel in row:
+            values = list(pixel) + ([255] if alpha and len(pixel) == 3 else [])
+            raw += bytes(values[:channels])
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return (struct.pack(">I", len(body)) + tag + body
+                + struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 6 if alpha else 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(bytes(raw)))
+            + chunk(b"IEND", b""))
+
+
 def kn5_property(name: str, a: float = 0.0, b=(0.0, 0.0), c=(0.0, 0.0, 0.0),
                  d=(0.0, 0.0, 0.0, 0.0)) -> bytes:
     """One shader parameter: a name and four value groups, all written."""

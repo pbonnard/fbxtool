@@ -15,12 +15,13 @@ from pathlib import Path
 import pytest
 
 import fbxbuild as fb
-from fbxtool import analyze, parse_bytes, read_fbx
+from fbxtool import analyze, kn5, parse_bytes, read_fbx
 from fbxtool.model import ParseError
 from fbxtool.reader import detect_format
 from fbxtool.report import render_text, to_dict
 
 ROOT = Path(__file__).resolve().parent.parent
+NL = chr(10)
 
 
 # --------------------------------------------------------------- a small car
@@ -340,16 +341,67 @@ def test_how_many_metals_a_car_holds_is_counted(car):
     assert "1 reflect more facing you" in render_text(analyze(doc))
 
 
-def test_the_colour_comes_from_the_texture_and_not_from_the_material(car):
-    """A kn5 material has no colour of its own: `ksDiffuse` weights the game's
-    own lighting, and the albedo is whatever `txDiffuse` holds."""
+def test_the_pattern_comes_from_the_texture_and_the_light_from_the_material(car):
+    """A kn5 material states no colour of its own — `txDiffuse` is the albedo —
+    but it does state how much of the light it takes, and the two multiply."""
     body = next(m for m in objects_of(car, "Material") if m.value(1).startswith("body"))
     props = properties_of(body)
-    assert props["DiffuseColor"] == [1.0, 1.0, 1.0]
-    # …and what it does say is still there under the name it said it with.
+    # 0.3 and 0.4 against the 0.5 and 0.6 a plainly lit surface states.
+    assert props["DiffuseColor"] == pytest.approx([0.7 / 1.1] * 3)
+    assert props["TintsTexture"] == 1, "read through the picture, not replaced by it"
+    # …and what it said is still there under the name it said it with.
     assert props["ksDiffuse"] == pytest.approx(0.4)
     assert props["ksAmbient"] == pytest.approx(0.3)
     assert props["ShaderName"] == "ksPerPixelMultiMap"
+
+
+def weighted(ambient=None, diffuse=None) -> float:
+    """What one material's colour comes out as, stating these two weights."""
+    props = b""
+    count = 0
+    for name, value in (("ksAmbient", ambient), ("ksDiffuse", diffuse)):
+        if value is not None:
+            props += fb.kn5_property(name, value)
+            count += 1
+    doc = parse_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("panel", properties=props, property_count=count)],
+        tree=fb.kn5_dummy("car", IDENTITY)))
+    return properties_of(objects_of(doc, "Material")[0])["DiffuseColor"][0]
+
+
+@pytest.mark.parametrize("ambient,diffuse,expected,what", [
+    (0.5, 0.6, 1.0, "the pair most of them state, and the editor's own default"),
+    (0.4, 0.4, 0.727, "an Audi S8's paint, which is a shade off a plain surface"),
+    (0.03, 0.01, 0.036, "its wheels, which the game draws black"),
+    (0.0, 0.0, 0.0, "its headlight housings, which take no light at all"),
+    (2.0, 2.0, 1.0, "a dashboard lit brighter than the light, which cannot be"),
+    (None, None, 1.0, "a material stating neither, which is read as a plain one"),
+], ids=["plain", "paint", "wheels", "lamps", "overbright", "silent"])
+def test_how_much_of_the_light_a_material_takes_is_read(ambient, diffuse, expected, what):
+    """`ksAmbient` and `ksDiffuse` weight the two halves of the game's own
+    lighting rather than tinting anything, and both halves are diffuse — so in
+    a viewer with one fixed light they have nowhere to go but the albedo, which
+    is the same arithmetic.
+
+    Read without them an Audi S8 comes up white from end to end: the pictures
+    under its rims and its lamps are grey panel maps, and the colour was never
+    in the picture.
+    """
+    assert weighted(ambient, diffuse) == pytest.approx(expected, abs=1e-3), what
+
+
+def test_how_many_materials_are_dimmed_is_counted(car):
+    """Which is most of a car: 94 of an Audi S8's 97."""
+    assert car.extra["dimmed"] == 1, "the body states low weights; the other two state none"
+    assert "1 take less of the light" in render_text(analyze(car))
+    plain = parse_bytes(fb.build_kn5(
+        materials=[fb.kn5_material(
+            "panel", properties=(fb.kn5_property("ksAmbient", 0.5)
+                                 + fb.kn5_property("ksDiffuse", 0.6)),
+            property_count=2)],
+        tree=fb.kn5_dummy("car", IDENTITY)))
+    assert plain.extra["dimmed"] == 0
+    assert "take less of the light" not in render_text(analyze(plain))
 
 
 def test_an_emissive_written_as_a_colour_is_read_as_one(car):
@@ -619,12 +671,296 @@ def test_the_json_carries_what_is_only_true_of_a_kn5(car):
         "ksPerPixelAT", "ksPerPixelMultiMap", "ksPerPixelReflection"]
 
 
+def test_the_paint_sitting_beside_a_car_is_counted(tmp_path):
+    """A kn5 carries one set of textures and the game puts another over the
+    top: everything under ``skins/<name>/`` replaces the texture of that name.
+
+    So what is in the file is the car unpainted, and a car that comes up pale
+    is not necessarily one that was read wrongly. An Audi S8's own textures are
+    ambient occlusion over bare grey; its thirteen skins are what make it
+    Alpine White or Sakhir Orange.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(small_car())
+    skins = tmp_path / "skins"
+    for name, files in (("Alpine_White", ["paint.dds", "maps.dds", "readme.txt"]),
+                        ("Sakhir_Orange", ["PAINT.DDS"]),
+                        ("empty", [])):
+        (skins / name).mkdir(parents=True)
+        for entry in files:
+            (skins / name / entry).write_bytes(b"")
+    # A file that is not a folder, and a texture no material names, are both
+    # beside the point and neither may upset the count.
+    (skins / "notes.txt").write_bytes(b"")
+
+    doc = read_fbx(str(path))
+    assert doc.extra["skins"] == [
+        {"name": "Alpine_White", "replaces": 2, "paints": []},
+        # matched without regard to case
+        {"name": "Sakhir_Orange", "replaces": 1, "paints": []},
+        {"name": "empty", "replaces": 0, "paints": []},
+    ]
+    assert "Alpine_White puts 2 of its textures over the top" in render_text(analyze(doc))
+
+
+def test_the_colour_a_skin_states_is_read_with_the_material_it_goes_on(tmp_path):
+    """Two files, both the skin's own, so a car and the folder it came in are
+    enough: `ext_config.ini` names the material and Content Manager's
+    `cm_skin.json` gives the colour as `#AARRGGBB`.
+
+    The alpha comes first, so taking the first six characters would paint the
+    car with its own opacity — #FF1A2025 is a near-black blue and #FF1A20 a red.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(small_car())
+    skins = tmp_path / "skins"
+    for name, names_it, colour, extra in (
+        ("Azurite", "body", '"#FF1A2025"', ""),
+        ("Elsewhere", "some_other_car", '"#FF1A2025"', ""),
+        ("Textured", "body", '"#FF1A2025"', ', "enabled": false'),
+        ("Nonsense", "body", '"purple"', ""),
+    ):
+        (skins / name).mkdir(parents=True)
+        (skins / name / "paint.dds").write_bytes(b"")
+        (skins / name / "ext_config.ini").write_text(
+            "CarPaintMaterial = " + names_it + chr(10), encoding="utf-8")
+        (skins / name / "cm_skin.json").write_text(
+            '{"carPaint": {"color": ' + colour + extra + '}}', encoding="utf-8")
+
+    doc = read_fbx(str(path))
+    by_name = {skin["name"]: skin for skin in doc.extra["skins"]}
+    assert by_name["Azurite"]["paints"] == [
+        {"material": "body", "colour": "#1a2025"}], "the alpha is not the red"
+    # A skin whose paint is off keeps the colour in its texture instead, and a
+    # colour that is not one is not one.
+    for name in ("Textured", "Nonsense"):
+        assert by_name[name]["paints"] == [], name
+    # One whose config was copied from another car names a material this one
+    # has not got — and is answered by what its siblings called the paint.
+    assert by_name["Elsewhere"]["paints"] == [
+        {"material": "body", "colour": "#1a2025"}]
+    assert "paints body #1a2025" in render_text(analyze(doc))
+
+
+def test_a_car_that_names_its_paint_once_for_every_skin_is_read_too(tmp_path):
+    """Half of them declare which material is the paint in the car's own
+    `extension/ext_config.ini` rather than in each skin, under the other of
+    the two spellings — and state several, paired with the several colours a
+    skin gives by the order both are written in.
+
+    A Renault 5 names `body`, `body2` and `rim_colored` there and its skins
+    answer with `extBody1`, `extBody2` and `extRims1`; without this the picker
+    offers the skins and the car does not change colour.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("body"), fb.kn5_material("body2"),
+                   fb.kn5_material("rim_colored")],
+        tree=fb.kn5_dummy("car", IDENTITY)))
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "ext_config.ini").write_text(
+        "[INCLUDE: common/materials_carpaint.ini]" + NL
+        + "[Material_CarPaint_Metallic]" + NL
+        + "Materials = body" + NL
+        + "[Material_CarPaint_Metallic]" + NL
+        + "Materials = body2" + NL
+        + "[Material_CarPaint_Metallic]" + NL
+        + "Materials = rim_colored" + NL
+        # A `Materials` key outside a paint section is not the paint.
+        + "[Material_Glass]" + NL
+        + "Materials = glass" + NL, encoding="utf-8")
+    skin = tmp_path / "skins" / "01_blue_olympe"
+    skin.mkdir(parents=True)
+    (skin / "paint.dds").write_bytes(b"")
+    (skin / "cm_skin.json").write_text(
+        '{"extBody1": {"color": "#FF003C7C"}, "extBody2": {"color": "#FF006ECE"},'
+        ' "extRims1": {"color": "#FF046AC9"}, "carpet": {"enabled": true}}',
+        encoding="utf-8")
+
+    paints = read_fbx(str(path)).extra["skins"][0]["paints"]
+    assert paints == [
+        {"material": "body", "colour": "#003c7c"},
+        {"material": "body2", "colour": "#006ece"},
+        {"material": "rim_colored", "colour": "#046ac9"},
+    ]
+
+
+def test_a_skin_that_states_its_colour_in_its_own_config(tmp_path):
+    """Half of them have no `cm_skin.json` at all. A chameleon paint states two
+    colours in the config instead — one facing you and one at a grazing angle,
+    each with an opacity after it — and only the first is taken, since there is
+    one albedo here and A is what the car looks like from where you stand.
+
+    And one colour is the car's however many materials the paint is spread
+    over: a Clio V6 names `wccarbody` and `aleron`, its body and its spoiler,
+    and states the one colour for both. Without either, "Illiad Blue" is white.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("wccarbody"), fb.kn5_material("aleron")],
+        tree=fb.kn5_dummy("car", IDENTITY)))
+    skin = tmp_path / "skins" / "Illiad_Blue"
+    skin.mkdir(parents=True)
+    (skin / "paint.dds").write_bytes(b"")
+    (skin / "ext_config.ini").write_text(
+        "[INCLUDE]" + NL
+        + "CarPaintMaterial = wccarbody, aleron" + NL
+        + "[Material_CarPaint_Chameleon]" + NL
+        + "Skins=Illiad_Blue" + NL
+        + "ChameleonColorA=#33007f, 0.50    ;first color and opacity" + NL
+        + "ChameleonColorB=#ffff00, 0.25    ;second color and opacity" + NL,
+        encoding="utf-8")
+
+    doc = read_fbx(str(path))
+    assert doc.extra["skins"][0]["paints"] == [
+        {"material": "wccarbody", "colour": "#33007f"},
+        {"material": "aleron", "colour": "#33007f"},
+    ]
+
+
+def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins(tmp_path):
+    """Three places say which material is the paint, in the order they are
+    trusted: the skin's own config, the car's, and last what the car's *other*
+    skins agree it is.
+
+    That last is a reading of the folder rather than of one file, and it is
+    what a folder of skins usually needs: an Audi S8 has thirteen, of which
+    three name a material it has and five name `carpaint`, which it has not —
+    configs copied from another car, colour and all. Left there, those five
+    state a perfectly good colour and put it nowhere.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(small_car())
+    for name, names_it, colour in (("knows", "body", "#FF111111"),
+                                   ("copied", "some_other_car", "#FF222222"),
+                                   ("silent", None, "#FF333333")):
+        skin = tmp_path / "skins" / name
+        skin.mkdir(parents=True)
+        (skin / "paint.dds").write_bytes(b"")
+        if names_it:
+            (skin / "ext_config.ini").write_text(
+                "CarPaintMaterial = " + names_it + NL, encoding="utf-8")
+        (skin / "cm_skin.json").write_text(
+            '{"carPaint": {"color": "' + colour + '"}}', encoding="utf-8")
+
+    by_name = {skin["name"]: skin["paints"]
+               for skin in read_fbx(str(path)).extra["skins"]}
+    assert by_name["knows"] == [{"material": "body", "colour": "#111111"}]
+    assert by_name["copied"] == [{"material": "body", "colour": "#222222"}]
+    assert by_name["silent"] == [{"material": "body", "colour": "#333333"}]
+
+
+def test_a_skin_that_states_no_colour_anywhere_brings_only_its_pictures(tmp_path):
+    """Four of a Clio V6's six say nothing about colour in the folder at all —
+    their config names the shader and no more. They are offered for what they
+    do bring, and nothing is invented for the rest."""
+    path = tmp_path / "car.kn5"
+    path.write_bytes(small_car())
+    skin = tmp_path / "skins" / "Acid_Yellow"
+    skin.mkdir(parents=True)
+    (skin / "paint.dds").write_bytes(b"")
+    (skin / "ext_config.ini").write_text(
+        "CarPaintMaterial = body" + NL
+        + "[Material_CarPaint_Solid]" + NL
+        + "Skins = Acid_Yellow" + NL, encoding="utf-8")
+    doc = read_fbx(str(path))
+    assert doc.extra["skins"][0] == {"name": "Acid_Yellow", "replaces": 1, "paints": []}
+
+
+def test_a_car_with_nothing_beside_it_says_nothing_about_skins(tmp_path):
+    path = tmp_path / "car.kn5"
+    path.write_bytes(small_car())
+    doc = read_fbx(str(path))
+    assert doc.extra["skins"] == []
+    assert "Skins" not in render_text(analyze(doc))
+    # And one read from memory has nowhere to look.
+    assert parse_bytes(small_car()).extra["skins"] == []
+
+
 def test_a_file_on_disk_is_read_by_the_same_route(tmp_path):
     path = tmp_path / "car.kn5"
     path.write_bytes(small_car())
     doc = read_fbx(str(path))
     assert doc.format == "kn5"
     assert doc.file_size == path.stat().st_size
+
+
+# ---------------------------------------------------------------- the paint chip
+
+
+def chip(rows, **kw) -> str:
+    return kn5._chip_colour(fb.livery_png(rows, **kw))
+
+
+def test_the_colour_of_a_paint_chip_is_the_commonest_one_in_it():
+    """`livery.png` is the swatch Content Manager shows beside a skin's name —
+    a rounded square of the paint with a gloss sweeping over it — and every one
+    of the 189 skins to hand has one.
+
+    Two things make a plain average the wrong reading. The gloss is a wide
+    bright sweep, and under some of them is a band of dark reflection: a
+    Renault 5's Blanc Perle chip is white over black, and averaged it is a
+    mid-grey nobody painted. So the commonest colour is taken, over the upper
+    half where the paint is.
+    """
+    paint = (0x56, 0x5d, 0x6b)            # Champagne Quartz, as its JSON says
+    flat = chip([[paint] * 8] * 8)
+    assert flat == "#565d6b", "a flat chip is the one colour it is drawn in"
+
+    gloss = [[paint] * 8 for _ in range(8)]
+    for x in range(3):
+        gloss[0][x] = (255, 255, 255)     # the highlight across a corner
+    assert chip(gloss) == "#565d6b", "a highlight is not the paint"
+
+    over = [[(255, 255, 255)] * 8 for _ in range(4)] + [[(10, 10, 10)] * 8 for _ in range(4)]
+    assert chip(over) == "#ffffff", "the reflection under a chip is not the paint"
+
+    assert chip([[paint] * 8] * 8, alpha=False) == "#565d6b", "written without an alpha"
+    rounded = [[paint + (0,)] * 8 for _ in range(8)]
+    rounded[0][0] = paint + (255,)
+    assert chip(rounded) == "#565d6b", "a transparent corner is the rounding"
+
+
+def test_a_chip_this_does_not_read_states_nothing():
+    """Five of the 189 are a palette or interlaced, and are left unread rather
+    than half-read."""
+    assert kn5._chip_colour(b"not a picture at all") == ""
+    assert kn5._chip_colour(b"") == ""
+
+
+def test_a_skin_that_states_no_colour_is_read_from_its_chip(tmp_path):
+    """Sixty-nine of the 189 state none: an Audi's Sakhir Orange says #FFFFFF
+    and switches it off, and its Silver Pearl has no `carPaint` section to say
+    anything in. Read from what they say, those cars come up white.
+
+    A picture is weaker evidence than a setting — where both are there they
+    disagree about a third of the time, usually because the setting is Content
+    Manager's untouched white — so the chip is read last and only where there
+    is nothing to disagree with.
+    """
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        materials=[fb.kn5_material("body", slots=(("txDiffuse", 0, "paint.dds"),))],
+        textures=[("paint.dds", fb.dds_bc1())],
+        tree=fb.kn5_dummy("car", IDENTITY)))
+    skins = tmp_path / "skins"
+    for name in ("Sakhir", "Nighthawk"):
+        (skins / name).mkdir(parents=True)
+        (skins / name / "paint.dds").write_bytes(b"")
+        (skins / name / "ext_config.ini").write_text(
+            "CarPaintMaterial = body" + NL, encoding="utf-8")
+        (skins / name / "livery.png").write_bytes(
+            fb.livery_png([[(0x94, 0x1a, 0x0a)] * 8] * 8))
+    # One of them switches its colour off, which is the same as stating none.
+    (skins / "Sakhir" / "cm_skin.json").write_text(
+        '{"carPaint": {"color": "#FFFFFFFF", "enabled": false}}', encoding="utf-8")
+    # And the other states one, which the picture does not get to argue with.
+    (skins / "Nighthawk" / "cm_skin.json").write_text(
+        '{"carPaint": {"color": "#FF0C0C0C"}}', encoding="utf-8")
+
+    painted = {skin["name"]: skin["paints"] for skin in read_fbx(str(path)).extra["skins"]}
+    assert painted["Sakhir"] == [{"material": "body", "colour": "#941a0a"}]
+    assert painted["Nighthawk"] == [{"material": "body", "colour": "#0c0c0c"}]
 
 
 # ----------------------------------------------------- a real car, if there is one

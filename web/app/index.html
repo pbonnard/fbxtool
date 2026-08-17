@@ -31,6 +31,10 @@
     <canvas id="viewport"></canvas>
     <div class="viewport-controls">
       <select id="geometry-select" title="Geometry to display" disabled></select>
+      <!-- A .kn5 holds the car unpainted: everything under skins/<name>/
+           beside it replaces a texture of the same name. Which skin it wears
+           is the folder's question, so it is asked here. -->
+      <select id="skin-select" title="Skin to wear" hidden></select>
       <select id="mode-select" title="Shading mode">
         <option value="0">File colours</option>
         <option value="1">Index colours</option>

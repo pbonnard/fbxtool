@@ -302,6 +302,10 @@ def _render_kn5_rows(rows: list[tuple[str, Any]], doc) -> None:
     if metals:
         rows.append(("Metals", f"{metals:,} reflect more facing you than a "
                                "dielectric can"))
+    dimmed = extra.get("dimmed", 0)
+    if dimmed:
+        rows.append(("Dimmed", f"{dimmed:,} take less of the light than a plainly "
+                               "lit surface, down to none at all"))
     shaders = extra.get("shaders") or []
     if shaders:
         rows.append(("Shaders", ", ".join(shaders[:6])
@@ -323,6 +327,16 @@ def _render_kn5_rows(rows: list[tuple[str, Any]], doc) -> None:
         rows.append(("Named but absent", f"{len(missing):,}: "
                                          + ", ".join(missing[:4])
                                          + (" …" if len(missing) > 4 else "")))
+    skins = [skin for skin in (extra.get("skins") or []) if skin["replaces"]]
+    if skins:
+        best = skins[0]
+        detail = (f"{len(skins):,} beside the file — {best['name']} puts "
+                  f"{best['replaces']:,} of its textures over the top")
+        paints = best.get("paints") or []
+        if paints:
+            detail += " and paints " + ", ".join(
+                f"{paint['material']} {paint['colour']}" for paint in paints)
+        rows.append(("Skins", detail + ". What is in the car is the car unpainted"))
 
 
 def _render_blend_rows(rows: list[tuple[str, Any]], doc) -> None:

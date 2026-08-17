@@ -550,6 +550,8 @@ File
   Geometry:    412,529 vertices, 454,543 triangles
   Not drawn:   11 inactive node(s), 6 hidden mesh(es)
   Materials:   150 (150 worn by a mesh)
+  Metals:      16 reflect more facing you than a dielectric can
+  Dimmed:      115 take less of the light than a plainly lit surface, down to none at all
   Shaders:     ksBrakeDisc, ksBrokenGlass, ksPerPixel, ksPerPixelAT, ksPerPixelAT_NM, ksPerPixelAlpha …
   Textures:    135 embedded, 58.8 MiB — 111 DDS, 24 PNG
 
@@ -587,14 +589,33 @@ towards the front of the car, which leaves +X pointing at its left-hand side;
 that is what `GlobalSettings` says, rather than mirroring a car to make it look
 like something else.
 
-**Materials.** A kn5 material has no colour of its own — `txDiffuse` is the
-albedo, and `ksAmbient` and `ksDiffuse` weight the ambient and direct halves of
-the game's own lighting rather than tinting anything — so the diffuse colour is
-white and the texture is what is seen. `ksSpecularEXP` is the shininess
-exponent, and `fresnelC` is a reflectance facing you, so that is what it is
-written as, rather than a Phong highlight that has to be capped before it is
-believed. Every parameter the file names is also carried under the name it
-named it with, so a shader setting with no FBX spelling is still there to read.
+**Materials.** A kn5 material states no colour of its own — `txDiffuse` is the
+albedo — so the picture is the pattern and the material's colour is read
+through it rather than replacing it. `ksSpecularEXP` is the shininess exponent,
+and `fresnelC` is a reflectance facing you, so that is what it is written as,
+rather than a Phong highlight that has to be capped before it is believed.
+Every parameter the file names is also carried under the name it named it with,
+so a shader setting with no FBX spelling is still there to read.
+
+**How much of the light a material takes.** `ksAmbient` and `ksDiffuse` weight
+the two halves of the game's own lighting rather than tinting anything. Both
+halves are diffuse, so in a viewer with one fixed light they have nowhere to go
+but the albedo, where they are the same arithmetic — dimming the light that
+reaches a surface and dimming the surface come to the same picture. Of 1728
+materials across the 27 cars to hand the commonest pair by a wide margin is
+**0.5 and 0.6** — 278 of them, one in six, and the value the game's own editor
+starts a material at — so that is what a plainly lit surface is and everything
+is read against it. A quarter ask for more light than they were given, which a
+dashboard or a lamp lens does on purpose; a diffuse surface cannot return more
+than it got, so that is where it stops.
+
+This is the whole of why an Audi S8 comes up white from end to end. Its paint
+is 0.4 and 0.4 — three-quarters of a plainly lit surface — its wheels are 0.03
+and 0.01, and its headlight housings are nothing at all. The pictures under
+those are grey panel maps, because the colour was never in the picture, so read
+without the weights the rims, the lamps and the carbon mirror caps all draw as
+bright as the body. 94 of that car's 97 materials are dimmed, and the report
+says how many.
 
 **Metals.** A kn5 states no metalness. The game shades a car with a Blinn-Phong
 highlight and a Schlick Fresnel over it — `fresnelC` facing you rising to
@@ -627,10 +648,27 @@ under it, which is what the game itself does; only a material carrying a
 metallic-roughness map has its diffuse cancelled per pixel. An exported `.glb`
 carries the metalness as `metallicFactor`.
 
-**Texture slots.** `txDiffuse`, `txNormal` and `txGlow` fill the FBX slots that
-mean the same thing. Everything else keeps the game's own name — `txMaps` is
-not a metallic-roughness map however much it looks like one, and a map drawn
-from the wrong end is worse than one not drawn. On the shaders that model a car
+**Texture slots.** `txDiffuse`, `txNormal`, `txGlow` and `txDetail` fill the
+slots that mean the same thing. Everything else keeps the game's own name —
+`txMaps` is not a metallic-roughness map however much it looks like one, and a
+map drawn from the wrong end is worse than one not drawn.
+
+`txDetail` is the **grain a surface is tiled over with**, and it is most of
+what a skin brings. A car's interior is one atlas of flat panels with the
+leather, the carpet and the carbon laid over them sixty or a hundred times
+across: the picture underneath is the shape and the grain is the surface. An
+Audi S8 has thirty-eight materials wearing one, and nine of the fifteen files
+in each of its skins go there — so without it a skin changes the badge and the
+number plate and leaves the cabin exactly as it was.
+
+What the file states is how many times to tile it and not how much of it to
+mix in, and the two readings are far apart: multiplied straight, a Mercedes
+E63's paint — whose grain averages 0.24 — turns a white car graphite. So each
+grain is taken as **neutral at its own average**, measured in linear light,
+and only what differs from that average shows. The colour a car was authored
+stays where it was, and what arrives is the grain and the cast of the picture:
+put `Alpine_White` on that Audi and its cabin goes from flat grey to tan
+leather, which is the file the skin brought. On the shaders that model a car
 being crashed, `txNormal` is not the surface's own relief either: it is the
 dents, blended in as damage accumulates. The Mercedes' body names a
 1024-square of them there, and drawn at face value every panel comes out beaten
@@ -655,6 +693,117 @@ The viewer decodes DDS itself — BC1, BC2 and BC3, BC4 and BC5, and
 uncompressed surfaces read by their channel masks. No browser will make an
 image of one, and 111 of that Mercedes' 135 textures are DDS, so without it the
 car opens as a grey model with no paint, no badges and no dials.
+
+**A car in the file is a car unpainted.** A kn5 carries one set of textures
+and the game puts another over the top before it draws: every file under
+`skins/<name>/` beside the car replaces the texture of that name for as long
+as that skin is chosen. An Audi S8's own textures are ambient occlusion over
+bare grey — read straight, it comes up white from end to end, and it looks
+like something has gone wrong. It has not: the car has thirteen skins beside
+it, and `Alpine_White` alone puts fifteen of its textures over the top.
+
+So the skins are counted and named in the report, the way an `.obj`'s material
+libraries are, since a pale car is otherwise indistinguishable from a broken
+reader. All five cars to hand have them, replacing between 2 and 15 textures
+apiece.
+
+Two files in a skin folder say more than the pictures do, and both are the
+skin's own — nothing here needs the game installed to read either:
+
+| | |
+| --- | --- |
+| `ext_config.ini` | which materials of the car are its paint. Two spellings for the one thing, and a car uses whichever its author did: `CarPaintMaterial = booody_aooo` on an Audi S8, and a `[Material_CarPaint_*]` section with `Materials = body` on a Renault 5, once per paint. |
+| `cm_skin.json` | Content Manager's colours, as `#AARRGGBB`. The alpha comes first, so taking the first six characters paints the car with its own opacity: `#FF1A2025` is a near-black blue and `#FF1A20` is a red. |
+| `ext_config.ini`, again | the colours themselves, for the half of them that have no `cm_skin.json`. A chameleon paint states two — `ChameleonColorA` facing you and `ChameleonColorB` at a grazing angle, each with an opacity after it — and only the first is taken, since there is one albedo here and A is what the car looks like from where you are standing. A Clio V6's Illiad Blue is `#33007f` turning to yellow at the edges. |
+| `livery.png` | the picture of the paint, for the ones that state no colour at all — 69 of the 189 skins to hand, and every one of the 189 has the picture. |
+
+**And last the chip, where nothing was stated.** `livery.png` is the swatch
+Content Manager shows beside a skin's name: a rounded square of the paint with
+a gloss sweeping over it, sixty-four pixels square. It is a picture rather than
+a statement, so it is read after both files and never against them — where both
+are there they disagree about a third of the time, usually because the setting
+is Content Manager's untouched white. But read, it is exact: a Champagne Quartz
+chip is 1874 pixels of `#565D6B` and its `cm_skin.json` says `#565D6B`.
+
+Two things make a plain average the wrong reading. The gloss is a wide bright
+sweep, and under some of them is a band of dark reflection — a Renault 5's
+Blanc Perle chip is white over black, and averaged it is a mid-grey nobody
+painted. So the *commonest* colour is taken, over the upper half where the
+paint is: colours are gathered into 32 steps a channel, the fullest bucket
+wins, and what comes back is the average of what fell in it. Without this an
+Audi's Sakhir Orange — which says `#FFFFFF` and switches it off — and its
+Silver Pearl, Silverstone and Moonstone, which have no `carPaint` section at
+all, are four white cars.
+
+**Where the skin names no material the car's own
+`extension/ext_config.ini` is asked instead**, since half of them declare it
+once for the whole car rather than once per skin. Without that only the Audi
+of five cars to hand paints at all; with it the Renault does too, and the
+Renault is the one that shows why the pairing has to be by *order*. Its config
+names `body`, `body2` and `rim_colored`; its skins answer with `extBody1`,
+`extBody2` and `extRims1` — three and three, in the same sequence and with the
+names corroborating — and `01_blue_olympe` comes out a deep blue body under a
+lighter blue roof on blue wheels, which is what it is.
+
+**One colour is the car's, however many materials the paint is spread over.**
+A Clio V6 names `wccarbody` and `aleron` — its body and its spoiler — and
+states the one colour for both. Several colours are paired by order; one is
+put on all of them.
+
+A section that names the skins it is for is only for those, since one folder's
+config can carry a block written for another. And a skin can state no colour
+at all: four of that Clio's six say nothing about it anywhere in the folder,
+their config naming the shader and no more. They are offered for the pictures
+they do bring — the picker says *Acid_Yellow — 2 textures*, without a paint —
+and nothing is invented for the rest.
+
+**Last, a car's paint is settled across its own skins.** An Audi S8 has
+thirteen: three name `booody_aooo`, which the car has, and five name
+`carpaint`, which it has not — configs copied from another car, colour and all.
+Left at what each file says, those five state a perfectly good colour and put
+it nowhere. So a skin that names nothing the car has is answered by what its
+own siblings called the paint, which takes that Audi from four skins painting
+to nine. It is a reading of the folder rather than of one file, and only ever
+from names the folder itself used.
+
+Where nothing in the folder names a material — an Alfa Brera states three real
+colours and has no `extension/` at all — nothing is guessed. Those skins bring
+their textures and no paint, and say so.
+
+That car's own `extension/ext_config.ini` is worth being clear about, since it
+looks like the place to go. It is not: it holds the shader parameters for the
+paint — clear coat, flake, Fresnel — and every `COLOR=` in its 1,490 lines is
+a *light*, at intensities like `517,290,0`. Nor is it self-contained: it
+`[INCLUDE]`s twelve files, of which one is beside the car and the rest live
+inside Custom Shaders Patch. What is read from it is the one thing it does
+state and the skins sometimes do not — which material is the paint.
+
+Both are read for what they say and held against the model rather than
+believed. A config copied from another car names a material this one has not
+got — a Cullinan skin asks for `carpaint` on a car whose paint is called
+`body` — and a slot that says its paint is *off* keeps the colour in its
+texture instead. Neither is painted over; both still bring their pictures. An
+Alfa Brera states three real colours and no material anywhere, and nothing is
+guessed for it.
+
+**The viewer offers them, and does not choose.** Open the car's folder and a
+skin picker appears beside the geometry list, saying what each one brings —
+*Alpine_White — 15 textures + 1 paint*. Choosing one puts its files over the
+car's own, which is the one place a supplied file beats an embedded one and is
+the game's own rule rather than a preference. Choosing nothing leaves the car
+as the file has it, which is where it starts.
+
+A new model empties the list, since what stood beside the last car does not
+stand beside this one and a picker still offering the old paint is worse than
+no picker. What arrives *without* a model is an addition to whatever is open —
+a texture that was missing, a skin folder dropped afterwards — and is kept.
+
+The paint **tints** the texture rather than replacing it. The map under a car's
+paint is its panels in white on black — an Audi's `Skin_00.dds` is exactly that
+— because the colour is what the game multiplies through it. Replaced by the
+colour, the shut lines and the badge go with it; replaced by the map, the car
+is white whichever skin is on. Every other material is left as it was: a bound
+texture replaces the flat colour, as most tools and viewers treat it.
 
 **A protected car** is a different thing again, and the report says which kind
 of file it has been given rather than leaving a shattered model to be taken for

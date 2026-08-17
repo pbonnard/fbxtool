@@ -36,6 +36,7 @@ SCRIPTS = [
     "gltfin.js",
     "max.js",
     "kn5.js",
+    "skins.js",
     "psd.js",
     "dds.js",
     "transform.js",

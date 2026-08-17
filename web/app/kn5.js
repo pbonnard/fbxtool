@@ -102,6 +102,40 @@ const FbxKn5 = (function () {
       / (METAL_FLOOR - DIELECTRIC_CEILING));
   }
 
+  /* What a plainly lit surface takes from the light: `ksAmbient` and
+   * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
+   * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
+   * — 278 of them, one in six, and the value the game's own editor starts a
+   * material at. */
+  const LIGHT_AMBIENT = 0.5;
+  const LIGHT_DIFFUSE = 0.6;
+
+  /**
+   * How much of the light a material takes, against a plainly lit one.
+   *
+   * `ksAmbient` and `ksDiffuse` weight the two halves of the game's own
+   * lighting rather than tinting anything. Both halves are diffuse, so in a
+   * viewer with one fixed light the two weights have nowhere to go but the
+   * albedo, where they are the same arithmetic: dimming the light that reaches
+   * a surface and dimming the surface come to the same picture.
+   *
+   * This is the whole of why an Audi S8 comes up white from end to end. Its
+   * paint is 0.4 and 0.4 and its wheels are 0.03 and 0.01; its headlight
+   * housings are nothing at all. The pictures under those are grey panel maps
+   * — the colour was never in the picture — so read without the weights the
+   * rims, the lamps and the carbon mirror caps all draw as bright as the body,
+   * and the body draws brighter than the game ever shows it.
+   *
+   * A quarter of them ask for more light than a plainly lit surface gets,
+   * which a dashboard or a lamp lens does on purpose. A diffuse surface cannot
+   * return more than it was given, so that is where this stops.
+   */
+  function lightWeight(material) {
+    const weight = (scalarOf(material, 'ksAmbient', LIGHT_AMBIENT)
+      + scalarOf(material, 'ksDiffuse', LIGHT_DIFFUSE)) / (LIGHT_AMBIENT + LIGHT_DIFFUSE);
+    return Math.min(Math.max(weight, 0), 1);
+  }
+
   const node = (name, props = [], children = []) => ({ name, props, children });
   const S = (value) => ({ code: 'S', typeName: 'string', value: String(value) });
   const I = (value) => ({ code: 'I', typeName: 'int32', value: value | 0 });
@@ -510,6 +544,7 @@ const FbxKn5 = (function () {
 
     /* ---- materials */
     let metals = 0;
+    let dimmed = 0;
     const materialUids = materials.map((material) => {
       const id = uid();
       /* What comes back facing you. The game's shaders spell a Schlick Fresnel
@@ -524,11 +559,16 @@ const FbxKn5 = (function () {
       /* Split between the two halves of the surface the way every importer
        * here does: what is left of the diffuse once the metal has taken its
        * share, and a reflectance that is the dielectric's on that share and the
-       * conductor's own on the rest. A kn5 material has no colour of its own —
-       * `txDiffuse` is the albedo, and `ksAmbient`/`ksDiffuse` weight the
-       * ambient and direct halves of the game's own lighting rather than
-       * tinting anything — so the colour being split is white. */
-      const diffuse = 1 - metal;
+       * conductor's own on the rest.
+       *
+       * A kn5 material states no colour of its own — `txDiffuse` is the albedo
+       * — but it does state how much of the light it takes, and that is a
+       * greyscale the picture is read through. So the colour being split is
+       * that weight rather than white, and it multiplies the map instead of
+       * standing in for one. */
+      const weight = lightWeight(material);
+      if (weight < 0.999) dimmed += 1;
+      const diffuse = (1 - metal) * weight;
       const specular = facing * (1 - metal) + metal;
       const props = [
         p70('DiffuseColor', 'Color', D(diffuse), D(diffuse), D(diffuse)),
@@ -540,6 +580,11 @@ const FbxKn5 = (function () {
       props.push(p70('Opacity', 'Number', D(1)));
       props.push(p70('AlphaMode', 'KString', S(alphaMode)));
       props.push(p70('ShaderName', 'KString', S(material.shader)));
+      // And that the colour above is read through the picture rather than
+      // replaced by it, which is the usual way round. Everything a kn5 states
+      // about a surface is stated for the whole of it and the picture is the
+      // pattern, so the two multiply.
+      props.push(p70('TintsTexture', 'Bool', I(1)));
       if (material.alphaTested) {
         props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
       }
@@ -779,6 +824,7 @@ const FbxKn5 = (function () {
         materials: materials.length,
         materialsUsed: scene.used.size,
         metals,
+        dimmed,
         shaders: [...new Set(materials.map((m) => m.shader))].sort(),
         nodes: scene.nodes,
         meshes: scene.meshes,

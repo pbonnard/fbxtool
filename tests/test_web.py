@@ -287,6 +287,350 @@ def test_a_surface_it_will_not_claim_comes_back_as_nothing(tmp_path, mangle, why
     assert _decode_dds(tmp_path, mangle(fb.dds_bc1())) is None, why
 
 
+# ------------------------------------------ the paint beside a car
+
+
+def _skins(expression: str):
+    """Evaluate an expression against the page's own ``skins.js``, under Node."""
+    script = (
+        f"const S=require({str(WEB / 'app' / 'skins.js')!r});"
+        f"console.log(JSON.stringify({expression}));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@needs_node
+@pytest.mark.parametrize("value,expected,why", [
+    ("#FF1A2025", "#1a2025", "Content Manager writes ARGB, alpha first"),
+    ("#1A2025", "#1a2025", "and six characters are already what a picker wants"),
+    ("#abc", "#aabbcc", "three are shorthand for six"),
+    ("nonsense", None, "and anything else is not a colour"),
+], ids=["argb", "rgb", "short", "junk"])
+def test_a_skins_colour_is_read_without_its_alpha(value, expected, why):
+    """Taking the first six characters of `#FF1A2025` paints the car with its
+    own opacity: `#FF1A20` is a red, and the colour is a near-black blue."""
+    assert _skins(f"S.rgbHex({value!r})") == (expected.lower() if expected else None), why
+
+
+@needs_node
+def test_which_material_a_skin_calls_the_paint():
+    """One key in the skin's own `ext_config.ini`, sometimes a list and
+    sometimes repeated, in a file otherwise full of things that live inside
+    Custom Shaders Patch rather than beside the car."""
+    config = """\
+[INCLUDE: common/materials_carpaint.ini]
+CarPaintMaterial =booody_aooo
+DisableDev = 1
+[Material_CarPaint_Metallic]
+CarPaintMaterial = carpaint, carpaint2  ; two of them
+CarPaintMaterial=booody_aooo
+"""
+    assert _skins(f"S.paintMaterials({config!r})") == [
+        "booody_aooo", "carpaint", "carpaint2"]
+    assert _skins("S.paintMaterials('nothing here')") == []
+
+
+@needs_node
+def test_what_content_manager_says_the_paint_is():
+    meta = ('{"carPaint":{"color":"#FF1A2025","enabled":true,"gloss":0.178,'
+            '"reflection":0.767},"carpet":{"enabled":true}}')
+    assert _skins(f"S.paintColour({meta!r})") == {
+        "hex": "#1a2025", "enabled": True, "gloss": 0.178, "reflection": 0.767}
+    # A skin that says its paint is off keeps the colour in its texture
+    # instead, and putting the colour on as well paints it twice.
+    off = '{"carPaint":{"color":"#FFFFFFFF","enabled":false}}'
+    assert _skins(f"S.paintColour({off!r})")["enabled"] is False
+    assert _skins("S.paintColour('not json')") is None
+    assert _skins("S.paintColour('{}')") is None
+
+
+@needs_node
+def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
+    """Three places say which material is the paint, in the order they are
+    trusted: the skin's own config, the car's, and last what the car's
+    *other* skins agree it is.
+
+    That last is a reading of the folder rather than of one file, and it is
+    what a folder of skins usually needs: an Audi S8 has thirteen, of which
+    three name a material it has and five name `carpaint`, which it has not —
+    configs copied from another car, colour and all. Left there, those five
+    state a perfectly good colour and put it nowhere.
+    """
+    skins = [
+        {"name": "knows", "named": ["booody_aooo"],
+         "colours": [{"hex": "#111111", "enabled": True}]},
+        {"name": "copied", "named": ["carpaint"],
+         "colours": [{"hex": "#222222", "enabled": True}]},
+        {"name": "silent", "named": [],
+         "colours": [{"hex": "#333333", "enabled": True}]},
+        {"name": "colourless", "named": ["carpaint"], "colours": []},
+    ]
+    settled = _skins(
+        f"S.settle({json.dumps(skins)}, "
+        f"{{materials: new Set(['booody_aooo']), fallback: []}})")
+    assert [(s["name"], s["paints"]) for s in settled] == [
+        ("knows", [{"material": "booody_aooo", "hex": "#111111"}]),
+        ("copied", [{"material": "booody_aooo", "hex": "#222222"}]),
+        ("silent", [{"material": "booody_aooo", "hex": "#333333"}]),
+        ("colourless", []),
+    ]
+
+
+@needs_node
+def test_a_colour_a_skin_states_in_its_own_config():
+    """Half of them have no `cm_skin.json` at all. A chameleon paint states
+    two colours in the config instead — one facing you and one at a grazing
+    angle, each with an opacity after it and a comment after that.
+
+    Only the first is taken: there is one albedo here, and A is what the car
+    looks like from where you are standing. A Clio V6's Illiad Blue is
+    `#33007f` turning to yellow at the edges, and read without it the car is
+    white.
+    """
+    config = """\
+[INCLUDE]
+CarPaintMaterial = wccarbody, aleron
+[Material_CarPaint_Chameleon]
+Skins=Illiad_Blue
+ChameleonColorA=#33007f, 0.50    ;first color and opacity
+ChameleonColorB=#ffff00, 0.25    ;second color and opacity
+"""
+    assert _skins(f"S.configColours({config!r}, 'Illiad_Blue')") == [
+        {"key": "chameleoncolora", "hex": "#33007f", "enabled": True,
+         "gloss": None, "reflection": None}]
+    # A section that names the skins it is for is only for those: one
+    # folder's config can carry a block written for another.
+    assert _skins(f"S.configColours({config!r}, 'Mars_Red')") == []
+    # And a colour outside a paint section is not the paint.
+    stray = "[Material_Glass]" + chr(10) + "ChameleonColorA=#33007f"
+    assert _skins(f"S.configColours({stray!r}, 'any')") == []
+
+
+@needs_node
+def test_the_colour_of_the_paint_chip_a_skin_carries():
+    """`livery.png` is the swatch Content Manager shows beside a skin's name —
+    a rounded square of the paint with a gloss sweeping over it — and every one
+    of the 189 skins to hand has one. It is a picture rather than a statement,
+    so it is read last and only where nothing was stated; but read, it is
+    exact. A Champagne Quartz chip is 1874 pixels of #565D6B and its
+    `cm_skin.json` says #565D6B.
+
+    Two things make a plain average the wrong reading. The gloss is a wide
+    bright sweep, and under some of them is a band of dark reflection: a
+    Renault 5's Blanc Perle chip is white over black, and averaged it is a
+    mid-grey nobody painted.
+    """
+    # Eight rows of a chip: paint over the reflection under it, one corner
+    # taken by a highlight and one by the rounding, which is transparent.
+    build = """
+      const paint = [0x56, 0x5d, 0x6b];
+      const px = new Uint8ClampedArray(8 * 8 * 4);
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const at = (y * 8 + x) * 4;
+        const rgb = y < 4 ? paint : [10, 10, 10];
+        px[at] = rgb[0]; px[at + 1] = rgb[1]; px[at + 2] = rgb[2]; px[at + 3] = 255;
+      }
+      px[0] = 255; px[1] = 255; px[2] = 255;
+      px[7 * 4 + 3] = 0;
+    """
+    assert _skins(f"(() => {{{build} return S.chipColour(px, 8, 8); }})()") == "#565d6b"
+    assert _skins("S.chipColour(new Uint8ClampedArray(4), 0, 0)") is None
+    assert _skins("S.chipColour(new Uint8ClampedArray(4), 8, 8)") is None, \
+        "fewer pixels than the size claims"
+    assert _skins("S.chipColour(new Uint8ClampedArray(4 * 4), 2, 2)") is None, \
+        "nothing solidly there is nothing to read"
+
+
+@needs_node
+def test_a_chip_does_not_argue_with_a_colour_the_skin_stated():
+    """A picture is weaker evidence than a setting, and where both are there
+    they disagree about a third of the time — usually because the setting is
+    Content Manager's untouched white and the chip is the paint."""
+    stated = {"name": "Nighthawk", "colours": [
+        {"key": "carPaint", "hex": "#0c0c0c", "enabled": True}]}
+    assert _skins(f"S.fromChip({json.dumps(stated)}, '#941a0a').colours"
+                  )[0]["hex"] == "#0c0c0c"
+    # One that switched its colour off stated none, which is where a chip
+    # comes in: an Audi's Sakhir Orange says #FFFFFF and turns it off.
+    off = {"name": "Sakhir", "colours": [
+        {"key": "carPaint", "hex": "#ffffff", "enabled": False}]}
+    assert _skins(f"S.fromChip({json.dumps(off)}, '#941a0a').colours") == [
+        {"key": "livery", "hex": "#941a0a", "enabled": True,
+         "gloss": None, "reflection": None}]
+    # And an unreadable chip states nothing rather than something.
+    assert _skins(f"S.fromChip({json.dumps(off)}, null).colours") == off["colours"]
+
+
+@needs_node
+@pytest.mark.parametrize("path,expected", [
+    ("faz_audi_s8_plus/skins/Alpine_White/leather_1.dds", "Alpine_White"),
+    ("skins/black/cm_skin.json", "black"),
+    (r"faz_audi_s8_plus\skins\Nighthawk\Plate_D.dds", "Nighthawk"),
+    ("faz_audi_s8_plus/texture/body.dds", None),
+    ("skins/black/deeper/still.dds", None),
+], ids=["nested", "bare", "backslashes", "outside", "too-deep"])
+def test_which_skin_a_file_came_from(path, expected):
+    """Every skin holds a `leather_1.dds`; the folder is the only thing that
+    tells them apart."""
+    assert _skins(f"S.skinOf({path!r})") == expected
+
+
+@needs_clang
+@needs_node
+def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
+    """A car's interior is one atlas of flat panels with the leather, the
+    carpet and the carbon laid over them, tiled sixty or a hundred times
+    across. An Audi S8 has thirty-eight materials wearing one, and nine of the
+    fifteen files in each of its skins go there — so without it a skin changes
+    the badge and the number plate and leaves the cabin as it was.
+
+    What the file does not say is how much of the grain to mix in, and the two
+    readings are far apart: multiplied straight, a Mercedes E63's paint — whose
+    grain averages 0.24 — turns a white car graphite. So each is taken as
+    neutral at its own average, in linear light.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([128, 128, 128, 255]) * 16)
+    # A grain dark and light in equal measure, so its own average is the middle
+    # of it and only the green shows.
+    green = fb.dds_bgra(4, 4, (bytes([0, 60, 0, 255]) * 8) + (bytes([0, 200, 0, 255]) * 8))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, slots, textures in (
+        ("plain", (("txDiffuse", 0, "grey.dds"),), [("grey.dds", grey)]),
+        ("grained", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "green.dds")),
+         [("grey.dds", grey), ("green.dds", green)]),
+    ):
+        material = fb.kn5_material(
+            "panel", "ksPerPixelMultiMap",
+            properties=(fb.kn5_property("fresnelC", 0.05)
+                        + fb.kn5_property("useDetail", 1.0)
+                        + fb.kn5_property("detailUVMultiplier", 1.0)),
+            property_count=3, slots=slots)
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=textures, materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "detail.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
+    """A `.kn5` holds the car unpainted: everything under `skins/<name>/`
+    beside it replaces the texture of that name, and the skin's own two
+    settings files say what colour the paint is and which material it goes on.
+
+    Read without any of that an Audi S8 comes up white from end to end and
+    looks like something has gone wrong. It has not — it is a car nobody has
+    painted yet.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    car = tmp_path / "car"
+    (car / "extension").mkdir(parents=True)
+    for name in ("Red", "Stranger", "Pair", "Bare", "Chip"):
+        (car / "skins" / name).mkdir(parents=True)
+    # A paint map is the panels in white, because the colour is what the game
+    # multiplies through it.
+    white = fb.dds_bgra(4, 4, bytes([255, 255, 255, 255]) * 16)
+    materials = [
+        fb.kn5_material(name, "ksPerPixelMultiMap",
+                        properties=fb.kn5_property("fresnelC", 0.05),
+                        property_count=1,
+                        slots=(("txDiffuse", 0, "paint.dds"),))
+        for name in ("carpaint", "trim")
+    ]
+    # And one that takes almost none of the light, which is what an Audi's
+    # wheels are: the same white map under it, and black on the screen.
+    materials.append(fb.kn5_material(
+        "sill", "ksPerPixelMultiMap",
+        properties=(fb.kn5_property("fresnelC", 0.05)
+                    + fb.kn5_property("ksAmbient", 0.03)
+                    + fb.kn5_property("ksDiffuse", 0.01)),
+        property_count=3, slots=(("txDiffuse", 0, "paint.dds"),)))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    small, small_indices = fb.kn5_cube(0.2)
+    tree = fb.kn5_dummy(
+        "car", identity,
+        fb.kn5_mesh("body", vertices, indices, material=0)
+        + fb.kn5_mesh("bumper", small, small_indices, material=1)
+        + fb.kn5_mesh("sill", small, small_indices, material=2), 3)
+    (car / "car.kn5").write_bytes(fb.build_kn5(
+        6, textures=[("paint.dds", white)], materials=materials, tree=tree))
+
+    # Half of them declare which material is the paint once for the whole car
+    # rather than once per skin, and in the other spelling.
+    (car / "extension" / "ext_config.ini").write_text(
+        "[Material_CarPaint_Metallic]" + chr(10)
+        + "Materials = carpaint" + chr(10)
+        + "[Material_CarPaint_Metallic]" + chr(10)
+        + "Materials = trim" + chr(10), encoding="utf-8")
+
+    for name, names_it, meta in (
+        ("Red", "carpaint", '{"carPaint": {"color": "#FFDD2010"}}'),
+        ("Stranger", "some_other_car", '{"carPaint": {"color": "#FFDD2010"}}'),
+        # No config of its own, two colours under the names half of them use.
+        ("Pair", None,
+         '{"extBody1": {"color": "#FF2010DD"}, "extBody2": {"color": "#FF10DD20"}}'),
+        # And one that states no colour anywhere at all.
+        ("Bare", "carpaint", '{"carPaint": {"enabled": true}}'),
+        # Nor does this one, but it carries a picture of the paint, which is
+        # the only thing left saying what colour it is.
+        ("Chip", "carpaint", '{"carPaint": {"color": "#FFFFFFFF", "enabled": false}}'),
+    ):
+        skin = car / "skins" / name
+        (skin / "paint.dds").write_bytes(white)
+        if names_it:
+            (skin / "ext_config.ini").write_text(
+                "CarPaintMaterial = " + names_it + chr(10), encoding="utf-8")
+        (skin / "cm_skin.json").write_text(meta, encoding="utf-8")
+    # A chip: the paint over the band of dark reflection under it.
+    (car / "skins" / "Chip" / "livery.png").write_bytes(fb.livery_png(
+        [[(0x20, 0x10, 0xdd)] * 8] * 4 + [[(10, 10, 10)] * 8] * 4))
+
+    # A second car, with nothing beside it, to open over the top of the first.
+    other = tmp_path / "other.kn5"
+    other.write_bytes(fb.build_kn5(
+        6, textures=[("paint.dds", white)], materials=[materials[0]],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("body", vertices, indices), 1)))
+
+    result = _run(["node", str(WEB / "test" / "skin.js"), str(car), str(other)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
 # ----------------------------------------- the Assetto Corsa reader
 
 def _rounded(value, places: int = 9):

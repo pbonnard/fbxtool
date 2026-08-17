@@ -1,0 +1,201 @@
+/* Putting a skin on a car, which is how an Assetto Corsa car gets its paint.
+ *
+ *   node web/test/skin.js <folder holding a .kn5 and skins/>
+ *
+ * A `.kn5` holds the car unpainted. Everything under `skins/<name>/` beside it
+ * replaces the texture of that name, and the skin's own two settings files say
+ * what colour the paint is and which material of the car it goes on. Read
+ * straight, without any of that, an Audi S8 comes up white from end to end and
+ * looks like something has gone wrong.
+ *
+ * The fixture is two cubes wearing a white panel map — which is what a paint
+ * map is — beside three skins that between them cover every way this can go:
+ *
+ *   Red       states a colour and a material the car has, in its own config
+ *   Pair      states two colours and no materials at all, and takes them from
+ *             the car's own `extension/ext_config.ini` — which is where half
+ *             of them are declared, once for the whole car. A Renault 5 names
+ *             `body`, `body2` and `rim_colored` there, and its skins pair
+ *             those with `extBody1`, `extBody2` and `extRims1` by order.
+ *   Stranger  states a colour for a material the car has not got, which is
+ *             what a config copied from another car does, and is answered by
+ *             what the car itself calls its paint
+ *   Bare      states no colour anywhere, and is offered for its pictures only
+ *   Chip      states none either, but carries the `livery.png` every skin has
+ *             — a rounded square of the paint over a band of dark reflection,
+ *             which is the only thing left saying what colour it is
+ *
+ * The car also wears a material that takes almost none of the light, which is
+ * what an Audi S8's wheels are: `ksAmbient` at 0.03 and `ksDiffuse` at 0.01
+ * under the same white map as the paint. Read without those the rims, the lamp
+ * housings and the carbon mirror caps all come up as bright as the body.
+ *
+ * Then a second car with no skins at all is opened over the top, since what
+ * stood beside the last one does not stand beside this one and a picker still
+ * offering the old paint is worse than no picker.
+ */
+'use strict';
+
+const path = require('path');
+const fs = require('fs');
+const { chromium } = require('playwright');
+const { launch } = require('./chromium');
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const PAGE = path.join(ROOT, 'web', 'dist', 'fbxview.html');
+
+let failures = 0;
+
+function check(label, condition, detail = '') {
+  if (!condition) failures++;
+  console.log(`  ${condition ? 'ok  ' : 'FAIL'} ${label}${detail ? `  — ${detail}` : ''}`);
+}
+
+/** Average colour of the middle of the viewport, in 0-255. */
+function sample(page) {
+  return page.evaluate(() => {
+    const canvas = document.getElementById('viewport');
+    const gl = canvas.getContext('webgl2');
+    const half = 24;
+    const cx = Math.round(canvas.width / 2);
+    const cy = Math.round(canvas.height / 2);
+    const px = new Uint8Array(half * 2 * half * 2 * 4);
+    gl.readPixels(cx - half, cy - half, half * 2, half * 2, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const total = [0, 0, 0];
+    for (let i = 0; i < px.length; i += 4) {
+      total[0] += px[i]; total[1] += px[i + 1]; total[2] += px[i + 2];
+    }
+    return total.map((v) => Math.round(v / (px.length / 4)));
+  });
+}
+
+async function wear(page, name) {
+  await page.selectOption('#skin-select', name);
+  await page.waitForTimeout(900);
+  return sample(page);
+}
+
+/** What the palette says a material's colour is, as "#rrggbb". */
+function colourOf(page, material) {
+  return page.evaluate((name) => {
+    const entry = window.fbxtool.palette.find((m) => m.name === name);
+    return entry ? FbxPalette.toHex(entry.colour) : null;
+  }, material);
+}
+
+async function main() {
+  const [folder, other] = process.argv.slice(2);
+  if (!folder || !other) {
+    console.error('usage: node web/test/skin.js <folder> <other.kn5>');
+    process.exit(2);
+  }
+  if (!fs.existsSync(PAGE)) {
+    console.error(`${PAGE} is missing — run: python3 web/build.py`);
+    process.exit(2);
+  }
+
+  const browser = await launch(chromium);
+  const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(String(error)));
+  await page.goto(`file://${PAGE}`);
+  await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
+
+  const before = await page.evaluate(() => window.fbxtool.loadCount);
+  await page.setInputFiles('#folder-input', folder);
+  await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, before,
+    { timeout: 180000 });
+  await page.waitForTimeout(900);
+
+  const offered = await page.evaluate(() => {
+    const select = document.getElementById('skin-select');
+    return { hidden: select.hidden, options: [...select.options].map((o) => o.textContent) };
+  });
+  console.log('what the folder brought');
+  check('the picker is offered', offered.hidden === false);
+  check('every skin is listed, and what each brings', offered.options.length === 6,
+    offered.options.join(' | '));
+  check('the one that states a material in its own config says so',
+    offered.options.some((o) => /^Red — 1 texture \+ 1 paint$/.test(o)),
+    offered.options.join(' | '));
+  check('the one whose config is for another car is answered by the car',
+    offered.options.some((o) => /^Stranger — 1 texture \+ 2 paints$/.test(o)),
+    offered.options.join(' | '));
+  check('and the one that states no colour is offered for its pictures',
+    offered.options.some((o) => /^Bare — 1 texture$/.test(o)),
+    offered.options.join(' | '));
+  check('the one taking its materials from the car states both',
+    offered.options.some((o) => /^Pair — 1 texture \+ 2 paints$/.test(o)),
+    offered.options.join(' | '));
+
+  console.log('\nthe car as the file has it');
+  const bare = await wear(page, '');
+  check('white, which is what the paint map is', Math.min(...bare) > 120, `rgb(${bare})`);
+  /* And the one that takes almost none of the light is not white, under the
+   * same map. `ksAmbient` and `ksDiffuse` weight the two halves of the game's
+   * own lighting, and both halves are diffuse — so with one fixed light they
+   * have nowhere to go but the albedo. */
+  const paint = await colourOf(page, 'carpaint');
+  const dim = await colourOf(page, 'sill');
+  check('a material stating no weights takes the light as it comes',
+    paint === '#ffffff', paint);
+  check('and one stating almost none is nearly black', dim === '#363636', dim);
+
+  console.log('\nwearing the skin that names its paint');
+  const red = await wear(page, 'Red');
+  check('painted, and the map still under it',
+    red[0] > red[1] * 3 && red[0] > red[2] * 3, `rgb(${red})`);
+  check('and darker than the bare car, since a tint multiplies',
+    red[1] < bare[1], `rgb(${red}) against rgb(${bare})`);
+
+  console.log('\nwearing the one that takes its materials from the car itself');
+  await wear(page, 'Pair');
+  const first = await colourOf(page, 'carpaint');
+  const second = await colourOf(page, 'trim');
+  check('the first colour went on the first material named', first === '#2010dd', first);
+  check('and the second on the second, paired by order', second === '#10dd20', second);
+
+  console.log('\nwearing the one whose config names a material this car has not got');
+  const stranger = await wear(page, 'Stranger');
+  check('the car answers with its own paint',
+    stranger[0] > stranger[1] * 3, `rgb(${stranger})`);
+
+  console.log('\nand the one that states no colour at all');
+  const unpainted = await wear(page, 'Bare');
+  check('nothing is invented for it', Math.min(...unpainted) > 120, `rgb(${unpainted})`);
+
+  console.log('\nand the one whose colour is only in the picture of it');
+  await wear(page, 'Chip');
+  const chip = await colourOf(page, 'carpaint');
+  check('the chip is read, over the dark band under it', chip === '#2010dd', chip);
+
+  console.log('\nand taking it off again');
+  const off = await wear(page, '');
+  check('the car is as it was', Math.abs(off[0] - bare[0]) < 6, `rgb(${off})`);
+
+  console.log('');
+  console.log('opening another car over the top of it');
+  const loaded = await page.evaluate(() => window.fbxtool.loadCount);
+  await page.setInputFiles('#file-input', [other]);
+  await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, loaded,
+    { timeout: 120000 });
+  await page.waitForTimeout(700);
+  const after = await page.evaluate(() => {
+    const select = document.getElementById('skin-select');
+    return { hidden: select.hidden, options: select.options.length };
+  });
+  check('the picker is put away', after.hidden === true);
+  check("and the last car's skins are not still in it", after.options === 0,
+    `${after.options} left`);
+
+  check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
+
+  await browser.close();
+  console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');
+  process.exit(failures ? 1 : 0);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

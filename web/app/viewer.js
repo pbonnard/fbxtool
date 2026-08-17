@@ -308,6 +308,7 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uFinish;
   // Bump and normal maps, linear for the same reason.
   uniform highp sampler2DArray uBump;
+  uniform highp sampler2DArray uDetail;
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -480,11 +481,15 @@ ${SHADOW_LOOKUP}
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
+      // Whether the colour tints the texture or the texture replaces it.
+      bool tinted = texelFetch(uPalette, ivec2(slot, 3), 0).a > 0.5;
       if (uUseTextures == 1 && layer >= 0) {
         // A bound diffuse texture replaces the flat colour, as most DCC tools
-        // and viewers treat it. The sampler is sRGB, so this is already linear.
+        // and viewers treat it — unless the material says the colour is a tint
+        // to be multiplied through it, which is how a car's paint is stated.
+        // The sampler is sRGB, so this is already linear.
         vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
-        albedo = painted.rgb;
+        albedo = tinted ? painted.rgb * albedo : painted.rgb;
         /* …and its fourth channel is how much of the surface is there, for a
          * material that said that is where its transparency lives.
          *
@@ -498,6 +503,27 @@ ${SHADOW_LOOKUP}
          * drawn at all. */
         if (alphaMode == 2 && painted.a <= max(alphaCutoff, 1.0 / 255.0)) discard;
         if (alphaMode == 1) opacity *= painted.a;
+
+        /* The grain tiled over it, where the material wears one.
+         *
+         * A game's interior is one atlas of flat panels with the leather, the
+         * carpet and the carbon laid over them — tiled sixty or a hundred
+         * times across, so the picture underneath is the shape and the grain
+         * is the surface.
+         *
+         * Taken as neutral at its own average, since the file says how many
+         * times to tile it and not how much of it to mix in. The two readings
+         * are far apart: a Mercedes E63's paint wears a grain averaging 0.24,
+         * so multiplied straight its white body comes out graphite. This way
+         * the colour a car was authored stays where it was, and what arrives
+         * is the grain and the cast of the picture. */
+        vec4 grain = texelFetch(uPalette, ivec2(slot, 5), 0);
+        int detailLayer = int(grain.r + 0.5) - 1;
+        if (detailLayer >= 0) {
+          vec3 tiled = texture(uDetail,
+            vec3(vUv * max(grain.g, 1e-4), float(detailLayer))).rgb;
+          albedo *= clamp(tiled * grain.b, 0.0, 4.0);
+        }
       }
       /* A metallic-roughness map, where the material has one.
        *
@@ -819,6 +845,7 @@ ${SHADOW_LOOKUP}
         textures: gl.getUniformLocation(program, 'uTextures'),
         finish: gl.getUniformLocation(program, 'uFinish'),
         bump: gl.getUniformLocation(program, 'uBump'),
+        detail: gl.getUniformLocation(program, 'uDetail'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -985,6 +1012,8 @@ ${SHADOW_LOOKUP}
       this.finishLayers = 0;
       this.bumpArray = gl.createTexture();
       this.bumpLayers = 0;
+      this.detailArray = gl.createTexture();
+      this.detailLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -1070,7 +1099,7 @@ ${SHADOW_LOOKUP}
       this.transparentMaterials = 0;
       if (!materials.length) { this.dirty = true; return; }
       const width = materials.length;
-      const data = new Float32Array(width * 5 * 4);
+      const data = new Float32Array(width * 6 * 4);
       materials.forEach((material, i) => {
         const rgb = material.colour || [0.72, 0.73, 0.76];
         const specular = material.specular || [0.04, 0.04, 0.04];
@@ -1101,6 +1130,15 @@ ${SHADOW_LOOKUP}
         data[(width * 3 + i) * 4 + 1] = typeof material.bumpStrength === 'number'
           ? Math.max(0, material.bumpStrength) : 1;
         data[(width * 3 + i) * 4 + 2] = material.bumpIsNormalMap ? 1 : 0;
+        /* Whether this material's colour tints its texture or is replaced by
+         * it. Replaced, ordinarily — that is what most tools and viewers do
+         * with a bound diffuse map, and a file's flat colour is a stand-in for
+         * the picture rather than a thing to multiply through it. But the map
+         * under a car's paint is the panels in white on black, and the colour
+         * is what the game multiplies through it: replaced by the colour the
+         * shut lines and the badge go with it, replaced by the map the car is
+         * white whichever skin is on. */
+        data[(width * 3 + i) * 4 + 3] = material.tintTexture ? 1 : 0;
         // The clear coat: how much of it comes back facing you, and how
         // polished it is. Nothing at zero, which is every surface without one.
         data[(width * 4 + i) * 4] = typeof material.coat === 'number'
@@ -1118,13 +1156,29 @@ ${SHADOW_LOOKUP}
         data[(width * 4 + i) * 4 + 2] = mode;
         data[(width * 4 + i) * 4 + 3] = typeof material.alphaCutoff === 'number'
           ? Math.min(1, Math.max(0, material.alphaCutoff)) : 0.5;
+        /* The grain tiled over the surface, and how many times across it.
+         *
+         * A game's interior is one atlas of flat panels with the leather, the
+         * carpet and the carbon laid over them a hundred times across — an
+         * Audi S8 has thirty-eight materials wearing one, and it is where nine
+         * of the fifteen files in each of its skins go. Without it the cabin
+         * is the atlas: flat grey shapes, and a skin that changes nothing. */
+        const detailLayer = Number.isInteger(material.detailLayer)
+          ? material.detailLayer : -1;
+        data[(width * 5 + i) * 4] = Math.max(0, detailLayer + 1);
+        data[(width * 5 + i) * 4 + 1] = typeof material.detailTiling === 'number'
+          ? Math.max(0, material.detailTiling) : 1;
+        // Taken as neutral at its own average, so a grain changes the surface
+        // and not how bright the car is.
+        data[(width * 5 + i) * 4 + 2] = typeof material.detailScale === 'number'
+          ? Math.min(8, Math.max(0.1, material.detailScale)) : 1;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
         }
       });
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 5, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 6, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;
@@ -1166,6 +1220,15 @@ ${SHADOW_LOOKUP}
     async setBumpTextures(images, edge = 1024) {
       this.bumpLayers = images.length;
       return this._uploadArray(this.bumpArray, images, this.gl.RGBA8, edge);
+    }
+
+    /**
+     * The grain a surface is tiled over with, which is a picture and not a
+     * measurement — so sRGB, as the base colour is.
+     */
+    async setDetailTextures(images, edge = 1024) {
+      this.detailLayers = images.length;
+      return this._uploadArray(this.detailArray, images, this.gl.SRGB8_ALPHA8, edge);
     }
 
     async _uploadArray(target, images, internalFormat, edge = 1024) {
@@ -1728,12 +1791,16 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE5);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.bumpArray);
       gl.uniform1i(this.uniforms.bump, 5);
+      gl.activeTexture(gl.TEXTURE6);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.detailArray);
+      gl.uniform1i(this.uniforms.detail, 6);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
-        ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0)
+        ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0
+          || this.detailLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,

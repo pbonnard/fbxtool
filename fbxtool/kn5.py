@@ -41,8 +41,12 @@ sizes in.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import re
 import struct
+import zlib
 from typing import Sequence
 
 from .model import ArrayInfo, Document, Node, ParseError, Property
@@ -124,6 +128,40 @@ def _metalness(facing: float, blended: bool) -> float:
         return 0.0
     return min(1.0, (facing - _DIELECTRIC_CEILING)
                / (_METAL_FLOOR - _DIELECTRIC_CEILING))
+
+
+#: What a plainly lit surface takes from the light: `ksAmbient` and `ksDiffuse`
+#: at the pair most materials state them at.  Of 1728 materials across the 27
+#: cars to hand, 0.5 and 0.6 is the commonest by a wide margin — 278 of them,
+#: one in six, and the value the game's own editor starts a material at.
+_LIGHT_AMBIENT = 0.5
+_LIGHT_DIFFUSE = 0.6
+
+
+def _light_weight(material: "_Material") -> float:
+    """How much of the light a material takes, against a plainly lit one.
+
+    ``ksAmbient`` and ``ksDiffuse`` weight the two halves of the game's own
+    lighting rather than tinting anything.  Both halves are diffuse, so in a
+    viewer with one fixed light the two weights have nowhere to go but the
+    albedo, where they are the same arithmetic: dimming the light that reaches
+    a surface and dimming the surface come to the same picture.
+
+    This is the whole of why an Audi S8 comes up white from end to end.  Its
+    paint is 0.4 and 0.4 and its wheels are 0.03 and 0.01; its headlight
+    housings are nothing at all.  The pictures under those are grey panel maps
+    — the colour was never in the picture — so read without the weights the
+    rims, the lamps and the carbon mirror caps all draw as bright as the body,
+    and the body draws brighter than the game ever shows it.
+
+    A quarter of them ask for more light than a plainly lit surface gets, which
+    a dashboard or a lamp lens does on purpose.  A diffuse surface cannot
+    return more than it was given, so that is where this stops.
+    """
+    weight = (material.scalar("ksAmbient", _LIGHT_AMBIENT)
+              + material.scalar("ksDiffuse", _LIGHT_DIFFUSE)) \
+        / (_LIGHT_AMBIENT + _LIGHT_DIFFUSE)
+    return min(max(weight, 0.0), 1.0)
 
 
 def is_kn5(data: bytes) -> bool:
@@ -519,6 +557,372 @@ def _winding(data: bytes, mesh: "_Mesh", tally: list[int]) -> None:
             tally[1] += 1
 
 
+#: How many skin folders are looked in before the rest are counted and left.
+_SKIN_LIMIT = 64
+
+
+#: Which materials a config calls the car's paint.  Two spellings for the one
+#: thing, and a car uses whichever its author did: ``CarPaintMaterial`` on its
+#: own, and ``Materials`` inside a ``[Material_CarPaint_*]`` section — the
+#: second only there, since half the sections in the file use that key.
+_PAINT_SECTION = re.compile(r"^[ 	]*" + re.escape("[") + r"([^]]*)")
+_PAINT_KEY = re.compile(r"^[ 	]*(CarPaintMaterial|Materials)[ 	]*=([^;]*)", re.I)
+
+
+def _paint_materials(text: str) -> list[str]:
+    """The materials a config names as paint, in the order it names them.
+
+    The order is what pairs them with the colours.  Everything else in the file
+    is includes of things that live inside Custom Shaders Patch rather than
+    beside the car, and is left where it is.
+    """
+    out: list[str] = []
+    section = ""
+    for line in text.splitlines():
+        heading = _PAINT_SECTION.match(line)
+        if heading:
+            section = heading.group(1)
+            continue
+        setting = _PAINT_KEY.match(line)
+        if setting is None:
+            continue
+        if (setting.group(1).lower() != "carpaintmaterial"
+                and not section.lower().startswith("material_carpaint")):
+            continue
+        for name in setting.group(2).split(","):
+            if name.strip() and name.strip() not in out:
+                out.append(name.strip())
+    return out
+
+
+def _read(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _read_bytes(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _paint_colours(text: str) -> list[str]:
+    """Every colour Content Manager's ``cm_skin.json`` states, in order.
+
+    One car calls its paint ``carPaint`` and another ``extBody1``, ``extBody2``
+    and ``extRims1``; a Renault 5 states three and its config names three
+    materials to match, in the same order and with the names corroborating.  A
+    section carrying no colour is not a paint — the same file holds the carpet,
+    the interior and the driver's suit — and one that says its paint is off
+    keeps the colour in its texture instead.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[str] = []
+    for value in data.values():
+        if not isinstance(value, dict) or "color" not in value:
+            continue
+        colour = str(value.get("color") or "").lstrip("#")
+        if len(colour) == 8:
+            colour = colour[2:]
+        if (value.get("enabled") is False or len(colour) != 6
+                or any(c not in "0123456789abcdefABCDEF" for c in colour)):
+            out.append("")
+            continue
+        out.append(f"#{colour.lower()}")
+    return out
+
+
+_CONFIG_KEY = re.compile(r"^[ \t]*([A-Za-z]+)[ \t]*=([^;]*)")
+
+
+def _config_colours(text: str, name: str) -> list[str]:
+    """The colours a skin's own config states, for the ones with no JSON.
+
+    A chameleon paint is two: ``ChameleonColorA`` facing you and
+    ``ChameleonColorB`` at a grazing angle, each with an opacity after it.
+    Only the first is taken — there is one albedo here, and A is what the car
+    looks like from where you are standing.  A Clio V6's Illiad Blue is
+    ``#33007f`` turning to yellow at the edges, and read without it the car is
+    white.
+
+    A section that names the skins it is for is only for those: one folder's
+    config can carry a block written for another.
+    """
+    out: list[str] = []
+    section = ""
+    mine = True
+    for line in text.splitlines():
+        heading = _PAINT_SECTION.match(line)
+        if heading:
+            section, mine = heading.group(1), True
+            continue
+        if not section.lower().startswith("material_carpaint"):
+            continue
+        setting = _CONFIG_KEY.match(line)
+        if setting is None:
+            continue
+        key, value = setting.group(1).lower(), setting.group(2).strip()
+        if key == "skins":
+            mine = any(part.strip().lower() == name.lower()
+                       for part in value.split(","))
+        elif key == "chameleoncolora" and mine:
+            colour = value.split(",")[0].strip().lstrip("#")
+            if len(colour) == 6 and all(c in "0123456789abcdefABCDEF" for c in colour):
+                out.append(f"#{colour.lower()}")
+    return out
+
+
+#: An eight-bit PNG, truecolour with an alpha channel or without, written in
+#: one pass.  184 of the 189 paint chips to hand are one of those two; the
+#: other five are a palette and four interlaced, and are left unread rather
+#: than half-read.
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_PNG_CHANNELS = {2: 3, 6: 4}
+
+
+def _png_pixels(data: bytes) -> tuple[bytearray, int, int] | None:
+    """The RGBA of a PNG, top row first, or None for one this does not read."""
+    if not data.startswith(_PNG_MAGIC):
+        return None
+    at = len(_PNG_MAGIC)
+    width = height = channels = 0
+    parts: list[bytes] = []
+    while at + 8 <= len(data):
+        length = int.from_bytes(data[at:at + 4], "big")
+        kind = data[at + 4:at + 8]
+        body = data[at + 8:at + 8 + length]
+        if len(body) < length:
+            return None
+        at += 12 + length                       # length, tag, body, CRC
+        if kind == b"IHDR":
+            if length < 13:
+                return None
+            width = int.from_bytes(body[0:4], "big")
+            height = int.from_bytes(body[4:8], "big")
+            depth, colour, _compression, _filter, interlace = body[8:13]
+            if depth != 8 or interlace or colour not in _PNG_CHANNELS:
+                return None
+            channels = _PNG_CHANNELS[colour]
+        elif kind == b"IDAT":
+            parts.append(body)
+        elif kind == b"IEND":
+            break
+    if not width or not height or not channels or not parts:
+        return None
+    if width * height > 1 << 24:
+        return None
+    try:
+        raw = zlib.decompress(b"".join(parts))
+    except zlib.error:
+        return None
+    stride = width * channels
+    if len(raw) < (stride + 1) * height:
+        return None
+    # Undo the per-row filters.  Each row states its own, and every one of them
+    # is written against the row above and the pixel to the left.
+    out = bytearray(stride * height)
+    at = 0
+    for y in range(height):
+        kind = raw[at]
+        at += 1
+        line = raw[at:at + stride]
+        at += stride
+        row = y * stride
+        prior = row - stride
+        for i in range(stride):
+            left = out[row + i - channels] if i >= channels else 0
+            up = out[prior + i] if y else 0
+            upleft = out[prior + i - channels] if y and i >= channels else 0
+            value = line[i]
+            if kind == 1:
+                value += left
+            elif kind == 2:
+                value += up
+            elif kind == 3:
+                value += (left + up) >> 1
+            elif kind == 4:
+                guess = left + up - upleft
+                a, b, c = abs(guess - left), abs(guess - up), abs(guess - upleft)
+                value += left if a <= b and a <= c else (up if b <= c else upleft)
+            elif kind:
+                return None
+            out[row + i] = value & 0xFF
+    if channels == 4:
+        return out, width, height
+    rgba = bytearray(width * height * 4)
+    for i in range(width * height):
+        rgba[4 * i:4 * i + 3] = out[3 * i:3 * i + 3]
+        rgba[4 * i + 3] = 255
+    return rgba, width, height
+
+
+def _chip_colour(data: bytes) -> str:
+    """The colour of the paint chip a skin carries a picture of.
+
+    ``livery.png`` is the swatch Content Manager shows beside a skin's name: a
+    rounded square of the paint with a gloss sweeping over it, sixty-four
+    pixels square, and every one of the 189 skins to hand has one.  It is a
+    picture rather than a statement, so it is read last and only where nothing
+    was stated — but read, it is exact.  A Champagne Quartz chip is 1874 pixels
+    of #565D6B and its ``cm_skin.json`` says #565D6B.
+
+    Two things make a plain average the wrong reading.  The gloss is a wide
+    bright sweep, and under some of them is a band of dark reflection — a
+    Renault 5's Blanc Perle chip is white over black, and averaged it is a
+    mid-grey nobody painted.  So this takes the commonest colour rather than
+    the mean, over the upper half where the paint is: colours are gathered into
+    32 steps a channel, the fullest bucket wins, and what is returned is the
+    average of what fell in it, which for a flat chip is the one colour it is
+    drawn in, to the unit.
+    """
+    read = _png_pixels(data)
+    if read is None:
+        return ""
+    pixels, width, height = read
+    # A big picture is sampled rather than counted: a few cars carry the whole
+    # livery sheet here instead of a chip, at two thousand pixels square.
+    step = max(1, -(-max(width, height) // 256))
+    buckets: dict[int, list[int]] = {}
+    best: list[int] | None = None
+    for y in range(0, max(1, round(height / 2)), step):
+        for x in range(0, width, step):
+            at = (y * width + x) * 4
+            # A transparent corner is the chip's rounding, not a colour it is.
+            if pixels[at + 3] < 128:
+                continue
+            r, g, b = pixels[at], pixels[at + 1], pixels[at + 2]
+            key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = [0, 0, 0, 0]
+                buckets[key] = bucket
+            bucket[0] += r
+            bucket[1] += g
+            bucket[2] += b
+            bucket[3] += 1
+            if best is None or bucket[3] > best[3]:
+                best = bucket
+    if best is None:
+        return ""
+    return "#" + "".join(f"{round(c / best[3]):02x}" for c in best[:3])
+
+
+def _skin_states(folder: str) -> tuple[list[str], list[str]]:
+    """What one skin says: the materials it calls the paint, and the colours.
+
+    Two files, both the skin's own, so a car and the folder it came in are
+    enough — nothing here needs the game installed.
+    """
+    config = _read(os.path.join(folder, "ext_config.ini")) or ""
+    meta = _read(os.path.join(folder, "cm_skin.json"))
+    colours = _paint_colours(meta) if meta else []
+    # Half of them have no `cm_skin.json` at all and say it in their config.
+    if not any(colours):
+        colours = _config_colours(config, os.path.basename(folder.rstrip("/" + chr(92))))
+    # And last, for the sixty-nine of 189 that state no colour anywhere, the
+    # picture of the paint they all carry.  A picture is weaker evidence than a
+    # setting — where both are there they disagree about a third of the time,
+    # usually because the setting is Content Manager's untouched white — so it
+    # is only read where there is nothing to disagree with.
+    if not any(colours):
+        chip = _read_bytes(os.path.join(folder, "livery.png"))
+        colour = _chip_colour(chip) if chip else ""
+        colours = [colour] if colour else []
+    return _paint_materials(config), colours
+
+
+def _pair(named: list[str], colours: list[str], materials: set[str]) -> list[dict]:
+    """Which of the car's materials wear which of a skin's colours.
+
+    One colour is the car's, however many materials the paint is spread over:
+    a Clio V6 names ``wccarbody`` and ``aleron`` — its body and its spoiler —
+    and states the one colour for both.  Several are paired by order, which is
+    the only thing the two lists share.
+    """
+    out = []
+    for at, material in enumerate(named):
+        colour = colours[0] if len(colours) == 1 else (
+            colours[at] if at < len(colours) else "")
+        if colour and material.lower() in materials:
+            out.append({"material": material, "colour": colour})
+    return out
+
+
+
+def _skins(path: str | None, named: set[str], materials: set[str]) -> list[dict]:
+    """The paint jobs sitting beside a car, and how much of each one it wears.
+
+    A kn5 carries one set of textures and the game puts another over the top
+    before it draws: every file under ``skins/<name>/`` replaces the texture of
+    that name for as long as the skin is chosen.  So what is *in* the file is
+    the car unpainted.  An Audi S8's own textures are ambient occlusion over
+    bare grey, and its thirteen skins are what make it Alpine White or Sakhir
+    Orange; five cars to hand all have them, replacing between 2 and 15
+    textures apiece.
+
+    A car that comes up pale, then, is not necessarily one that was read
+    wrongly — it may be one nobody has painted yet, and that is worth saying
+    out loud rather than leaving to look like a fault.
+    """
+    if path is None:
+        return []
+    beside = os.path.dirname(os.path.abspath(path))
+    # Half of them declare which material is the paint once for the whole car
+    # rather than once per skin, and that is the file it goes in.
+    fallback = _paint_materials(
+        _read(os.path.join(beside, "extension", "ext_config.ini")) or "")
+    folder = os.path.join(beside, "skins")
+    try:
+        entries = sorted(os.listdir(folder))[:_SKIN_LIMIT]
+    except OSError:
+        return []
+    out: list[dict] = []
+    for name in entries:
+        inside = os.path.join(folder, name)
+        try:
+            files = {entry.lower() for entry in os.listdir(inside)}
+        except OSError:
+            continue
+        stated, colours = _skin_states(inside)
+        out.append({"name": name, "replaces": len(files & named),
+                    "stated": stated, "colours": colours})
+
+    # What the car's paint is called, settled across the whole folder.  Three
+    # places say so, in the order they are trusted: the skin's own config; the
+    # car's, since half of them declare it once for the whole car; and last
+    # what the car's *other* skins agree it is.
+    #
+    # That last is a reading of the folder rather than of one file, and it is
+    # what a folder of skins usually needs.  An Audi S8 has thirteen: three
+    # name `booody_aooo`, which the car has, and five name `carpaint`, which it
+    # has not — configs copied from another car, colour and all.  Left there,
+    # those five state a perfectly good colour and put it nowhere.  Only a skin
+    # naming nothing the car has is answered this way, and only from names its
+    # own siblings used.
+    known: list[str] = []
+    for skin in out:
+        for name in skin["stated"]:
+            if name.lower() in materials and name not in known:
+                known.append(name)
+    for skin in out:
+        stated = [n for n in skin.pop("stated") if n.lower() in materials]
+        if not stated:
+            stated = [n for n in fallback if n.lower() in materials] or known
+        skin["paints"] = _pair(stated, skin.pop("colours"), materials)
+    out.sort(key=lambda skin: (-skin["replaces"], skin["name"]))
+    return out
+
+
 #: What Custom Shaders Patch writes at the very end of a car it has encrypted.
 _ENCRYPTED_MARKER = b"__AC_SHADERS_PATCH_KN5ENC_v1__"
 
@@ -685,7 +1089,8 @@ def _geometry(mesh: _Mesh, label: str, build: _Builder, model_uid: int) -> None:
 
 
 def _material_records(materials: Sequence[_Material], texture_uids: dict[str, int],
-                      build: _Builder, doc: Document, metals: list[int]) -> list[int]:
+                      build: _Builder, doc: Document, metals: list[int],
+                      dimmed: list[int]) -> list[int]:
     """One Material record apiece, with the maps it wears linked to it."""
     uids: list[int] = []
     for index, material in enumerate(materials):
@@ -705,11 +1110,17 @@ def _material_records(materials: Sequence[_Material], texture_uids: dict[str, in
         # Split between the two halves of the surface the way every importer
         # here does: what is left of the diffuse once the metal has taken its
         # share, and a reflectance that is the dielectric's on that share and
-        # the conductor's own on the rest.  A kn5 material has no colour of its
-        # own — `txDiffuse` is the albedo, and `ksAmbient`/`ksDiffuse` weight
-        # the ambient and direct halves of the game's own lighting rather than
-        # tinting anything — so the colour being split is white.
-        diffuse = 1.0 - metal
+        # the conductor's own on the rest.
+        #
+        # A kn5 material states no colour of its own — `txDiffuse` is the
+        # albedo — but it does state how much of the light it takes, and that
+        # is a greyscale the picture is read through.  So the colour being
+        # split is that weight rather than white, and it multiplies the map
+        # instead of standing in for one.
+        weight = _light_weight(material)
+        if weight < 0.999:
+            dimmed[0] += 1
+        diffuse = (1.0 - metal) * weight
         specular = facing * (1.0 - metal) + metal
         props = [
             _p70("DiffuseColor", "Color", *(_d(diffuse) for _ in range(3))),
@@ -720,6 +1131,11 @@ def _material_records(materials: Sequence[_Material], texture_uids: dict[str, in
             _p70("Opacity", "Number", _d(1.0)),
             _p70("AlphaMode", "KString", _s(alpha_mode)),
             _p70("ShaderName", "KString", _s(material.shader)),
+            # And that the colour above is read through the picture rather
+            # than replaced by it, which is the usual way round.  Everything a
+            # kn5 states about a surface is stated for the whole of it and the
+            # picture is the pattern, so the two multiply.
+            _p70("TintsTexture", "Bool", _i(1)),
         ]
         if material.alpha_tested:
             props.append(_p70("AlphaCutoff", "Number",
@@ -853,7 +1269,10 @@ def parse_kn5(
     texture_uids = _texture_records(held, named, build)
     #: How many materials reflect more facing you than a dielectric can.
     metals = [0]
-    material_uids = _material_records(materials, texture_uids, build, doc, metals)
+    #: And how many take less of the light than a plainly lit surface does.
+    dimmed = [0]
+    material_uids = _material_records(materials, texture_uids, build, doc,
+                                      metals, dimmed)
 
     scene = _Scene()
     _walk(cursor, build, scene, doc, material_uids, 0, 0, load_arrays=load_arrays)
@@ -882,6 +1301,7 @@ def parse_kn5(
         "materials": len(materials),
         "materials_used": len(scene.used_materials),
         "metals": metals[0],
+        "dimmed": dimmed[0],
         "shaders": sorted({material.shader for material in materials}),
         "nodes": scene.nodes,
         "meshes": scene.meshes,
@@ -893,6 +1313,8 @@ def parse_kn5(
         "triangles": scene.triangles,
         "tree_depth": scene.depth,
         "lods": scene.lods,
+        "skins": _skins(path, {name.lower() for name in named if name},
+                        {material.name.lower() for material in materials}),
         "encrypted": encrypted is not None,
         "encrypted_from": encrypted,
         "winding_agreement": round(agreement, 4) if sampled else None,

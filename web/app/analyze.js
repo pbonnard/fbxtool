@@ -273,6 +273,7 @@ const FbxAnalyze = (function () {
     ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum)$/i],
     ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
+    ['detail', /^(txdetail|detail|detailmap|detailtexture)$/i],
   ];
 
   /**
