@@ -1694,6 +1694,9 @@ def test_the_two_collada_readers_agree(built, tmp_path, up, meter):
 
     path = tmp_path / "scene.dae"
     path.write_bytes(fb.build_dae(up=up, meter=meter))
+    # And what a BeamNG car keeps beside its model, which both readers find
+    # for themselves rather than being handed.
+    (tmp_path / "main.materials.json").write_text(fb.DAE_MATERIALS, encoding="utf-8")
 
     js = _wasm_dump(str(path))
     python = _python_dump(str(path))

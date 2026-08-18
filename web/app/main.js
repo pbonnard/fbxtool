@@ -89,6 +89,11 @@
   let lensColours = new Map();
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
+  /* What a BeamNG car keeps beside its model: `main.materials.json` and the
+   * `skin.materials.json` for its liveries, which is where a `.dae` puts what
+   * its surfaces actually are. Kept like a `.mtl`, and read the same way —
+   * with the model, before it, or dropped in afterwards. */
+  const suppliedDressing = new Map();
   /** Binary payloads a .gltf points at, keyed the same way. */
   const suppliedBuffers = new Map();
   let missingTextures = [];
@@ -370,6 +375,7 @@
      */
     if (list.some((file) => !COMPANION_NAMES.test(file.name))) {
       suppliedSkins.clear();
+      suppliedDressing.clear();
       carPaintNames = [];
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
@@ -398,6 +404,10 @@
     }
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
+    }
+    for (const file of list) {
+      if (!/\.materials\.json$/i.test(file.name)) continue;
+      suppliedDressing.set(file.name.toLowerCase(), await file.text());
     }
     for (const payload of payloads) {
       suppliedBuffers.set(payload.name.toLowerCase(),
@@ -714,7 +724,7 @@
       // Asked before OBJ, which is the looser test of the two: a COLLADA
       // document is XML and says so in its root element, while an OBJ is
       // recognised by the statements it happens to open with.
-      else if (FbxDae.looksLikeDae(text)) doc = FbxDae.parse(text);
+      else if (FbxDae.looksLikeDae(text)) doc = FbxDae.parse(text, { materials: suppliedDressing });
       else if (FbxObj.looksLikeObj(text)) {
         doc = FbxObj.parse(text, { materials: suppliedMaterials });
       } else return null;
@@ -3580,6 +3590,32 @@
     return String(path).split(/[\\/]/).pop().toLowerCase();
   }
 
+  /**
+   * The supplied file a texture record names, by name and then by stem.
+   *
+   * A model usually names the picture it wants and the picture is there. A
+   * BeamNG car names the one its artist authored — `bolide_main_b.color.png` —
+   * and ships the one the game converted, `bolide_main_b.color.DDS`, so an
+   * exact match finds nothing and every surface of the car comes up bare.
+   * Falling back to the name without its extension finds it, and is the same
+   * kind of allowance as matching by name rather than by path: what a file is
+   * called is what it is, and which encoder last touched it is not.
+   *
+   * Only where the exact name is not there, so a folder holding both keeps
+   * whichever the model actually asked for.
+   */
+  function suppliedFor(supplied, path) {
+    const name = baseName(path);
+    const exact = supplied.get(name);
+    if (exact) return exact;
+    const stem = name.replace(/\.[^.]*$/, '');
+    if (!stem || stem === name) return undefined;
+    for (const [key, file] of supplied) {
+      if (key.replace(/\.[^.]*$/, '') === stem) return file;
+    }
+    return undefined;
+  }
+
   /** A record's own image: embedded bytes, or the file it names. */
   function imageOf(object) {
     const node = object.node;
@@ -3752,7 +3788,7 @@
         return null;                       // an image format the browser refuses
       }
     }
-    const file = supplied.get(baseName(request.path));
+    const file = suppliedFor(supplied, request.path);
     return file ? decodeSupplied(file) : null;
   }
 
@@ -3814,7 +3850,8 @@
     // state rather than about theirs.
     const failed = requests.filter((_, index) => !decoded[index]);
     const named = (request) => baseName(request.path) || request.name;
-    const absent = (request) => !request.embedded && !suppliedImages.has(named(request));
+    const absent = (request) =>
+      !request.embedded && !suppliedFor(suppliedImages, named(request));
     return {
       images,
       missing: failed.filter(absent).map(named),

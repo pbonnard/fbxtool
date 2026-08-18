@@ -34,15 +34,26 @@ file states is what goes in. A reader that flipped them would put every badge
 and number plate on a car upside down, which is the same trap the ``.kn5``
 reader falls the other side of.
 
+**What a surface is does not live in the model.** A BeamNG `.dae` carries a
+lambert stub and, on the car to hand, one ``<image>`` for its eighty-odd
+pictures: the materials proper are in a ``*.materials.json`` in the same
+folder, which is the same arrangement an Assetto Corsa car uses for its skins.
+That file is read where it is supplied, for both of the game's generations,
+and held against the model rather than believed.
+
 What is not read: ``library_animations`` and ``library_controllers``, neither
 of which is geometry — of 36 vehicle files surveyed, none carries an animation
 and two carry a controller. Nor the ``.cdae`` beside a BeamNG car, which is the
 game's own compiled cache of the same model and is shipped alongside the
-readable one.
+readable one. Nor, of a material, its separate roughness and metallic maps —
+the viewer wants those two packed into one picture, as glTF has them — its
+opacity map, or the layers it states beyond the first.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from .model import ArrayInfo, Document, Node, ParseError, Property
@@ -369,6 +380,87 @@ def _colour_of(effect) -> tuple[float, float, float] | None:
     return None
 
 
+#: What a BeamNG stage calls each thing, by what it means here.  The game
+#: writes two generations of material and a car may hold both: the newer one
+#: states a base colour and a roughness the way glTF does, and the older one
+#: a colour map and a Blinn-Phong specular, the way Torque3D always did.
+_STAGE_MAPS = (
+    ("baseColorMap", "DiffuseColor"),
+    ("colorMap", "DiffuseColor"),           # the older generation's diffuse
+    ("normalMap", "NormalMap"),
+    ("ambientOcclusionMap", "AmbientOcclusion"),
+    ("emissiveMap", "EmissiveColor"),
+)
+
+
+def _dressing(texts) -> dict[str, dict]:
+    """What a car's `*.materials.json` says, by the material name it is for.
+
+    A BeamNG `.dae` carries a lambert stub and, on the car to hand, one
+    ``<image>`` for its eighty-odd pictures: what a surface actually is lives
+    beside the model, in the same folder, under the name the model gave it.
+    That is the same arrangement an Assetto Corsa car uses for its skins, and
+    it is read the same way — for what it says, and held against the model
+    rather than believed.
+
+    ``mapTo`` is the name the model is expected to use and ``name`` is the
+    material's own; they are the same in 2,796 of the 2,861 entries here, and
+    where they differ it is ``mapTo`` that the model said.  Both are keyed, the
+    first to claim a name keeping it.
+    """
+    out: dict[str, dict] = {}
+    for text in texts:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for entry in data.values():
+            if not isinstance(entry, dict):
+                continue
+            for key in ("mapTo", "name"):
+                named = entry.get(key)
+                if isinstance(named, str) and named:
+                    out.setdefault(named.lower(), entry)
+    return out
+
+
+#: Blender numbers a duplicate name, and the model keeps the number while the
+#: material file does not: `bolide_main_001` is dressed by `bolide_main`.
+_DUPLICATE = re.compile(r"_\d{3}$")
+
+
+def _dressed(name: str, dressing: dict[str, dict]) -> dict | None:
+    """What a material of this name is dressed in, or nothing."""
+    if not dressing:
+        return None
+    lower = name.lower()
+    entry = dressing.get(lower)
+    if entry is not None:
+        return entry
+    trimmed = _DUPLICATE.sub("", lower)
+    return dressing.get(trimmed) if trimmed != lower else None
+
+
+def _stage(entry: dict) -> dict:
+    """The first of a material's stages that says anything.
+
+    Nearly every entry states four and fills one: the rest are the layers the
+    game blends over it, which nothing here draws.
+    """
+    stages = entry.get("Stages")
+    if isinstance(stages, list):
+        for stage in stages:
+            if isinstance(stage, dict) and stage:
+                return stage
+    return {}
+
+
+def _number(value) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)         else None
+
+
 def _array(code: str, values: list, load: bool) -> Property:
     size = 8 if code in ("d", "l") else 4
     info = ArrayInfo(length=len(values), encoding=0, byte_length=len(values) * size)
@@ -401,8 +493,14 @@ def _p70(name: str, kind: str, *values) -> Node:
 
 
 def parse_dae(text: str, *, path: str | None = None,
-              load_arrays: bool = False) -> Document:
-    """Parse COLLADA *text* into a Document."""
+              load_arrays: bool = False,
+              materials: str | dict[str, str] | None = None) -> Document:
+    """Parse COLLADA *text* into a Document.
+
+    *materials* supplies what a BeamNG car keeps beside its model — the text of
+    one ``*.materials.json``, or a mapping of filename to text where a car
+    ships several.  Without it a car reads correctly and comes up bare.
+    """
     import xml.etree.ElementTree as ET
 
     try:
@@ -614,17 +712,91 @@ def parse_dae(text: str, *, path: str | None = None,
     # So each part names only what its own primitives asked for, which for that
     # car is 1,124 pairs against 14,473, and its per-polygon material indices
     # count against that.
+    if isinstance(materials, str):
+        dressing = _dressing([materials])
+    elif isinstance(materials, dict):
+        dressing = _dressing(list(materials.values()))
+    else:
+        dressing = {}
+    dressed = 0
+    #: Which slots each material has already had filled, so the older
+    #: generation's `colorMap` does not overwrite the newer's `baseColorMap`
+    #: on a car that states both.
+    bound_slots: dict[int, list[tuple[str, str]]] = {}
+
+    texture_uid = 200000
     for index, (name, colour) in enumerate(palette):
         material_uid = 100000 + index
         props = []
         if colour is not None:
             props.append(_p70("DiffuseColor", "Color", *(_d(c) for c in colour)))
+
+        # And what the file beside the model says the surface is.
+        #
+        # Under a vendor prefix, because that is how the rest of this tool
+        # tells an artist's own number from the exporter's approximation of
+        # it: a bare `Opacity` is FBX's own property and read on its own
+        # terms, while a prefixed one is what somebody set.
+        entry = _dressed(name, dressing)
+        stage = _stage(entry) if entry is not None else {}
+        if stage:
+            dressed += 1
+            base = stage.get("baseColorFactor") or stage.get("diffuseColor")
+            if isinstance(base, list) and len(base) >= 3:
+                values = [_number(c) for c in base[:3]]
+                if all(v is not None for v in values):
+                    props.append(_p70("BeamNG|main|base_color", "Color",
+                                      *(_d(v) for v in values)))
+            for key, spelt in (("roughnessFactor", "roughness"),
+                               ("metallicFactor", "metalness"),
+                               ("opacityFactor", "opacity")):
+                value = _number(stage.get(key))
+                if value is not None:
+                    props.append(_p70(f"BeamNG|main|{spelt}", "double", _d(value)))
+            # A clear coat is what makes paint read as paint, and the shader
+            # already draws one: what it wants is a colour to say how much of
+            # it comes back and the index it is shaped by, which for a coat of
+            # lacquer is glass's.
+            coat = _number(stage.get("clearCoatFactor"))
+            if coat:
+                props.append(_p70("CoatColor", "Color", _d(coat), _d(coat), _d(coat)))
+                props.append(_p70("CoatIor", "double", _d(1.5)))
+
         objects_node.children.append(
             _node("Material", [_l(material_uid), _s(f"{name}\x00\x01Material"), _s("")], [
                 _node("Version", [_i(102)]),
                 _node("ShadingModel", [_s("phong")]),
                 _node("Properties70", [], props),
             ]))
+
+        # The pictures it wears, named as the file names them. Nothing is read
+        # from disk here: a texture record says which file a slot wants, and
+        # whoever supplies the folder supplies the picture.
+        for key, slot in _STAGE_MAPS:
+            named = stage.get(key)
+            if not isinstance(named, str) or not named:
+                continue
+            if any(existing == slot for existing, _ in bound_slots.get(index, ())):
+                continue
+            bound_slots.setdefault(index, []).append((slot, named))
+            texture_uid += 2
+            objects_node.children.append(
+                _node("Texture", [_l(texture_uid), _s(f"{name}_{slot}\x00\x01Texture"), _s("")], [
+                    _node("Type", [_s("TextureVideoClip")]),
+                    _node("Version", [_i(202)]),
+                    _node("FileName", [_s(named)]),
+                    _node("RelativeFilename", [_s(named)]),
+                ]))
+            objects_node.children.append(
+                _node("Video", [_l(texture_uid + 1), _s(f"{named}\x00\x01Video"), _s("Clip")], [
+                    _node("Type", [_s("Clip")]),
+                    _node("FileName", [_s(named)]),
+                    _node("RelativeFilename", [_s(named)]),
+                ]))
+            connections.append(
+                _node("C", [_s("OP"), _l(texture_uid), _l(material_uid), _s(slot)]))
+            connections.append(
+                _node("C", [_s("OO"), _l(texture_uid + 1), _l(texture_uid)]))
     for model_uid, worn in models:
         for slot in worn:
             connections.append(_node("C", [_s("OO"), _l(100000 + slot), _l(model_uid)]))
@@ -637,6 +809,8 @@ def parse_dae(text: str, *, path: str | None = None,
     doc.root.children.append(_node("Connections", [], connections))
 
     doc.extra["collada_version"] = root.get("version") or ""
+    doc.extra["dressed"] = dressed
+    doc.extra["stated_materials"] = len(dressing)
     doc.extra["parts"] = drawn
     doc.extra["materials"] = len(palette)
     doc.extra["up_axis"] = up_axis

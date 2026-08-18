@@ -115,7 +115,8 @@ def read_model(
         if kind == "dae":
             handle.seek(0)
             raw = handle.read()
-            doc = parse_dae(_decode(raw) or "", path=path, load_arrays=load_arrays)
+            doc = parse_dae(_decode(raw) or "", path=path, load_arrays=load_arrays,
+                            materials=_sibling_materials(path))
             doc.file_size = len(raw)
             return doc
         if kind == "obj":
@@ -152,6 +153,32 @@ def read_model(
 
 #: Kept as the original name; it now reads any supported format.
 read_fbx = read_model
+
+
+def _sibling_materials(path: str) -> dict[str, str]:
+    """The `*.materials.json` beside a COLLADA model.
+
+    A BeamNG car keeps its geometry in the `.dae` and what its surfaces
+    actually are in a file next to it — `main.materials.json`, and a
+    `skin.materials.json` for the liveries.  Every one in the model's own
+    directory is read, since a car may split them and nothing in the model
+    says which of them to look in.
+    """
+    out: dict[str, str] = {}
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return out
+    for name in names:
+        if not name.lower().endswith(".materials.json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), "rb") as handle:
+                out[name] = _decode(handle.read()) or ""
+        except OSError:
+            continue
+    return out
 
 
 def _sibling_mtl(path: str, text: str) -> dict[str, str]:

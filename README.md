@@ -7,7 +7,7 @@ without the Autodesk FBX SDK.
 | --- | --- |
 | **FBX** binary and ASCII, 6.x and 7.x | inspect, render, export |
 | **Wavefront OBJ** (+ `.mtl`) | inspect, render |
-| **COLLADA `.dae`** | inspect, render — the format BeamNG.drive ships its cars in |
+| **COLLADA `.dae`** | inspect, render, materials from the `*.materials.json` beside it — the format BeamNG.drive ships its cars in |
 | **glTF 2.0** (`.gltf`, `.glb`) | inspect, render, import, export; Draco decompressed |
 | **Blender `.blend`** | inspect, render (`MVert`/`MPoly`/`MLoop` layout) |
 | **3ds Max `.max`** | inspect, render — Editable Poly and Editable Mesh, materials, textures |
@@ -102,8 +102,11 @@ everywhere.
 - Nodes placed by `<matrix>`, composed down the tree and decomposed to translation, Euler rotation and scale. The matrix is row-major acting on column vectors, so the translation is the last **column**; a negative determinant is kept as a negative scale.
 - `<up_axis>` and `<unit>` become `GlobalSettings`.
 - Materials from `profile_COMMON` — lambert, phong, blinn and constant — for a flat diffuse colour. Each part is connected only to the materials its own primitives ask for.
-- **Not read**: `library_animations` and `library_controllers`, neither of which is geometry; the `.cdae` beside a BeamNG car, which is the game's own compiled cache of the same model.
-- **No textures.** A BeamNG `.dae` names one image for a car's eighty-odd; the real materials live in a `main.materials.json` beside it, which nothing here reads yet, so a car renders correctly shaped and flat white.
+- **Materials from the file beside the model.** A BeamNG `.dae` carries a lambert stub and names one image for a car's eighty-odd; what its surfaces actually are lives in a `*.materials.json` in the same folder, read for both of the game's generations — the newer `baseColorMap`/`roughnessFactor`/`metallicFactor`/`clearCoatFactor`, and the older `colorMap`. Matched on `mapTo`, then `name`, then with Blender's `_001` duplicate suffix dropped.
+- Base colour, normal and ambient-occlusion maps become texture records; roughness, metalness and base colour go on under a vendor prefix, and a clear coat becomes the coat the shader already draws.
+- The sidecar names the picture its artist authored — `bolide_main_b.color.png` — where the game ships the one it converted, `bolide_main_b.color.DDS`, so a supplied image is matched on its name without the extension where the exact name is not there.
+- Of 2,027 materials across the 88 cars that ship a sidecar, 537 are dressed from it, 341 are lights whose entries state nothing at all, and 1,149 are shared names defined in the game's own `common` package rather than beside the car.
+- **Not read**: `library_animations` and `library_controllers`, neither of which is geometry; the `.cdae` beside a BeamNG car, which is the game's own compiled cache of the same model; the separate `roughnessMap` and `metallicMap` (the viewer wants the two in one picture, as glTF packs them); `opacityMap`; and the layers a material states beyond its first stage.
 
 ### glTF 2.0
 

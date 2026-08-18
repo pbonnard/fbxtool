@@ -2869,3 +2869,32 @@ def build_dae(*, up: str = "Z_UP", meter: str = "1",
  <scene><instance_visual_scene url="#s"/></scene>
 </COLLADA>
 """.encode("utf-8")
+
+
+#: What a BeamNG car keeps beside its model: the newer generation, which
+#: states a base colour and a roughness the way glTF does, and the older, a
+#: colour map and a Blinn-Phong specular the way Torque3D always did.
+#:
+#: `mapTo` is the name the model uses and `name` is the material's own — the
+#: two differ here on purpose, since the model said `mapTo`.
+DAE_MATERIALS = """{
+ "red": {
+  "name": "red material", "mapTo": "red", "class": "Material", "version": 1.5,
+  "Stages": [
+   {"baseColorMap": "/vehicles/x/red_b.color.png",
+    "normalMap": "vehicles/x/red_nm.normal.png",
+    "ambientOcclusionMap": "/vehicles/x/red_ao.data.png",
+    "roughnessFactor": 0.25, "metallicFactor": 0.75,
+    "clearCoatFactor": 1, "baseColorFactor": [0.5, 0.25, 0.125, 1]},
+   {}, {}, {}
+  ]
+ },
+ "blue": {
+  "name": "blue", "mapTo": "blue", "class": "Material",
+  "Stages": [{}, {"colorMap": "/vehicles/x/blue_d.png", "specularPower": 32}, {}]
+ },
+ "lamp": {
+  "name": "lamp", "mapTo": "lamp", "class": "Material",
+  "Stages": [{}, {}, {}, {}]
+ }
+}"""

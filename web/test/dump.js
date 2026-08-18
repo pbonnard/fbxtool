@@ -67,7 +67,19 @@ async function main() {
   if (!doc) {
     const text = new TextDecoder('utf-8').decode(data);
     if (FbxAscii.looksLikeAscii(text)) doc = FbxAscii.parse(text);
-    else if (FbxDae.looksLikeDae(text)) doc = FbxDae.parse(text);
+    else if (FbxDae.looksLikeDae(text)) {
+      // A BeamNG car keeps what its surfaces are in a file beside the model;
+      // the Python reader looks there too.
+      const materials = new Map();
+      const directory = path.dirname(path.resolve(target));
+      for (const name of fs.readdirSync(directory)) {
+        if (/\.materials\.json$/i.test(name)) {
+          materials.set(name.toLowerCase(),
+            fs.readFileSync(path.join(directory, name), 'utf8'));
+        }
+      }
+      doc = FbxDae.parse(text, { materials });
+    }
     else {
       console.log(JSON.stringify({ error: 'not an FBX file' }));
       return;

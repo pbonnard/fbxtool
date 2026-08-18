@@ -265,3 +265,121 @@ def test_a_geometry_nothing_instances_is_not_drawn():
     doc = parse_dae(document(SQUARE + MATERIALS))
     assert doc.root.path("Objects").get("Geometry") is None
     assert doc.extra["parts"] == 0
+
+
+# --------------------------------------------------------------------------
+# what a car keeps beside its model
+
+
+def dressed_doc(**kwargs):
+    """The two-material scene, dressed from a BeamNG-style sidecar."""
+    import fbxbuild as fb
+
+    return parse_dae(fb.build_dae().decode("utf-8"), materials=fb.DAE_MATERIALS,
+                     **kwargs)
+
+
+def properties(node):
+    p70 = node.get("Properties70")
+    if p70 is None:
+        return {}
+    return {str(p.props[0].value): [v.value for v in p.props[4:]]
+            for p in p70.get_all("P")}
+
+
+def material_named(doc, name):
+    for entry in doc.root.path("Objects").get_all("Material"):
+        if str(entry.props[1].value).split("\x00")[0] == name:
+            return entry
+    return None
+
+
+def test_a_material_is_dressed_by_the_file_beside_the_model():
+    """A BeamNG `.dae` carries a lambert stub and, on the car to hand, one
+    `<image>` for its eighty-odd pictures.  What a surface actually is lives in
+    a `*.materials.json` in the same folder, under the name the model gave it.
+
+    The numbers go on under a vendor prefix, because that is how the rest of
+    this tool tells an artist's own value from an exporter's approximation of
+    it: a bare `Opacity` is FBX's own property and read on its own terms.
+    """
+    doc = dressed_doc()
+    props = properties(material_named(doc, "red"))
+    assert props["BeamNG|main|roughness"] == [0.25]
+    assert props["BeamNG|main|metalness"] == [0.75]
+    assert props["BeamNG|main|base_color"] == [0.5, 0.25, 0.125]
+    # A clear coat is what makes paint read as paint, and the shader already
+    # draws one — given a colour saying how much comes back and an index.
+    assert props["CoatColor"] == [1.0, 1.0, 1.0]
+    assert props["CoatIor"] == [1.5]
+    assert doc.extra["dressed"] == 2, "the lamp states nothing and is not counted"
+    # Three entries, keyed under every name they answer to: the red one is
+    # called `red material` and mapped to `red`, so it claims two.
+    assert doc.extra["stated_materials"] == 4
+
+
+def test_the_name_the_model_uses_is_the_one_looked_up():
+    """`mapTo` is what the model says and `name` is the material's own.  They
+    are the same in 2,796 of the 2,861 entries the game ships, and where they
+    differ it is `mapTo` the model wrote.
+    """
+    doc = dressed_doc()
+    # The fixture's red is called `red material` and mapped to `red`.
+    assert material_named(doc, "red") is not None
+    assert properties(material_named(doc, "red"))
+
+
+def test_the_pictures_a_material_wears_become_texture_records():
+    """Named, not read: a texture record says which file a slot wants, and
+    whoever supplies the folder supplies the picture.
+    """
+    doc = dressed_doc()
+    bound = {}
+    for entry in doc.root.path("Connections").get_all("C"):
+        if str(entry.props[0].value) != "OP":
+            continue
+        bound[str(entry.props[3].value)] = entry.props[1].value
+    assert set(bound) == {"DiffuseColor", "NormalMap", "AmbientOcclusion"}
+    names = [str(t.props[1].value).split("\x00")[0]
+             for t in doc.root.path("Objects").get_all("Texture")]
+    assert "red_DiffuseColor" in names
+    assert "blue_DiffuseColor" in names, "the older generation's colorMap is a diffuse too"
+
+
+def test_a_material_stating_nothing_is_left_alone():
+    """Twelve of a Bolide's thirty-nine are lights, and their entries carry
+    four empty stages: the game lights them rather than painting them.  A
+    material that states nothing is not dressed in nothing.
+    """
+    import fbxbuild as fb
+
+    # The fixture's `lamp` is one of those, so the model is made to wear it.
+    text = fb.build_dae().decode("utf-8").replace('name="blue"', 'name="lamp"')
+    doc = parse_dae(text, materials=fb.DAE_MATERIALS)
+    props = properties(material_named(doc, "lamp"))
+    assert not [key for key in props if key.startswith(("BeamNG|", "Coat"))]
+    # What the model itself said about it still stands: the sidecar adding
+    # nothing is not the same as it saying the surface is nothing.
+    assert props["DiffuseColor"] == [0.0, 0.25, 1.0]
+    assert doc.extra["dressed"] == 1, "only the red one states anything"
+
+
+def test_a_duplicate_name_is_dressed_by_the_one_it_was_copied_from():
+    """Blender numbers a duplicate and the model keeps the number while the
+    material file does not: `bolide_main_001` is dressed by `bolide_main`.
+    """
+    import fbxbuild as fb
+
+    text = fb.build_dae().decode("utf-8").replace('name="red"', 'name="red_001"')
+    doc = parse_dae(text, materials=fb.DAE_MATERIALS)
+    assert properties(material_named(doc, "red_001"))["BeamNG|main|roughness"] == [0.25]
+
+
+def test_a_model_with_nothing_beside_it_still_reads():
+    """Which is the ordinary case for a `.dae` that is not a BeamNG car."""
+    import fbxbuild as fb
+
+    doc = parse_dae(fb.build_dae().decode("utf-8"))
+    assert doc.extra["dressed"] == 0
+    assert doc.root.path("Objects").get("Texture") is None
+    assert doc.extra["parts"] == 1

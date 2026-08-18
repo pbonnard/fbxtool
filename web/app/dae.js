@@ -14,6 +14,11 @@
  * exporters write is a narrow subset — elements, attributes, text, comments —
  * and that is what this reads, refusing anything it does not recognise rather
  * than guessing at it.
+ *
+ * What a surface is does not live in the model: a BeamNG `.dae` carries a
+ * lambert stub and names one image for a car's eighty-odd, and the materials
+ * proper are in a `*.materials.json` beside it. That file is read where it is
+ * supplied — with the model, before it, or dropped in afterwards.
  */
 'use strict';
 
@@ -438,6 +443,78 @@ const FbxDae = (function () {
     return null;
   }
 
+  /* ------------------------------------------------------- what it wears */
+
+  /* What a BeamNG stage calls each thing, by what it means here. The game
+   * writes two generations of material and a car may hold both: the newer one
+   * states a base colour and a roughness the way glTF does, and the older one
+   * a colour map and a Blinn-Phong specular, the way Torque3D always did. */
+  const STAGE_MAPS = [
+    ['baseColorMap', 'DiffuseColor'],
+    ['colorMap', 'DiffuseColor'],          // the older generation's diffuse
+    ['normalMap', 'NormalMap'],
+    ['ambientOcclusionMap', 'AmbientOcclusion'],
+    ['emissiveMap', 'EmissiveColor'],
+  ];
+
+  /**
+   * What a car's `*.materials.json` says, by the material name it is for.
+   *
+   * `mapTo` is the name the model is expected to use and `name` is the
+   * material's own; they are the same in 2,796 of the 2,861 entries in the
+   * game, and where they differ it is `mapTo` that the model said. Both are
+   * keyed, the first to claim a name keeping it.
+   */
+  function dressingFrom(texts) {
+    const out = new Map();
+    for (const text of texts) {
+      let data = null;
+      try { data = JSON.parse(String(text).replace(/^﻿/, '')); } catch (error) { continue; }
+      if (!data || typeof data !== 'object') continue;
+      for (const entry of Object.values(data)) {
+        if (!entry || typeof entry !== 'object') continue;
+        for (const key of ['mapTo', 'name']) {
+          const named = entry[key];
+          if (typeof named === 'string' && named && !out.has(named.toLowerCase())) {
+            out.set(named.toLowerCase(), entry);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  //: Blender numbers a duplicate name and the model keeps the number while
+  //: the material file does not: `bolide_main_001` is dressed by `bolide_main`.
+  const DUPLICATE = /_\d{3}$/;
+
+  function dressedAs(name, dressing) {
+    if (!dressing || !dressing.size) return null;
+    const lower = String(name).toLowerCase();
+    if (dressing.has(lower)) return dressing.get(lower);
+    const trimmed = lower.replace(DUPLICATE, '');
+    return trimmed !== lower && dressing.has(trimmed) ? dressing.get(trimmed) : null;
+  }
+
+  /**
+   * The first of a material's stages that says anything.
+   *
+   * Nearly every entry states four and fills one: the rest are the layers the
+   * game blends over it, which nothing here draws.
+   */
+  function firstStage(entry) {
+    const stages = entry && entry.Stages;
+    if (Array.isArray(stages)) {
+      for (const stage of stages) {
+        if (stage && typeof stage === 'object' && Object.keys(stage).length) return stage;
+      }
+    }
+    return {};
+  }
+
+  const scalar = (value) =>
+    (typeof value === 'number' && Number.isFinite(value) ? value : null);
+
   /* --------------------------------------------------------------- output */
 
   //: How a binary FBX writes an object's name and its class, which is what
@@ -464,8 +541,17 @@ const FbxDae = (function () {
   const p70 = (name, kind, ...values) =>
     node('P', [S(name), S(kind), S(''), S('A'), ...values]);
 
-  function parse(text) {
+  function parse(text, options = {}) {
     if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    const supplied = options.materials;
+    const dressing = dressingFrom(
+      supplied instanceof Map ? [...supplied.values()]
+        : (typeof supplied === 'string' ? [supplied] : []));
+    let dressed = 0;
+    /* Which slots each material has already had filled, so the older
+     * generation's `colorMap` does not overwrite the newer's `baseColorMap`
+     * on a car that states both. */
+    const boundSlots = new Map();
     const document = parseXml(text);
     const root = document.children.find((child) => child.name === 'COLLADA');
     if (!root) throw new Error("the document's root element is not COLLADA");
@@ -659,16 +745,77 @@ const FbxDae = (function () {
      * palette the shader reads per fragment, which is wider than a card will
      * hold. Over that width the whole palette comes back as zeroes and the car
      * draws black, geometry and normals perfectly correct underneath. */
+    let textureUid = 200000;
     palette.forEach(([name, colour], index) => {
       const materialUid = 100000 + index;
       const props = [];
       if (colour) props.push(p70('DiffuseColor', 'Color', ...colour.map(D)));
+
+      /* And what the file beside the model says the surface is.
+       *
+       * Under a vendor prefix, because that is how the rest of this tool tells
+       * an artist's own number from the exporter's approximation of it: a bare
+       * `Opacity` is FBX's own property and read on its own terms, while a
+       * prefixed one is what somebody set. */
+      const entry = dressedAs(name, dressing);
+      const stage = entry ? firstStage(entry) : {};
+      const filled = Object.keys(stage).length > 0;
+      if (filled) {
+        dressed += 1;
+        const base = stage.baseColorFactor || stage.diffuseColor;
+        if (Array.isArray(base) && base.length >= 3
+            && base.slice(0, 3).every((c) => scalar(c) !== null)) {
+          props.push(p70('BeamNG|main|base_color', 'Color', ...base.slice(0, 3).map(D)));
+        }
+        for (const [key, spelt] of [['roughnessFactor', 'roughness'],
+          ['metallicFactor', 'metalness'], ['opacityFactor', 'opacity']]) {
+          const value = scalar(stage[key]);
+          if (value !== null) props.push(p70(`BeamNG|main|${spelt}`, 'double', D(value)));
+        }
+        // A clear coat is what makes paint read as paint, and the shader
+        // already draws one: what it wants is a colour to say how much comes
+        // back and the index it is shaped by, which for lacquer is glass's.
+        const coat = scalar(stage.clearCoatFactor);
+        if (coat) {
+          props.push(p70('CoatColor', 'Color', D(coat), D(coat), D(coat)));
+          props.push(p70('CoatIor', 'double', D(1.5)));
+        }
+      }
+
       objectsNode.children.push(
         node('Material', [L(materialUid), S(`${name}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),
           node('ShadingModel', [S('phong')]),
           node('Properties70', [], props),
         ]));
+
+      // The pictures it wears, named as the file names them. Nothing is read
+      // here: a texture record says which file a slot wants, and whoever
+      // supplies the folder supplies the picture.
+      for (const [key, slot] of STAGE_MAPS) {
+        const named = stage[key];
+        if (typeof named !== 'string' || !named) continue;
+        const already = boundSlots.get(index) || [];
+        if (already.includes(slot)) continue;
+        already.push(slot);
+        boundSlots.set(index, already);
+        textureUid += 2;
+        objectsNode.children.push(
+          node('Texture', [L(textureUid), S(`${name}_${slot}${CLASS_SEP}Texture`), S('')], [
+            node('Type', [S('TextureVideoClip')]),
+            node('Version', [I(202)]),
+            node('FileName', [S(named)]),
+            node('RelativeFilename', [S(named)]),
+          ]));
+        objectsNode.children.push(
+          node('Video', [L(textureUid + 1), S(`${named}${CLASS_SEP}Video`), S('Clip')], [
+            node('Type', [S('Clip')]),
+            node('FileName', [S(named)]),
+            node('RelativeFilename', [S(named)]),
+          ]));
+        connections.push(node('C', [S('OP'), L(textureUid), L(materialUid), S(slot)]));
+        connections.push(node('C', [S('OO'), L(textureUid + 1), L(textureUid)]));
+      }
     });
     for (const [modelUid, worn] of models) {
       for (const slot of worn) {
@@ -696,6 +843,8 @@ const FbxDae = (function () {
       warnings,
       extra: {
         colladaVersion: root.attrs.version || '',
+        dressed,
+        statedMaterials: dressing.size,
         parts: drawn,
         materials: palette.length,
         upAxis,
