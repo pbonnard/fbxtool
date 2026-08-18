@@ -650,8 +650,22 @@ def _paint_colours(text: str) -> list[str]:
     and ``extRims1``; a Renault 5 states three and its config names three
     materials to match, in the same order and with the names corroborating.  A
     section carrying no colour is not a paint — the same file holds the carpet,
-    the interior and the driver's suit — and one that says its paint is off
-    keeps the colour in its texture instead.
+    the interior and the driver's suit.
+
+    ``enabled`` is the paint shop's own switch, and reading it as *this paint
+    is not on the car* throws away most of what the file says.  Of the 128 cars
+    with skins to hand, 78 skins state a colour with the switch off, and not
+    one of them brings the texture that colour could have been baked into
+    instead: a Ford Escort Cosworth's Red says #7F0000 with the switch off and
+    replaces nothing but its wheels and its number plate, and the car is red.
+    So a colour that is not plain white is the paint whichever way the switch
+    is set.
+
+    White with the switch off is the other way about — it is what Content
+    Manager writes for a skin whose paint it was never asked to touch, and of
+    the 95 skins here that say it and do not bring the paint's own picture, 77
+    carry a chip that is plainly some other colour.  So that one states
+    nothing, and the chip is left to answer.
     """
     try:
         data = json.loads(text)
@@ -666,8 +680,9 @@ def _paint_colours(text: str) -> list[str]:
         colour = str(value.get("color") or "").lstrip("#")
         if len(colour) == 8:
             colour = colour[2:]
-        if (value.get("enabled") is False or len(colour) != 6
-                or any(c not in "0123456789abcdefABCDEF" for c in colour)):
+        if (len(colour) != 6
+                or any(c not in "0123456789abcdefABCDEF" for c in colour)
+                or (value.get("enabled") is False and colour.lower() == "ffffff")):
             out.append("")
             continue
         out.append(f"#{colour.lower()}")
@@ -1070,8 +1085,8 @@ def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[
         # else at all, so read the other way round every one of its liveries
         # comes out under a flat wash of its own average.
         #
-        # It is the rule `cm_skin.json` states in words when it switches a
-        # colour off: a slot whose colour is in its texture is not painted. */
+        # A chip is the weakest of the three readings and this is where it
+        # stops: what the skin has already drawn beats a picture of a swatch.
         if not any(colours) and not any(
                 pictures.get(name.lower()) in files for name in stated):
             chip = _read_bytes(os.path.join(folder, skin["name"], "livery.png"))

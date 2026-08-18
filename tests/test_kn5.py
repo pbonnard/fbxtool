@@ -772,7 +772,8 @@ def test_the_colour_a_skin_states_is_read_with_the_material_it_goes_on(tmp_path)
     for name, names_it, colour, extra in (
         ("Azurite", "body", '"#FF1A2025"', ""),
         ("Elsewhere", "some_other_car", '"#FF1A2025"', ""),
-        ("Textured", "body", '"#FF1A2025"', ', "enabled": false'),
+        ("SwitchedOff", "body", '"#FF1A2025"', ', "enabled": false'),
+        ("Untouched", "body", '"#FFFFFFFF"', ', "enabled": false'),
         ("Nonsense", "body", '"purple"', ""),
     ):
         (skins / name).mkdir(parents=True)
@@ -786,9 +787,16 @@ def test_the_colour_a_skin_states_is_read_with_the_material_it_goes_on(tmp_path)
     by_name = {skin["name"]: skin for skin in doc.extra["skins"]}
     assert by_name["Azurite"]["paints"] == [
         {"material": "body", "colour": "#1a2025"}], "the alpha is not the red"
-    # A skin whose paint is off keeps the colour in its texture instead, and a
-    # colour that is not one is not one.
-    for name in ("Textured", "Nonsense"):
+    # `enabled` is the paint shop's switch rather than a statement about the
+    # car: a colour that is not plain white is the paint whichever way it is
+    # set, and 78 skins of the 128 cars to hand say one with it off without
+    # bringing any texture that colour could have been baked into instead.
+    assert by_name["SwitchedOff"]["paints"] == [
+        {"material": "body", "colour": "#1a2025"}]
+    # Plain white with it off is what Content Manager writes for a paint it was
+    # never asked to touch, which states nothing.  And a colour that is not one
+    # is not one.
+    for name in ("Untouched", "Nonsense"):
         assert by_name[name]["paints"] == [], name
     # One whose config was copied from another car names a material this one
     # has not got — and is answered by what its siblings called the paint.

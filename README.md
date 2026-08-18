@@ -764,7 +764,7 @@ skin's own — nothing here needs the game installed to read either:
 | | |
 | --- | --- |
 | `ext_config.ini` | which materials of the car are its paint. Two spellings for the one thing, and a car uses whichever its author did: `CarPaintMaterial = booody_aooo` on an Audi S8, and a `[Material_CarPaint_*]` section with `Materials = body` on a Renault 5, once per paint. |
-| `cm_skin.json` | Content Manager's colours, as `#AARRGGBB`. The alpha comes first, so taking the first six characters paints the car with its own opacity: `#FF1A2025` is a near-black blue and `#FF1A20` is a red. |
+| `cm_skin.json` | Content Manager's colours, as `#AARRGGBB`. The alpha comes first, so taking the first six characters paints the car with its own opacity: `#FF1A2025` is a near-black blue and `#FF1A20` is a red. Beside each colour is `enabled`, which is the paint shop's own switch and not a statement about the car — see below. |
 | `ext_config.ini`, again | the colours themselves, for the half of them that have no `cm_skin.json`. A chameleon paint states two — `ChameleonColorA` facing you and `ChameleonColorB` at a grazing angle, each with an opacity after it — and only the first is taken, since there is one albedo here and A is what the car looks like from where you are standing. A Clio V6's Illiad Blue is `#33007f` turning to yellow at the edges. |
 | `livery.png` | the picture of the paint, for the ones that state no colour at all — 69 of the 189 skins to hand, and every one of the 189 has the picture. |
 
@@ -784,9 +784,23 @@ carrying a `cm_skin.json` or an `ext_config.ini`, and each replaces the
 `LANCIA_body.dds` that its `lancia_body_paint` wears; read the other way round
 every one of its liveries comes out under a flat wash of that livery's own
 average. So the chip is settled last of all, after the car has said which
-material its paint is and what picture that material wears. It is the rule
-`cm_skin.json` states in words when it switches a colour off: a slot whose
-colour is in its texture is not painted.
+material its paint is and what picture that material wears: what the skin has
+already drawn beats a picture of a swatch.
+
+**But `enabled: false` is not that rule written down.** It is Content Manager's
+paint shop switched off, and reading it as *this paint is not on the car*
+throws away most of what these files say. Of the 128 cars with skins to hand,
+78 skins state a colour with the switch off, and not one of them brings the
+texture that colour could have been baked into instead: a Ford Escort RS
+Cosworth's Red says `#7F0000` with the switch off and replaces nothing but its
+wheels and its number plate, and the car is red. So a colour that is not plain
+white is the paint whichever way the switch is set.
+
+Plain white with the switch off is the other way about. That is what Content
+Manager writes for a skin whose paint it was never asked to touch, and of the
+95 skins here that say it and do not bring the paint's own picture, 77 carry a
+chip that is plainly some other colour. So that one states nothing, and the
+chip below is left to answer.
 
 Two things make a plain average the wrong reading. The gloss is a wide bright
 sweep, and under some of them is a band of dark reflection — a Renault 5's

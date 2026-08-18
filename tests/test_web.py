@@ -750,8 +750,8 @@ def test_what_content_manager_says_the_paint_is():
             '"reflection":0.767},"carpet":{"enabled":true}}')
     assert _skins(f"S.paintColour({meta!r})") == {
         "hex": "#1a2025", "enabled": True, "gloss": 0.178, "reflection": 0.767}
-    # A skin that says its paint is off keeps the colour in its texture
-    # instead, and putting the colour on as well paints it twice.
+    # The paint shop's switch is read and handed on as it stands; what it
+    # means for the car is settled in `stated`.
     off = '{"carPaint":{"color":"#FFFFFFFF","enabled":false}}'
     assert _skins(f"S.paintColour({off!r})")["enabled"] is False
     assert _skins("S.paintColour('not json')") is None
@@ -885,10 +885,20 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     assert stated["wantsChip"] is False, "a colour it stated needs no picture"
     assert stated["paints"] == [{"material": "carpaint", "hex": "#0c0c0c"}]
 
-    # One that switched its colour off stated none, which is where a chip comes
-    # in: an Audi's Sakhir Orange says #FFFFFF and turns it off.
+    # One that switched its colour off and left the white it opens with stated
+    # none, which is where a chip comes in: an Audi's Sakhir Orange says
+    # #FFFFFF and turns it off.
     off = settled([{"key": "carPaint", "hex": "#ffffff", "enabled": False}], [])
     assert off["wantsChip"] is True
+
+    # But one that turned the shop off and stated a colour anyway stated one.
+    # The switch is the paint shop's rather than the car's, and 78 skins of the
+    # 128 cars to hand say a colour with it off — a Ford Escort Cosworth's Red
+    # says #7F0000 that way, brings no texture it could have been baked into,
+    # and the car is red.
+    anyway = settled([{"key": "carPaint", "hex": "#7f0000", "enabled": False}], [])
+    assert anyway["wantsChip"] is False
+    assert anyway["paints"] == [{"material": "carpaint", "hex": "#7f0000"}]
 
     # But not where the skin brought the paint's own picture.
     livery = settled([], ["body.dds"])

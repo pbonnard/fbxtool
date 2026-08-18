@@ -115,14 +115,36 @@ const FbxSkins = (function () {
       out.push({
         key,
         hex,
-        // A slot that says its paint is off is one whose colour lives in the
-        // texture instead, and putting the colour on as well paints it twice.
+        // Content Manager's paint shop, switched on or off. Which is not the
+        // same as whether the colour is the car's — see `stated`.
         enabled: value.enabled !== false,
         gloss: typeof value.gloss === 'number' ? value.gloss : null,
         reflection: typeof value.reflection === 'number' ? value.reflection : null,
       });
     }
     return out;
+  }
+
+  /**
+   * Whether a slot states a colour, or only holds the one it opens with.
+   *
+   * `enabled` is the paint shop's own switch, and reading it as *this paint is
+   * not on the car* throws away most of what the file says. Of the 128 cars
+   * with skins to hand, 78 skins state a colour with the switch off, and not
+   * one of them brings the texture that colour could have been baked into
+   * instead: a Ford Escort Cosworth's Red says #7F0000 with the switch off and
+   * replaces nothing but its wheels and its number plate, and the car is red.
+   * So a colour that is not plain white is the paint whichever way the switch
+   * is set.
+   *
+   * White with the switch off is the other way about. It is what Content
+   * Manager writes for a skin whose paint it was never asked to touch, and of
+   * the 95 skins here that say it and do not bring the paint's own picture, 77
+   * carry a chip that is plainly some other colour — an Audi's Sakhir Orange
+   * among them. So that one states nothing, and the chip is left to answer.
+   */
+  function stated(colour) {
+    return !!colour && (colour.enabled || colour.hex !== '#ffffff');
   }
 
   /**
@@ -297,7 +319,7 @@ const FbxSkins = (function () {
     const out = [];
     for (let at = 0; at < named.length; at++) {
       const colour = colours.length === 1 ? colours[0] : colours[at];
-      if (!colour || !colour.enabled) continue;
+      if (!stated(colour)) continue;
       if (!materials.has(named[at].toLowerCase())) continue;
       out.push({ material: named[at], hex: colour.hex });
     }
@@ -345,9 +367,9 @@ const FbxSkins = (function () {
        * at all, so read the other way round every one of its liveries comes
        * out under a flat wash of its own average.
        *
-       * It is the rule `cm_skin.json` states in words when it switches a
-       * colour off: a slot whose colour is in its texture is not painted. */
-      skin.wantsChip = !!skin.livery && !skin.colours.some((c) => c.enabled)
+       * A chip is the weakest of the three readings and this is where it
+       * stops: what the skin has already drawn beats a picture of a swatch. */
+      skin.wantsChip = !!skin.livery && !skin.colours.some(stated)
         && !named.some((name) => {
           const picture = pictures.get(name.toLowerCase());
           return !!picture && skin.images.has(picture);
@@ -356,8 +378,8 @@ const FbxSkins = (function () {
     return skins;
   }
 
-  return { group, read, settle, pair, skinOf, rgbHex, paintMaterials, paintColour, paintColours,
-    configColours, chipColour, fromChip };
+  return { group, read, settle, pair, stated, skinOf, rgbHex, paintMaterials, paintColour,
+    paintColours, configColours, chipColour, fromChip };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;
