@@ -103,17 +103,30 @@ const FbxDds = (function () {
     return { shift, width, max: (1 << width) - 1 };
   }
 
-  const expand = (value, spec) => (spec.max ? Math.round((value * 255) / spec.max) : 0);
-
   /** One 16-bit endpoint as three 8-bit channels. */
-  function unpack565(value, out) {
+  function unpack565(value, out, at) {
     const r = (value >> 11) & 0x1f;
     const g = (value >> 5) & 0x3f;
     const b = value & 0x1f;
-    out[0] = (r << 3) | (r >> 2);
-    out[1] = (g << 2) | (g >> 4);
-    out[2] = (b << 3) | (b >> 2);
+    out[at] = (r << 3) | (r >> 2);
+    out[at + 1] = (g << 2) | (g >> 4);
+    out[at + 2] = (b << 3) | (b >> 2);
   }
+
+  /* Room for one tile's four colours, and for the eight steps an interpolated
+   * block runs through, kept here rather than made afresh for each.
+   *
+   * A tile is sixteen pixels, so a 2048-square picture is 262,144 of them, and
+   * a fresh `[[0,0,0],[0,0,0],[0,0,0],[0,0,0]]` apiece is a million small
+   * arrays for one texture — which is a car's worth of work handed to the
+   * collector rather than to the decoder. One block is decoded at a time and
+   * read before the next begins, so there is nothing to keep them apart for.
+   */
+  //: One BC7 tile's sixteen bytes, and a fifth word to shift into.
+  const BC7_WORDS = new Uint32Array(5);
+  const TILE = new Uint8Array(12);      // four colours, three channels each
+  const TILE_ALPHA = new Uint8Array([255, 255, 255, 255]);
+  const STEPS = new Uint8Array(8);
 
   /**
    * The colour half of a BC1/BC2/BC3 tile, written into *rgba*.
@@ -125,21 +138,21 @@ const FbxDds = (function () {
     const c0 = view.getUint16(at, true);
     const c1 = view.getUint16(at + 2, true);
     const bits = view.getUint32(at + 4, true);
-    const palette = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
-    const alpha = [255, 255, 255, 255];
-    unpack565(c0, palette[0]);
-    unpack565(c1, palette[1]);
+    unpack565(c0, TILE, 0);
+    unpack565(c1, TILE, 3);
     if (!punchThrough || c0 > c1) {
       for (let k = 0; k < 3; k++) {
-        palette[2][k] = (2 * palette[0][k] + palette[1][k] + 1) / 3 | 0;
-        palette[3][k] = (palette[0][k] + 2 * palette[1][k] + 1) / 3 | 0;
+        TILE[6 + k] = (2 * TILE[k] + TILE[3 + k] + 1) / 3 | 0;
+        TILE[9 + k] = (TILE[k] + 2 * TILE[3 + k] + 1) / 3 | 0;
       }
+      // Put back whatever the last block through here left it as.
+      TILE_ALPHA[3] = 255;
     } else {
       for (let k = 0; k < 3; k++) {
-        palette[2][k] = (palette[0][k] + palette[1][k]) >> 1;
-        palette[3][k] = 0;
+        TILE[6 + k] = (TILE[k] + TILE[3 + k]) >> 1;
+        TILE[9 + k] = 0;
       }
-      alpha[3] = 0;
+      TILE_ALPHA[3] = 0;
     }
     for (let y = 0; y < 4; y++) {
       const row = y0 + y;
@@ -149,10 +162,11 @@ const FbxDds = (function () {
         if (column >= width) continue;
         const pick = (bits >>> (2 * (4 * y + x))) & 3;
         const to = 4 * (row * width + column);
-        rgba[to] = palette[pick][0];
-        rgba[to + 1] = palette[pick][1];
-        rgba[to + 2] = palette[pick][2];
-        rgba[to + 3] = alpha[pick];
+        const from = pick * 3;
+        rgba[to] = TILE[from];
+        rgba[to + 1] = TILE[from + 1];
+        rgba[to + 2] = TILE[from + 2];
+        rgba[to + 3] = TILE_ALPHA[pick];
       }
     }
   }
@@ -164,7 +178,9 @@ const FbxDds = (function () {
   function interpolatedBlock(view, at, rgba, width, height, x0, y0, channel) {
     const a0 = view.getUint8(at);
     const a1 = view.getUint8(at + 1);
-    const values = [a0, a1, 0, 0, 0, 0, 0, 0];
+    const values = STEPS;
+    values[0] = a0;
+    values[1] = a1;
     if (a0 > a1) {
       for (let k = 1; k < 7; k++) values[k + 1] = ((7 - k) * a0 + k * a1) / 7 | 0;
     } else {
@@ -328,14 +344,31 @@ const FbxDds = (function () {
 
   /** One sixteen-byte BC7 tile, written into *rgba*. */
   function bc7Block(view, at, rgba, width, height, x0, y0) {
+    /* The tile's sixteen bytes taken in four reads rather than in a hundred
+     * and twenty-eight.
+     *
+     * Every field of a BC7 block is a run of bits at some offset, and reading
+     * them a bit at a time out of the view is a call apiece — around a hundred
+     * and thirty per tile, which on a 2048-square picture is thirty-three
+     * million of them to say what four reads and a shift already said. The
+     * fifth word is room to shift into, so a field lying across the end of one
+     * word needs no special case; no field here is longer than eight bits, so
+     * nothing reaches past it.
+     */
+    BC7_WORDS[0] = view.getUint32(at, true);
+    BC7_WORDS[1] = view.getUint32(at + 4, true);
+    BC7_WORDS[2] = view.getUint32(at + 8, true);
+    BC7_WORDS[3] = view.getUint32(at + 12, true);
+    BC7_WORDS[4] = 0;
     let bit = 0;
     const read = (count) => {
-      let out = 0;
-      for (let n = 0; n < count; n++) {
-        out |= ((view.getUint8(at + (bit >> 3)) >> (bit & 7)) & 1) << n;
-        bit += 1;
-      }
-      return out;
+      if (count <= 0) return 0;
+      const word = bit >>> 5;
+      const offset = bit & 31;
+      let out = BC7_WORDS[word] >>> offset;
+      if (offset + count > 32) out |= BC7_WORDS[word + 1] << (32 - offset);
+      bit += count;
+      return out & ((1 << count) - 1);
     };
     const put = (x, y, r, g, b, a) => {
       if (x0 + x >= width || y0 + y >= height) return;
@@ -498,18 +531,44 @@ const FbxDds = (function () {
     const alpha = field(format.aMask);
     // A luminance surface has one channel and means it for all three.
     const grey = format.luminance && !green && !blue;
-    for (let i = 0; i < width * height; i++) {
+    /* What each channel's value comes out as, worked out once for the whole
+     * surface rather than per pixel. A mask is fixed for the picture, so the
+     * answer for a five-bit channel is one of thirty-two numbers and for an
+     * eight-bit one it is the number itself — against a multiply, a divide and
+     * a rounding four times over for every pixel of it. */
+    const table = (spec) => {
+      if (!spec) return null;
+      const out = new Uint8Array(spec.max + 1);
+      for (let value = 0; value <= spec.max; value++) {
+        out[value] = spec.max ? Math.round((value * 255) / spec.max) : 0;
+      }
+      return out;
+    };
+    const redTable = table(red);
+    const greenTable = table(green);
+    const blueTable = table(blue);
+    const alphaTable = table(alpha);
+    const count = width * height;
+    for (let i = 0; i < count; i++) {
       const to = at + i * bytes;
+      /* Whole pixels where the width is one the view can read, which is every
+       * layout but the packed 24-bit ones: four `getUint8` calls a pixel is
+       * sixteen million of them on a 2048-square surface, and they say the
+       * same thing one little-endian read does. */
       let pixel = 0;
-      for (let k = 0; k < bytes; k++) pixel |= view.getUint8(to + k) << (8 * k);
+      if (bytes === 4) pixel = view.getUint32(to, true);
+      else if (bytes === 2) pixel = view.getUint16(to, true);
+      else if (bytes === 1) pixel = view.getUint8(to);
+      else for (let k = 0; k < bytes; k++) pixel |= view.getUint8(to + k) << (8 * k);
       pixel >>>= 0;
-      const r = red ? expand((pixel >>> red.shift) & red.max, red) : 0;
-      rgba[4 * i] = r;
-      rgba[4 * i + 1] = grey ? r
-        : (green ? expand((pixel >>> green.shift) & green.max, green) : 0);
-      rgba[4 * i + 2] = grey ? r
-        : (blue ? expand((pixel >>> blue.shift) & blue.max, blue) : 0);
-      rgba[4 * i + 3] = alpha ? expand((pixel >>> alpha.shift) & alpha.max, alpha) : 255;
+      const r = red ? redTable[(pixel >>> red.shift) & red.max] : 0;
+      const out = 4 * i;
+      rgba[out] = r;
+      rgba[out + 1] = grey ? r
+        : (green ? greenTable[(pixel >>> green.shift) & green.max] : 0);
+      rgba[out + 2] = grey ? r
+        : (blue ? blueTable[(pixel >>> blue.shift) & blue.max] : 0);
+      rgba[out + 3] = alpha ? alphaTable[(pixel >>> alpha.shift) & alpha.max] : 255;
     }
     return true;
   }
