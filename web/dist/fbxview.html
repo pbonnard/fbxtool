@@ -10500,15 +10500,48 @@ const FbxEdits = (function () {
     const positions = piece.positions;
     const bits = new Int32Array(positions.buffer, positions.byteOffset, count * 3);
     const ids = new Int32Array(count);
-    const seen = new Map();
+    /* Numbered by hashing the three words rather than by spelling them out.
+     *
+     * Writing the key as `${x},${y},${z}` is the same test and reads better,
+     * and it costs a string per corner — a million of them on one car's body,
+     * each thirty characters, all of them alive at once because the map is
+     * holding them. Hashed instead, what the map holds is a number and a
+     * handful of candidates to tell a collision from a match, which is what
+     * the exporter's own weld has always done.
+     */
+    const kept = new Int32Array(count * 3);
+    const buckets = new Map();
     let next = 0;
     for (let corner = 0; corner < count; corner++) {
       const at = corner * 3;
-      const key = `${positions[at] === 0 ? 0 : bits[at]},`
-        + `${positions[at + 1] === 0 ? 0 : bits[at + 1]},`
-        + `${positions[at + 2] === 0 ? 0 : bits[at + 2]}`;
-      let id = seen.get(key);
-      if (id === undefined) { id = next++; seen.set(key, id); }
+      // Zero is the one value with two spellings, so it is spelled once.
+      const x = positions[at] === 0 ? 0 : bits[at];
+      const y = positions[at + 1] === 0 ? 0 : bits[at + 1];
+      const z = positions[at + 2] === 0 ? 0 : bits[at + 2];
+      let hash = Math.imul(2166136261 ^ x, 16777619);
+      hash = Math.imul(hash ^ y, 16777619);
+      hash = Math.imul(hash ^ z, 16777619) >>> 0;
+      let id = -1;
+      const bucket = buckets.get(hash);
+      if (bucket !== undefined) {
+        for (let i = 0; i < bucket.length; i++) {
+          const candidate = bucket[i];
+          const to = candidate * 3;
+          if (kept[to] === x && kept[to + 1] === y && kept[to + 2] === z) {
+            id = candidate;
+            break;
+          }
+        }
+      }
+      if (id < 0) {
+        id = next++;
+        const to = id * 3;
+        kept[to] = x;
+        kept[to + 1] = y;
+        kept[to + 2] = z;
+        if (bucket !== undefined) bucket.push(id);
+        else buckets.set(hash, [id]);
+      }
       ids[corner] = id;
     }
     return { ids, vertexCount: next };
