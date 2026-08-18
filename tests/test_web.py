@@ -891,14 +891,34 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     off = settled([{"key": "carPaint", "hex": "#ffffff", "enabled": False}], [])
     assert off["wantsChip"] is True
 
+    # Black is the other colour a picker nobody opened is left holding, and it
+    # arrives spelt several ways: a Scirocco says #000000 across twelve skins
+    # that are red and blue and silver, and a Skoda's White says #020202.
+    for hex in ("#000000", "#020202", "#040505", "#070707"):
+        dark = settled([{"key": "carPaint", "hex": hex, "enabled": False}], [])
+        assert dark["wantsChip"] is True, hex
+    # And the gap below what any car actually states is not fallen into: a
+    # Porsche 928's Dark Blue is #00030f and is the darkest of them.
+    real = settled([{"key": "carPaint", "hex": "#00030f", "enabled": False}], [])
+    assert real["wantsChip"] is False
+
     # But one that turned the shop off and stated a colour anyway stated one.
-    # The switch is the paint shop's rather than the car's, and 78 skins of the
-    # 128 cars to hand say a colour with it off — a Ford Escort Cosworth's Red
+    # The switch is the paint shop's rather than the car's, and 77 skins of the
+    # 125 cars to hand say a colour with it off — a Ford Escort Cosworth's Red
     # says #7F0000 that way, brings no texture it could have been baked into,
     # and the car is red.
     anyway = settled([{"key": "carPaint", "hex": "#7f0000", "enabled": False}], [])
     assert anyway["wantsChip"] is False
     assert anyway["paints"] == [{"material": "carpaint", "hex": "#7f0000"}]
+
+    # And a slot the car pairs with nothing does not answer for the body: an
+    # Audi RS4's Nardo Grey states two colours, both of them its wheels, and
+    # leaves the untouched white in the slot the paint is read from.
+    rims = settled([{"key": "01AbtPaint", "hex": "#ffffff", "enabled": False},
+                    {"key": "02Rim", "hex": "#191919", "enabled": False},
+                    {"key": "03Rim", "hex": "#a5a5a5", "enabled": False}], [])
+    assert rims["paints"] == []
+    assert rims["wantsChip"] is True, "nothing was painted, so the chip answers"
 
     # But not where the skin brought the paint's own picture.
     livery = settled([], ["body.dds"])

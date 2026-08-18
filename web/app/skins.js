@@ -126,25 +126,45 @@ const FbxSkins = (function () {
   }
 
   /**
+   * Whether a colour is one a picker nobody opened was left holding.
+   *
+   * Plain white is the one Content Manager opens at. Black is the other, and
+   * it arrives spelt several ways — #000000, #020202, #040505, #070707 — so
+   * the test is that no channel rises above 8, which no eye can tell from
+   * black anyway. The darkest colour any car here actually states is #00030F,
+   * a Porsche 928's Dark Blue, so nothing real falls in the gap.
+   */
+  function unset(hex) {
+    if (hex === '#ffffff') return true;
+    const n = parseInt(String(hex).slice(1), 16);
+    return Number.isFinite(n)
+      && Math.max((n >> 16) & 255, (n >> 8) & 255, n & 255) <= 8;
+  }
+
+  /**
    * Whether a slot states a colour, or only holds the one it opens with.
    *
    * `enabled` is the paint shop's own switch, and reading it as *this paint is
-   * not on the car* throws away most of what the file says. Of the 128 cars
-   * with skins to hand, 78 skins state a colour with the switch off, and not
-   * one of them brings the texture that colour could have been baked into
-   * instead: a Ford Escort Cosworth's Red says #7F0000 with the switch off and
-   * replaces nothing but its wheels and its number plate, and the car is red.
-   * So a colour that is not plain white is the paint whichever way the switch
-   * is set.
+   * not on the car* throws away most of what the file says. Of the 125 cars
+   * whose models read here, 77 skins state a colour with the switch off that
+   * the picker was never left holding, and not one of them brings the texture
+   * that colour could have been baked into instead: a Ford Escort Cosworth's
+   * Red says #7F0000 with the switch off and replaces nothing but its wheels
+   * and its number plate, and the car is red. So a colour is the paint
+   * whichever way the switch is set.
    *
-   * White with the switch off is the other way about. It is what Content
-   * Manager writes for a skin whose paint it was never asked to touch, and of
-   * the 95 skins here that say it and do not bring the paint's own picture, 77
-   * carry a chip that is plainly some other colour — an Audi's Sakhir Orange
-   * among them. So that one states nothing, and the chip is left to answer.
+   * What the picker was left holding is the other way about, and that is
+   * settled by asking the chip rather than by trusting it. Of the 138 skins
+   * here that say plain white with the switch off, 124 carry a chip that is
+   * plainly some other colour — an Audi's Sakhir Orange among them. The blacks
+   * are the same story told quieter: 32 say one, and where the car really is
+   * black the chip says black too, while a Scirocco's twelve and a Skoda's
+   * White are cars whose chips are the reds and blues and silvers their own
+   * previews show. Every one of those 170 skins carries a chip, so handing the
+   * question over never loses the answer.
    */
   function stated(colour) {
-    return !!colour && (colour.enabled || colour.hex !== '#ffffff');
+    return !!colour && (colour.enabled || !unset(colour.hex));
   }
 
   /**
@@ -356,8 +376,15 @@ const FbxSkins = (function () {
       if (!named.length) named = known;
       skin.settled = named;
       skin.paints = pair(named, skin.colours, materials);
-      /* And whether the picture of the paint is worth reading, for the skins
-       * that state no colour anywhere.
+      /* And whether the picture of the paint is worth reading, which is for
+       * the skins that came out of all that with nothing on the car.
+       *
+       * Nothing painted rather than nothing stated: an Audi RS4's Nardo Grey
+       * states two colours and neither is the body's — they are its wheels,
+       * in slots the car pairs with nothing — and its body slot is the
+       * untouched white that says nothing at all. Asked whether the skin
+       * stated anything it answers yes and the body goes unpainted, which is
+       * the one thing the chip is there to prevent.
        *
        * Only where the skin does not bring the paint's own picture. A skin
        * that replaces the very texture the paint material wears has put the
@@ -369,7 +396,7 @@ const FbxSkins = (function () {
        *
        * A chip is the weakest of the three readings and this is where it
        * stops: what the skin has already drawn beats a picture of a swatch. */
-      skin.wantsChip = !!skin.livery && !skin.colours.some(stated)
+      skin.wantsChip = !!skin.livery && !skin.paints.length
         && !named.some((name) => {
           const picture = pictures.get(name.toLowerCase());
           return !!picture && skin.images.has(picture);
@@ -378,7 +405,7 @@ const FbxSkins = (function () {
     return skins;
   }
 
-  return { group, read, settle, pair, stated, skinOf, rgbHex, paintMaterials, paintColour,
+  return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
     paintColours, configColours, chipColour, fromChip };
 })();
 

@@ -789,18 +789,25 @@ already drawn beats a picture of a swatch.
 
 **But `enabled: false` is not that rule written down.** It is Content Manager's
 paint shop switched off, and reading it as *this paint is not on the car*
-throws away most of what these files say. Of the 128 cars with skins to hand,
-78 skins state a colour with the switch off, and not one of them brings the
-texture that colour could have been baked into instead: a Ford Escort RS
-Cosworth's Red says `#7F0000` with the switch off and replaces nothing but its
-wheels and its number plate, and the car is red. So a colour that is not plain
-white is the paint whichever way the switch is set.
+throws away most of what these files say. Of the 125 cars whose models read
+here, 77 skins state a colour with the switch off that the picker was never
+left holding, and not one of them brings the texture that colour could have
+been baked into instead: a Ford Escort RS Cosworth's Red says `#7F0000` with
+the switch off and replaces nothing but its wheels and its number plate, and
+the car is red. So a colour is the paint whichever way the switch is set.
 
-Plain white with the switch off is the other way about. That is what Content
-Manager writes for a skin whose paint it was never asked to touch, and of the
-95 skins here that say it and do not bring the paint's own picture, 77 carry a
-chip that is plainly some other colour. So that one states nothing, and the
-chip below is left to answer.
+What the picker was *left holding* is the other way about, and that is settled
+by asking the chip rather than by trusting it:
+
+| | |
+| --- | --- |
+| plain white | the colour Content Manager opens at. Of the 138 skins here that say it with the switch off, 124 carry a chip that is plainly some other colour — an Audi's Sakhir Orange among them. |
+| black | spelt several ways — `#000000`, `#020202`, `#040505`, `#070707` — so the test is that no channel rises above 8, which no eye can tell from black anyway. The darkest colour any car here actually states is `#00030F`, a Porsche 928's Dark Blue, so nothing real falls in the gap. |
+
+Where the car really is black its chip says black too, so asking costs nothing;
+where it is not — a Scirocco's twelve skins and a Skoda's White — the chip is
+the red or blue or silver its own preview shows. Every one of those 170 skins
+carries a chip, so handing the question over never loses the answer.
 
 Two things make a plain average the wrong reading. The gloss is a wide bright
 sweep, and under some of them is a band of dark reflection — a Renault 5's

@@ -643,6 +643,22 @@ def _read_bytes(path: str) -> bytes | None:
         return None
 
 
+def _unset(colour: str) -> bool:
+    """Whether a colour is one a picker nobody opened was left holding.
+
+    Plain white is the one Content Manager opens at.  Black is the other, and
+    it arrives spelt several ways — 000000, 020202, 040505, 070707 — so the
+    test is that no channel rises above 8, which no eye can tell from black
+    anyway.  The darkest colour any car here actually states is 00030F, a
+    Porsche 928's Dark Blue, so nothing real falls in the gap.
+
+    *colour* is six lowercase hex digits, no leading hash.
+    """
+    if colour == "ffffff":
+        return True
+    return max(int(colour[at:at + 2], 16) for at in (0, 2, 4)) <= 8
+
+
 def _paint_colours(text: str) -> list[str]:
     """Every colour Content Manager's ``cm_skin.json`` states, in order.
 
@@ -653,19 +669,25 @@ def _paint_colours(text: str) -> list[str]:
     the interior and the driver's suit.
 
     ``enabled`` is the paint shop's own switch, and reading it as *this paint
-    is not on the car* throws away most of what the file says.  Of the 128 cars
-    with skins to hand, 78 skins state a colour with the switch off, and not
-    one of them brings the texture that colour could have been baked into
-    instead: a Ford Escort Cosworth's Red says #7F0000 with the switch off and
-    replaces nothing but its wheels and its number plate, and the car is red.
-    So a colour that is not plain white is the paint whichever way the switch
-    is set.
+    is not on the car* throws away most of what the file says.  Of the 125 cars
+    whose models read here, 77 skins state a colour with the switch off that
+    the picker was never left holding, and not one of them brings the texture
+    that colour could have been baked into instead: a Ford Escort Cosworth's
+    Red says #7F0000 with the switch off and replaces nothing but its wheels
+    and its number plate, and the car is red.  So a colour is the paint
+    whichever way the switch is set.
 
-    White with the switch off is the other way about — it is what Content
-    Manager writes for a skin whose paint it was never asked to touch, and of
-    the 95 skins here that say it and do not bring the paint's own picture, 77
-    carry a chip that is plainly some other colour.  So that one states
-    nothing, and the chip is left to answer.
+    What the picker was left holding is the other way about, and that is
+    settled by asking the chip rather than by trusting it.  Plain white is the
+    colour Content Manager opens at: of the 138 skins here that say it with the
+    switch off, 124 carry a chip that is plainly some other colour.  Black is
+    the other, and it arrives spelt several ways — #000000, #020202, #040505,
+    #070707 — so the test is that no channel rises above 8, which no eye can
+    tell from black anyway, and the darkest colour any car here actually states
+    is #00030F.  Where the car really is black its chip says black too; where
+    it is not, as with a Scirocco's twelve and a Skoda's White, the chip is the
+    red or blue or silver its own preview shows.  Every one of those 170 skins
+    carries a chip, so handing the question over never loses the answer.
     """
     try:
         data = json.loads(text)
@@ -682,7 +704,7 @@ def _paint_colours(text: str) -> list[str]:
             colour = colour[2:]
         if (len(colour) != 6
                 or any(c not in "0123456789abcdefABCDEF" for c in colour)
-                or (value.get("enabled") is False and colour.lower() == "ffffff")):
+                or (value.get("enabled") is False and _unset(colour.lower()))):
             out.append("")
             continue
         out.append(f"#{colour.lower()}")
@@ -1074,8 +1096,15 @@ def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[
             stated = [n for n in fallback if n.lower() in materials] or known
         colours = skin.pop("colours")
         files = skin.pop("files")
-        # And last, for the skins that state no colour anywhere, the picture of
-        # the paint that nearly all of them carry.
+        # And last, for the skins that came out of all that with nothing on
+        # the car, the picture of the paint nearly all of them carry.
+        #
+        # Nothing painted rather than nothing stated: an Audi RS4's Nardo Grey
+        # states two colours and neither is the body's — they are its wheels,
+        # in slots the car pairs with nothing — and its body slot is the
+        # untouched white that says nothing at all.  Asked whether the skin
+        # stated anything it answers yes and the body goes unpainted, which is
+        # the one thing the chip is there to prevent.
         #
         # Only where the skin does not bring the paint's own picture.  A skin
         # that replaces the very texture the paint material wears has put the
@@ -1087,12 +1116,14 @@ def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[
         #
         # A chip is the weakest of the three readings and this is where it
         # stops: what the skin has already drawn beats a picture of a swatch.
-        if not any(colours) and not any(
+        paints = _pair(stated, colours, materials)
+        if not paints and not any(
                 pictures.get(name.lower()) in files for name in stated):
             chip = _read_bytes(os.path.join(folder, skin["name"], "livery.png"))
             colour = _chip_colour(chip) if chip else ""
-            colours = [colour] if colour else []
-        skin["paints"] = _pair(stated, colours, materials)
+            if colour:
+                paints = _pair(stated, [colour], materials)
+        skin["paints"] = paints
     out.sort(key=lambda skin: (-skin["replaces"], skin["name"]))
     return out
 

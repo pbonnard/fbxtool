@@ -774,6 +774,7 @@ def test_the_colour_a_skin_states_is_read_with_the_material_it_goes_on(tmp_path)
         ("Elsewhere", "some_other_car", '"#FF1A2025"', ""),
         ("SwitchedOff", "body", '"#FF1A2025"', ', "enabled": false'),
         ("Untouched", "body", '"#FFFFFFFF"', ', "enabled": false'),
+        ("UntouchedBlack", "body", '"#FF000000"', ', "enabled": false'),
         ("Nonsense", "body", '"purple"', ""),
     ):
         (skins / name).mkdir(parents=True)
@@ -793,10 +794,11 @@ def test_the_colour_a_skin_states_is_read_with_the_material_it_goes_on(tmp_path)
     # bringing any texture that colour could have been baked into instead.
     assert by_name["SwitchedOff"]["paints"] == [
         {"material": "body", "colour": "#1a2025"}]
-    # Plain white with it off is what Content Manager writes for a paint it was
-    # never asked to touch, which states nothing.  And a colour that is not one
-    # is not one.
-    for name in ("Untouched", "Nonsense"):
+    # The two colours a picker nobody opened was left holding state nothing —
+    # plain white, which is where Content Manager opens, and black, which a
+    # Scirocco's twelve skins say while being red and blue and silver.  And a
+    # colour that is not one is not one.
+    for name in ("Untouched", "UntouchedBlack", "Nonsense"):
         assert by_name[name]["paints"] == [], name
     # One whose config was copied from another car names a material this one
     # has not got — and is answered by what its siblings called the paint.
