@@ -16037,9 +16037,22 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const here = kept.get(index);
       if (!here) return undefined;
       if (here.some((segment) => !segment.faces)) return null;
-      const all = [];
-      for (const segment of here) all.push(...segment.faces);
-      return Int32Array.from(all.sort((a, b) => a - b));
+      /* Sized and filled rather than spread into. `push(...faces)` hands every
+       * triangle over as an argument of its own, and an argument list of much
+       * past a hundred thousand overflows the stack — which is not a limit a
+       * car has to be unusual to reach: split one body by material and the
+       * paint alone is that, so the export threw where the viewer had just
+       * drawn the thing. Typed the whole way, which also sorts numerically
+       * without a comparator to say so. */
+      let total = 0;
+      for (const segment of here) total += segment.faces.length;
+      const all = new Int32Array(total);
+      let at = 0;
+      for (const segment of here) {
+        all.set(segment.faces, at);
+        at += segment.faces.length;
+      }
+      return all.sort();
     };
 
     /**
