@@ -1066,6 +1066,11 @@ ${SHADOW_LOOKUP}
       attach(this.materialBuffer, 2, 1);
       attach(this.uvBuffer, 3, 2);
       attach(this.partBuffer, 4, 1);
+      /* The triangles sorted into the two halves of the scene, solid first.
+       * An element buffer is no concern of `drawArrays`, so the passes that
+       * want the whole mesh go on reading it exactly as they did. */
+      this.orderBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.orderBuffer);
       gl.bindVertexArray(null);
 
       this.paletteTexture = gl.createTexture();
@@ -1182,9 +1187,17 @@ ${SHADOW_LOOKUP}
       this.paletteSize = materials.length;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
-      if (!materials.length) { this.dirty = true; return; }
+      if (!materials.length) {
+        this.blendedSlots = null;
+        this.orderStale = true;
+        this.dirty = true;
+        return;
+      }
       const width = materials.length;
       const data = new Float32Array(width * 6 * 4);
+      //: Which slots are see-through, which is the same question the shader
+      //: asks of the same two numbers a few lines from the bottom.
+      const blendedSlots = new Uint8Array(width);
       materials.forEach((material, i) => {
         const rgb = material.colour || [0.72, 0.73, 0.76];
         const specular = material.specular || [0.04, 0.04, 0.04];
@@ -1265,8 +1278,25 @@ ${SHADOW_LOOKUP}
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
+          blendedSlots[i] = 1;
         }
       });
+      /* And whether that answer moved. Most of what this is called for — a
+       * colour, a roughness, a name — leaves it where it was, and only a
+       * material crossing between the two halves is worth walking half a
+       * million triangles for. The sun's view changes with it. */
+      const was = this.blendedSlots;
+      let moved = !was || was.length !== width;
+      if (!moved) {
+        for (let i = 0; i < width; i++) {
+          if (was[i] !== blendedSlots[i]) { moved = true; break; }
+        }
+      }
+      if (moved) {
+        this.orderStale = true;
+        this.shadowStale = true;
+      }
+      this.blendedSlots = blendedSlots;
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 6, 0,
         gl.RGBA, gl.FLOAT, data);
@@ -1418,6 +1448,11 @@ ${SHADOW_LOOKUP}
       }
       this.hasUv = mesh.hasUv;
 
+      /* Which slot each triangle wears, for sorting them into solid and
+       * see-through. Held by reference: this is the array the caller already
+       * keeps for the scene it is showing. */
+      this.meshMaterials = mesh.materials;
+      this.orderStale = true;
       this.triangleCount = mesh.triangleCount;
       this.meshMin = mesh.min.slice();
       this.meshMax = mesh.max.slice();
@@ -1678,7 +1713,11 @@ ${SHADOW_LOOKUP}
       // itself along every edge it faces the sun with.
       gl.cullFace(gl.FRONT);
       gl.bindVertexArray(this.vao);
-      gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
+      if (this.orderReady) {
+        gl.drawElements(gl.TRIANGLES, this.opaqueTriangles * 3, gl.UNSIGNED_INT, 0);
+      } else {
+        gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
+      }
       gl.bindVertexArray(null);
       gl.cullFace(gl.BACK);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1687,6 +1726,66 @@ ${SHADOW_LOOKUP}
       this.shadowReady = true;
       this.shadowStale = false;
       this.shadowRenders++;
+    }
+
+    /**
+     * The triangles sorted into the two halves of the scene, solid first.
+     *
+     * Which half a triangle is in is settled by its material and by nothing
+     * else — that is what the shader's own test says — so it can be settled
+     * once here rather than per fragment. What it buys is the sun's view of
+     * the car: a depth map has no way to be partly shaded, so a windscreen
+     * put into one is a windscreen that throws the shadow of a steel plate,
+     * onto the floor and onto the cabin under it. Glass is left out of it.
+     *
+     * Left out whatever is being drawn, rather than only in the mode that
+     * draws it see-through. The other modes are ways of looking at the model
+     * and not claims about it, and a shadow that changed with the colour
+     * scheme would have to be redrawn every time one was picked.
+     *
+     * The solid pass is not sorted and still reads the whole mesh: index
+     * colours and clay hold every material opaque, so in those modes the
+     * see-through half is drawn there and has to be reached.
+     */
+    _order() {
+      const gl = this.gl;
+      if (!this.orderStale) return this.orderReady;
+      this.orderStale = false;
+      this.orderReady = false;
+      this.opaqueTriangles = 0;
+      this.blendedTriangles = 0;
+      const slots = this.blendedSlots;
+      const materials = this.meshMaterials;
+      if (!slots || !materials || !this.hasTransparency || !this.triangleCount) {
+        return false;                    // nothing to separate: draw it all
+      }
+      const triangles = Math.min(this.triangleCount, (materials.length / 3) | 0);
+      const seeThrough = (t) => {
+        const slot = Math.round(materials[t * 3]);
+        return slot >= 0 && slot < slots.length && slots[slot] === 1;
+      };
+      // Counted before it is filled, so the room is taken once and exactly.
+      let blended = 0;
+      for (let t = 0; t < triangles; t++) if (seeThrough(t)) blended++;
+      if (!blended) return false;        // every triangle is solid after all
+      const order = new Uint32Array(triangles * 3);
+      let solidAt = 0;
+      let blendedAt = (triangles - blended) * 3;
+      for (let t = 0; t < triangles; t++) {
+        const at = seeThrough(t) ? blendedAt : solidAt;
+        order[at] = t * 3;
+        order[at + 1] = t * 3 + 1;
+        order[at + 2] = t * 3 + 2;
+        if (seeThrough(t)) blendedAt += 3; else solidAt += 3;
+      }
+      gl.bindVertexArray(this.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.orderBuffer);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, order, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      this.opaqueTriangles = triangles - blended;
+      this.blendedTriangles = blended;
+      this.orderReady = true;
+      return true;
     }
 
     /** Hand a program the shadow map and where to look in it. */
@@ -1821,6 +1920,11 @@ ${SHADOW_LOOKUP}
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       if (!this.triangleCount) return;
 
+      /* Settled before anything else binds the array: hanging the element
+       * buffer off it means binding it, and doing that in the middle of a
+       * frame would take the attributes out from under the next draw. */
+      this._order();
+
       const { model, view, modelView, projection, toWorld, shadowMatrix } = this._camera();
 
       // The sun's view of the model, redrawn only when the model changes —
@@ -1913,10 +2017,17 @@ ${SHADOW_LOOKUP}
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
+        // Its own half where that is known, the whole mesh where it is not.
+        const from = this.opaqueTriangles * 3 * 4;
+        const only = this.blendedTriangles * 3;
+        const draw = () => {
+          if (this.orderReady) gl.drawElements(gl.TRIANGLES, only, gl.UNSIGNED_INT, from);
+          else gl.drawArrays(gl.TRIANGLES, 0, vertices);
+        };
         gl.cullFace(gl.FRONT);
-        gl.drawArrays(gl.TRIANGLES, 0, vertices);
+        draw();
         gl.cullFace(gl.BACK);
-        gl.drawArrays(gl.TRIANGLES, 0, vertices);
+        draw();
         gl.depthMask(true);
         gl.disable(gl.BLEND);
       }
