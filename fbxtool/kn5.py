@@ -380,6 +380,20 @@ def _read_textures(cursor: _Cursor, doc: Document) -> list[_Texture]:
     textures: list[_Texture] = []
     for _ in range(count):
         kind = cursor.i32()
+        # A slot of kind nought is an empty one, and is the whole of the
+        # record: no name, no length, no bytes.
+        #
+        # Three of the 125 cars to hand open with one — a 53 MB Forester, a
+        # 313 MB Citroën and a 388 MB Renault — and read as though it were a
+        # texture it takes the next entry's kind for a name length and walks
+        # off the table four bytes in.  All three were refused as damaged at
+        # byte 27, which is a whole car turned away over an empty slot.
+        #
+        # Counted, since the table says how many entries it has and this is
+        # one of them; kept out of what is handed on, since a texture with no
+        # name is not one anything can ask for.
+        if kind == 0:
+            continue
         name = cursor.text()
         size = cursor.u32()
         # A slot marked inactive still carries its bytes; the game just does

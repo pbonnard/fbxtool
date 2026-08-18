@@ -1197,3 +1197,41 @@ def test_a_real_car_is_read_to_its_last_byte(real_kn5_path):
     assert doc.extra["materials"] > 0
     info = analyze(doc)
     assert info.roots, "a car is one tree hanging off one root"
+
+
+def test_an_empty_texture_slot_is_counted_and_stepped_over(tmp_path):
+    """A slot of kind nought is the whole of its record: no name, no length,
+    no bytes.
+
+    Three of the 125 cars to hand open with one — a 53 MB Forester, a 313 MB
+    Citroën and a 388 MB Renault.  Read as though it were a texture it takes
+    the next entry's kind for a name length and walks off the table four bytes
+    in, and all three were refused as damaged at byte 27: a whole car turned
+    away over an empty slot.
+    """
+    red = fb.dds_bc1()
+    body = fb.kn5_material("body", "ksPerPixel",
+                           properties=fb.kn5_property("fresnelC", 0.0),
+                           property_count=1, slots=(("txDiffuse", 0, "red.dds"),))
+    verts, indices = fb.kn5_cube(1.0)
+    tree = fb.kn5_dummy("scene", IDENTITY, fb.kn5_mesh("body", verts, indices), 1)
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(6, textures=[("red.dds", red)], materials=[body],
+                                  tree=tree, empty_slots=1))
+    # And the same file without the slot, which must read identically.
+    plain = tmp_path / "plain.kn5"
+    plain.write_bytes(fb.build_kn5(6, textures=[("red.dds", red)], materials=[body],
+                                   tree=tree))
+
+    doc = read_fbx(str(path))
+    assert doc.warnings == []
+    # Counted in the table's own total, and not handed on as a texture.
+    assert doc.extra["textures"] == 1
+    assert doc.extra["materials"] == 1
+    assert doc.extra["meshes"] == 1
+    # And the file is read to its last byte, which is what says the table was
+    # walked correctly rather than merely survived.
+    assert doc.extra["missing_textures"] == []
+    same = read_fbx(str(plain))
+    for key in ("textures", "materials", "meshes", "vertices", "triangles"):
+        assert doc.extra[key] == same.extra[key], key

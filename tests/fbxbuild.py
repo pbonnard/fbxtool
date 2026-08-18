@@ -2668,17 +2668,24 @@ def kn5_mesh(name: str, vertices, indices, material: int = 0, *,
     return bytes(out)
 
 
-def build_kn5(version: int = 6, *, textures=(), materials=(), tree: bytes = b"") -> bytes:
+def build_kn5(version: int = 6, *, textures=(), materials=(), tree: bytes = b"",
+              empty_slots: int = 0) -> bytes:
     """An Assetto Corsa model file from the parts above.
 
     *textures* is ``(name, bytes)`` pairs, written as the game writes them —
     a kind, a name, a length and the payload — and *materials* is already
     encoded by :func:`kn5_material`.
+
+    *empty_slots* writes that many empty entries in front of the real ones: a
+    kind of nought and nothing else, which three of the cars to hand open with.
+    They count towards the table's own total.
     """
     out = bytearray(KN5_MAGIC + struct.pack("<i", version))
     if version > 5:
         out += struct.pack("<i", 0)
-    out += struct.pack("<i", len(textures))
+    out += struct.pack("<i", len(textures) + empty_slots)
+    for _ in range(empty_slots):
+        out += struct.pack("<i", 0)
     for name, payload in textures:
         out += struct.pack("<i", 1) + _kn5_text(name)
         out += struct.pack("<I", len(payload)) + payload
