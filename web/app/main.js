@@ -163,7 +163,7 @@
   const DROP_DEPTH = 8;
 
   //: What this reads, for telling the model in a folder from what is beside it.
-  const MODEL_NAMES = /\.(fbx|obj|gltf|glb|blend|max|kn5)$/i;
+  const MODEL_NAMES = /\.(fbx|obj|dae|gltf|glb|blend|max|kn5)$/i;
 
   /** The filesystem entries of a drop, taken before the transfer empties. */
   function droppedEntries(transfer) {
@@ -711,10 +711,15 @@
       // Not binary — try the text formats.
       const text = new TextDecoder('utf-8').decode(buffer);
       if (FbxAscii.looksLikeAscii(text)) doc = FbxAscii.parse(text);
+      // Asked before OBJ, which is the looser test of the two: a COLLADA
+      // document is XML and says so in its root element, while an OBJ is
+      // recognised by the statements it happens to open with.
+      else if (FbxDae.looksLikeDae(text)) doc = FbxDae.parse(text);
       else if (FbxObj.looksLikeObj(text)) {
         doc = FbxObj.parse(text, { materials: suppliedMaterials });
       } else return null;
-    } else if (doc.format !== 'blend' && doc.format !== 'gltf' && doc.format !== 'kn5') {
+    } else if (doc.format !== 'blend' && doc.format !== 'gltf' && doc.format !== 'kn5'
+        && doc.format !== 'dae') {
       doc.versionSource = 'header';
     }
     doc.fileName = file.name;

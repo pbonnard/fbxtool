@@ -32,6 +32,7 @@ SCRIPTS = [
     "wasm.js",
     "ascii.js",
     "obj.js",
+    "dae.js",
     "blend.js",
     "gltfin.js",
     "max.js",

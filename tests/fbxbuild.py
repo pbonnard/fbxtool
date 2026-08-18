@@ -2797,3 +2797,75 @@ def kn5_shell_and_core(*, blend: int = 1, alpha_tested: bool = False,
         2)
     return build_kn5(6, textures=[("red.dds", red), ("blue.dds", blue)],
                      materials=[core, shell], tree=tree)
+
+
+# --------------------------------------------------------------------------
+# COLLADA fixture
+
+
+#: A COLLADA scene written the way an exporter writes one: a quad and a
+#: triangle in one mesh wearing a material apiece, placed by a matrix that
+#: turns and scales as well as moves.
+#:
+#: The turn is deliberate.  Every other reader here carries its numbers
+#: straight out of the file, but a COLLADA node states a matrix and the Euler
+#: angles an FBX wants have to be worked out from it — so this is the one place
+#: two languages' trigonometry has to be held against each other.
+def build_dae(*, up: str = "Z_UP", meter: str = "1",
+              matrix: str = "0 -2 0 5  2 0 0 6  0 0 2 7  0 0 0 1") -> bytes:
+    """A complete COLLADA document holding the two-primitive scene."""
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+ <asset><contributor><authoring_tool>fbxtool test fixture</authoring_tool>
+  </contributor><unit name="meter" meter="{meter}"/><up_axis>{up}</up_axis></asset>
+ <library_effects>
+  <effect id="red-effect"><profile_COMMON><technique sid="common"><lambert>
+   <diffuse><color sid="diffuse">1 0.25 0 1</color></diffuse>
+  </lambert></technique></profile_COMMON></effect>
+  <effect id="blue-effect"><profile_COMMON><technique sid="common"><phong>
+   <diffuse><color sid="diffuse">0 0.25 1 1</color></diffuse>
+  </phong></technique></profile_COMMON></effect>
+ </library_effects>
+ <library_materials>
+  <material id="red-material" name="red"><instance_effect url="#red-effect"/></material>
+  <material id="blue-material" name="blue"><instance_effect url="#blue-effect"/></material>
+ </library_materials>
+ <library_geometries><geometry id="g" name="wedge"><mesh>
+  <source id="g-pos"><float_array id="g-pos-a" count="15">
+    0 0 0  1 0 0  1 1 0  0 1 0  0.5 0.5 1</float_array>
+   <technique_common><accessor source="#g-pos-a" count="5" stride="3">
+    <param name="X" type="float"/><param name="Y" type="float"/>
+    <param name="Z" type="float"/></accessor></technique_common></source>
+  <source id="g-nrm"><float_array id="g-nrm-a" count="6">0 0 1  0 1 0</float_array>
+   <technique_common><accessor source="#g-nrm-a" count="2" stride="3">
+    <param name="X" type="float"/><param name="Y" type="float"/>
+    <param name="Z" type="float"/></accessor></technique_common></source>
+  <source id="g-uv"><float_array id="g-uv-a" count="8">0 0  1 0  1 1  0 1</float_array>
+   <technique_common><accessor source="#g-uv-a" count="4" stride="2">
+    <param name="S" type="float"/><param name="T" type="float"/>
+    </accessor></technique_common></source>
+  <vertices id="g-vtx"><input semantic="POSITION" source="#g-pos"/></vertices>
+  <polylist material="red" count="1">
+   <input semantic="VERTEX" source="#g-vtx" offset="0"/>
+   <input semantic="NORMAL" source="#g-nrm" offset="1"/>
+   <input semantic="TEXCOORD" source="#g-uv" offset="2" set="0"/>
+   <vcount>4</vcount><p>0 0 0  1 0 1  2 0 2  3 0 3</p>
+  </polylist>
+  <triangles material="blue" count="1">
+   <input semantic="VERTEX" source="#g-vtx" offset="0"/>
+   <input semantic="NORMAL" source="#g-nrm" offset="1"/>
+   <p>0 1  1 1  4 1</p>
+  </triangles>
+ </mesh></geometry></library_geometries>
+ <library_visual_scenes><visual_scene id="s" name="s">
+  <node id="n" name="wedge" type="NODE">
+   <matrix sid="transform">{matrix}</matrix>
+   <instance_geometry url="#g"><bind_material><technique_common>
+    <instance_material symbol="red" target="#red-material"/>
+    <instance_material symbol="blue" target="#blue-material"/>
+   </technique_common></bind_material></instance_geometry>
+  </node>
+ </visual_scene></library_visual_scenes>
+ <scene><instance_visual_scene url="#s"/></scene>
+</COLLADA>
+""".encode("utf-8")

@@ -13,6 +13,7 @@ from .gltf import is_gltf, parse_gltf, starts_json_object
 from .kn5 import is_kn5, parse_kn5
 from .maxfile import is_compound, parse_max
 from .model import Document, UnsupportedFormatError
+from .dae import is_dae, parse_dae
 from .obj import is_obj, parse_obj
 
 __all__ = ["detect_format", "read_fbx", "read_model", "parse_bytes"]
@@ -25,9 +26,9 @@ _MMAP_THRESHOLD = 8 * 1024 * 1024
 def detect_format(data: bytes) -> str:
     """Identify a file from its head.
 
-    Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"blend"``,
-    ``"gltf"``, ``"max"``, ``"kn5"``, or ``"unknown"``. The FBX names are kept
-    as they were so existing callers continue to work.
+    Returns ``"binary"`` or ``"ascii"`` for FBX, ``"obj"``, ``"dae"``,
+    ``"blend"``, ``"gltf"``, ``"max"``, ``"kn5"``, or ``"unknown"``. The FBX
+    names are kept as they were so existing callers continue to work.
 
     A ``.max`` is answered from its container alone, since what distinguishes
     it from another compound file is a stream too deep in to sniff; reading it
@@ -53,6 +54,11 @@ def detect_format(data: bytes) -> str:
         return "unknown"
     if is_ascii_fbx(text):
         return "ascii"
+    # Asked before OBJ, which is the looser test of the two: a COLLADA
+    # document is XML and says so in its root element, while an OBJ is
+    # recognised by the statements it happens to open with.
+    if is_dae(text):
+        return "dae"
     if is_obj(text):
         return "obj"
     return "unknown"
@@ -106,6 +112,12 @@ def read_model(
             handle.seek(0)
             return parse_blend(handle.read(), path=path,
                                load_arrays=load_arrays)
+        if kind == "dae":
+            handle.seek(0)
+            raw = handle.read()
+            doc = parse_dae(_decode(raw) or "", path=path, load_arrays=load_arrays)
+            doc.file_size = len(raw)
+            return doc
         if kind == "obj":
             handle.seek(0)
             raw = handle.read()
@@ -214,6 +226,10 @@ def parse_bytes(
         return parse_gltf(data, path=path, load_arrays=load_arrays)
     if kind == "blend":
         return parse_blend(data, path=path, load_arrays=load_arrays)
+    if kind == "dae":
+        doc = parse_dae(_decode(data) or "", path=path, load_arrays=load_arrays)
+        doc.file_size = len(data)
+        return doc
     if kind == "obj":
         text = _decode(data) or ""
         doc = parse_obj(text, path=path, load_arrays=load_arrays)

@@ -116,6 +116,7 @@ FORMAT_NAMES = {
     "gltf": "glTF 2.0",
     "max": "Autodesk 3ds Max",
     "kn5": "Assetto Corsa kn5",
+    "dae": "COLLADA",
 }
 
 
@@ -149,6 +150,10 @@ def _render_file(out: _Out, analysis: Analysis) -> None:
         _render_kn5_rows(rows, doc)
         out.pairs(rows)
         return
+    if doc.format == "dae":
+        _render_dae_rows(rows, doc)
+        out.pairs(rows)
+        return
 
     rows.append(("Encoding", "binary" if doc.encoding == "binary" else "ASCII text"))
     version = analysis.version
@@ -175,6 +180,16 @@ def _render_file(out: _Out, analysis: Analysis) -> None:
     if version is not None and version.legacy_layout:
         rows.append(("Layout", "legacy 6.x (objects addressed by name, not UID)"))
     out.pairs(rows)
+
+
+def _render_dae_rows(rows: list[tuple[str, Any]], doc) -> None:
+    extra = doc.extra
+    rows.append(("Encoding", "XML text"))
+    rows.append(("COLLADA version", extra.get("collada_version") or "unknown"))
+    if extra.get("parts"):
+        rows.append(("Parts", f"{extra['parts']:,}"))
+    if extra.get("materials"):
+        rows.append(("Materials", f"{extra['materials']:,}"))
 
 
 def _render_obj_rows(rows: list[tuple[str, Any]], doc) -> None:

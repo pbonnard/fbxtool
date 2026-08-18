@@ -7,6 +7,7 @@ without the Autodesk FBX SDK.
 | --- | --- |
 | **FBX** binary and ASCII, 6.x and 7.x | inspect, render, export |
 | **Wavefront OBJ** (+ `.mtl`) | inspect, render |
+| **COLLADA `.dae`** | inspect, render — the format BeamNG.drive ships its cars in |
 | **glTF 2.0** (`.gltf`, `.glb`) | inspect, render, import, export; Draco decompressed |
 | **Blender `.blend`** | inspect, render (`MVert`/`MPoly`/`MLoop` layout) |
 | **3ds Max `.max`** | inspect, render — Editable Poly and Editable Mesh, materials, textures |
@@ -90,6 +91,19 @@ everywhere.
 - `o` and `g` kept as separate parts; vertex pools gathered and renumbered per part.
 - `.mtl` read from beside the file, or supplied separately.
 - `d` and `Tr` for transparency.
+
+### COLLADA `.dae`
+
+- COLLADA 1.4.1, whichever prefix the file binds the schema to.
+- `<polylist>` and `<triangles>`; `vcount` + `p` become an FBX polygon run with each polygon's last corner complemented.
+- NORMAL and TEXCOORD sources read at the offsets their inputs state, as `IndexToDirect` layers; the `<vertices>` indirection followed to the position source.
+- Texture coordinates **not** flipped — COLLADA measures V upwards, as FBX and OBJ do and unlike glTF.
+- `<accessor>` strides read rather than assumed.
+- Nodes placed by `<matrix>`, composed down the tree and decomposed to translation, Euler rotation and scale. The matrix is row-major acting on column vectors, so the translation is the last **column**; a negative determinant is kept as a negative scale.
+- `<up_axis>` and `<unit>` become `GlobalSettings`.
+- Materials from `profile_COMMON` — lambert, phong, blinn and constant — for a flat diffuse colour. Each part is connected only to the materials its own primitives ask for.
+- **Not read**: `library_animations` and `library_controllers`, neither of which is geometry; the `.cdae` beside a BeamNG car, which is the game's own compiled cache of the same model.
+- **No textures.** A BeamNG `.dae` names one image for a car's eighty-odd; the real materials live in a `main.materials.json` beside it, which nothing here reads yet, so a car renders correctly shaped and flat white.
 
 ### glTF 2.0
 

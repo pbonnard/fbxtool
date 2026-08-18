@@ -1673,6 +1673,50 @@ def test_the_two_gltf_readers_agree(built, tmp_path, container):
 
 @needs_clang
 @needs_node
+@pytest.mark.parametrize("up,meter", [("Z_UP", "1"), ("Y_UP", "0.01")])
+def test_the_two_collada_readers_agree(built, tmp_path, up, meter):
+    """A `.dae` is read twice over — once here, once in the page — and the two
+    have to produce the same records.
+
+    Every other format here is compared to the last bit, and this one cannot
+    be. A COLLADA node states a matrix where an FBX states Euler angles, so
+    the angles are worked out rather than copied — and `asin` and `atan2` are
+    the platform's, so CPython and V8 part company in the last place or two of
+    a degree. Measured over thirteen of BeamNG's own cars the worst of it is
+    3e-14 degrees, which is a rotation nothing can be turned by.
+
+    So the structure, the names and the arrays are held exactly, and the
+    numbers to a relative 1e-9 — tight enough that a wrong axis, a transposed
+    matrix or a mixed-up sign fails it, and loose enough to let two libraries
+    disagree about a bit.
+    """
+    import fbxbuild as fb
+
+    path = tmp_path / "scene.dae"
+    path.write_bytes(fb.build_dae(up=up, meter=meter))
+
+    js = _wasm_dump(str(path))
+    python = _python_dump(str(path))
+    assert js["warnings"] == []
+    assert len(js["nodes"]) == len(python), (
+        f"record count differs: js={len(js['nodes'])} python={len(python)}"
+    )
+
+    def close(a, b):
+        if a == b:
+            return True
+        if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+            return all(close(x, y) for x, y in zip(a, b))
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            return abs(a - b) <= 1e-9 * max(1.0, abs(a), abs(b))
+        return False
+
+    for index, (a, b) in enumerate(zip(python, js["nodes"])):
+        assert close(a, b), f"record {index} differs: python={a} js={b}"
+
+
+@needs_clang
+@needs_node
 @pytest.mark.parametrize("shader", [None, "Blinn", "VRayMtl", "CoronaMtl"])
 def test_the_two_max_readers_agree(built, tmp_path, shader):
     """A .max is read twice over — once here, once in the page — and the two

@@ -14,6 +14,7 @@ const FbxWasm = require(path.join(__dirname, '..', 'app', 'wasm.js'));
 const FbxAscii = require(path.join(__dirname, '..', 'app', 'ascii.js'));
 const FbxGltfIn = require(path.join(__dirname, '..', 'app', 'gltfin.js'));
 const FbxMax = require(path.join(__dirname, '..', 'app', 'max.js'));
+const FbxDae = require(path.join(__dirname, '..', 'app', 'dae.js'));
 
 const WASM = path.join(__dirname, '..', 'build', 'fbx.wasm');
 
@@ -65,11 +66,12 @@ async function main() {
   } else doc = FbxWasm.parseBinary(data);
   if (!doc) {
     const text = new TextDecoder('utf-8').decode(data);
-    if (!FbxAscii.looksLikeAscii(text)) {
+    if (FbxAscii.looksLikeAscii(text)) doc = FbxAscii.parse(text);
+    else if (FbxDae.looksLikeDae(text)) doc = FbxDae.parse(text);
+    else {
       console.log(JSON.stringify({ error: 'not an FBX file' }));
       return;
     }
-    doc = FbxAscii.parse(text);
   }
 
   console.log(JSON.stringify({
