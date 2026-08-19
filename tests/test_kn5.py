@@ -168,13 +168,14 @@ def test_the_mesh_arrives_as_the_records_every_other_reader_produces(car):
 
 
 def test_v_is_measured_from_the_other_end_of_the_texture(car):
-    """The game measures V down from the top, as Direct3D does; FBX up.
-
-    Left alone, every texture on the car is upside down — which on a number
-    plate or a badge is obvious and on a panel is not.
+    """The file stores V negated, and the reader undoes it: V comes out
+    upwards in [0, 1], as FBX holds it and as every other reader here
+    writes it.  Read the other way round, every texture on the car is
+    upside down — which on a number plate or a badge is obvious and on
+    a panel is not.
     """
     uv = objects_of(car, "Geometry")[0].get("LayerElementUV").get("UV")
-    assert uv.props[0].value == [0.0, 1.0, 1.0, 0.75, 0.0, 0.0]
+    assert uv.props[0].value == [0.0, 0.0, 1.0, 0.25, 0.0, 1.0]
 
 
 def test_the_arrays_are_only_unpacked_when_they_are_asked_for():

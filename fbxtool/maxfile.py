@@ -96,6 +96,7 @@ named in the report but have no vertices here.
 from __future__ import annotations
 
 import gzip
+import io
 import struct
 from typing import Iterator
 
@@ -216,7 +217,16 @@ class _Compound:
     def _fat(self) -> list[int]:
         sectors = list(struct.unpack_from("<109I", self.data, 0x4C))
         nxt, left = self.difat_start, self.difat_count
+        # A DIFAT chain cannot visit a sector twice — it is a linear list, not
+        # a graph — so a chain that loops back on itself is a broken container
+        # rather than a bigger one.  Without the check, a hostile header that
+        # points the chain at itself runs `difat_count` iterations, which the
+        # file itself is free to claim is any number up to 2^32-1.
+        visited: set[int] = set()
         while nxt not in (_END, _FREE) and left:
+            if nxt in visited:
+                raise ParseError("the DIFAT chain loops back on itself")
+            visited.add(nxt)
             block = self._sector(nxt)
             values = struct.unpack_from("<%dI" % (self.sector // 4), block)
             sectors.extend(values[:-1])
@@ -232,7 +242,14 @@ class _Compound:
     def _mini_fat(self) -> list[int]:
         out: list[int] = []
         sector, left = self.mini_start, self.mini_count
+        # The same linear-chain rule as the DIFAT walk above: a chain that
+        # loops is a broken container, and without the check a hostile header
+        # can make `mini_count` (up to 2^32-1) self-referencing iterations.
+        visited: set[int] = set()
         while sector not in (_END, _FREE) and left:
+            if sector in visited:
+                raise ParseError("the mini-FAT chain loops back on itself")
+            visited.add(sector)
             out.extend(struct.unpack_from("<%dI" % (self.sector // 4), self._sector(sector)))
             sector = self.fat[sector] if sector < len(self.fat) else _END
             left -= 1
@@ -288,11 +305,22 @@ class _Compound:
             if found == name and kind == 2:
                 data = self._chain(start, size, mini=size < self.cutoff)
                 if data[:2] == b"\x1f\x8b":
+                    # A stream that inflates to more than the whole file it
+                    # came from, or to more than a couple of gigabytes, is not
+                    # a scene: it is a bomb, and an unbounded read would build
+                    # it all before anyone noticed.
+                    cap = min(1 << 33, max(len(self.data) * 64, 1 << 20))
                     try:
-                        return gzip.decompress(data)
+                        with gzip.GzipFile(fileobj=io.BytesIO(data)) as handle:
+                            inflated = handle.read(cap + 1)
                     except (OSError, EOFError, zlib_error) as error:
                         raise ParseError(f"{name} is compressed and will not "
                                          f"inflate: {error}") from None
+                    if len(inflated) > cap:
+                        raise ParseError(
+                            f"{name} is compressed and will not inflate: it "
+                            "expands further than the file it came from")
+                    return inflated
                 return data
         return b""
 

@@ -148,7 +148,7 @@ everywhere.
 - Both versions in the wild; texture table, material table and node tree read straight through.
 - Reported: scene node/mesh counts and depth, geometry counts, inactive nodes and hidden meshes, material count, metals, dimmed materials, shader names, embedded texture count and size.
 - Interleaved vertices (44 bytes, 76 skinned), unpacked lazily.
-- V flipped; Direct3D row-major transforms decomposed, negative determinant kept as negative scale.
+- V stored negated and undone on the way in, leaving it upwards in `[0, 1]` as the other readers write it; Direct3D row-major transforms decomposed, negative determinant kept as negative scale.
 - **Materials**: `txDiffuse` as albedo, `ksSpecularEXP` as shininess exponent, `ksSpecular` as highlight strength, `fresnelC` / `fresnelEXP` / `fresnelMaxLevel` as a Schlick Fresnel with a ceiling. Every named parameter also carried under its own name.
 - `ksAmbient` and `ksDiffuse` read as how much of the light a material takes, against a 0.5/0.6 baseline.
 - Metalness inferred from reflectance at normal incidence (dielectrics below ~17%, metals above ~50%); nothing inferred from a see-through surface.

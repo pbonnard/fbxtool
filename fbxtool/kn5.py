@@ -21,11 +21,14 @@ a vertex stream                ``Vertices``, ``LayerElementNormal``, ``LayerElem
 ``indices``                    ``PolygonVertexIndex``
 =============================  ====================================
 
-Two things are turned round on the way in.  The game measures V downwards from
-the top of a texture, as Direct3D does and FBX does not, so V is flipped.  And
-the transforms are Direct3D's row-major 4×4 with the translation in the last
-row — which is the same sixteen numbers in the same order as glTF's
-column-major matrix acting on column vectors, so they decompose identically.
+Two things are turned round on the way in.  The file stores V negated — a
+sampler's V is the value's negation, since the game measures downwards from
+the top of a texture, as Direct3D does, and FBX measures upwards — so the
+negation is undone, leaving V measured upwards in ``[0, 1]`` as the other
+readers here write it.  And the transforms are Direct3D's row-major 4×4 with
+the translation in the last row — which is the same sixteen numbers in the
+same order as glTF's column-major matrix acting on column vectors, so they
+decompose identically.
 
 Nothing else is moved.  The game's axes are right-handed with Y up and +Z
 towards the front of the car, which leaves +X pointing at its left-hand side;
@@ -489,8 +492,12 @@ def _read_vertices(cursor: _Cursor, mesh: _Mesh, stride: int, *,
         px, py, pz, nx, ny, nz, u, v = layout.unpack_from(data, start + index * stride)
         positions[index * 3:index * 3 + 3] = (px, py, pz)
         normals[index * 3:index * 3 + 3] = (nx, ny, nz)
-        # The game measures V down from the top of the texture; FBX up.
-        uvs[index * 2:index * 2 + 2] = (u, 1.0 - v)
+        # The file stores V negated: the sampler's V is the value's negation
+        # (the game measures down from the top of the texture and FBX up, so
+        # the two are each other's mirror).  Undoing the negation leaves V
+        # measured upwards in [0, 1], which is what every other reader here
+        # writes.
+        uvs[index * 2:index * 2 + 2] = (u, -v)
     mesh.positions = positions
     mesh.normals = normals
     mesh.uvs = uvs
@@ -790,12 +797,17 @@ def _png_pixels(data: bytes) -> tuple[bytearray, int, int] | None:
         return None
     if width * height > 1 << 24:
         return None
+    stride = width * channels
+    # Exactly one filter byte and one row per scanline; anything more in the
+    # stream is a bomb hiding behind a small declared picture, and
+    # `zlib.decompress` would happily build all of it first.
+    expected = (stride + 1) * height
     try:
-        raw = zlib.decompress(b"".join(parts))
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(b"".join(parts), expected)
     except zlib.error:
         return None
-    stride = width * channels
-    if len(raw) < (stride + 1) * height:
+    if inflater.unconsumed_tail or not inflater.eof or len(raw) != expected:
         return None
     # Undo the per-row filters.  Each row states its own, and every one of them
     # is written against the row above and the pixel to the left.

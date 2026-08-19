@@ -32,6 +32,11 @@ const FbxViewer = (function () {
   const GRAIN_FLOOR = 0.1;
   const GRAIN_CEILING = 8;
 
+  /* The dark blue backdrop cleared to each frame. The pick pass clears to
+   * black instead and hands the colour back afterwards, so the two agree on
+   * what the viewport shows. */
+  const BACKDROP = [0.086, 0.094, 0.114, 1];
+
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
@@ -878,7 +883,7 @@ ${SHADOW_LOOKUP}
       gl.enable(gl.DEPTH_TEST);
       gl.enable(gl.CULL_FACE);
       gl.cullFace(gl.BACK);
-      gl.clearColor(0.086, 0.094, 0.114, 1);
+      gl.clearColor(BACKDROP[0], BACKDROP[1], BACKDROP[2], BACKDROP[3]);
 
       this._loop = this._loop.bind(this);
       requestAnimationFrame(this._loop);
@@ -1907,6 +1912,9 @@ ${SHADOW_LOOKUP}
       gl.readPixels(px, this.canvas.height - 1 - py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      // The pick pass cleared to black; put the backdrop colour back so the
+      // next frame clears to what the viewport is supposed to show.
+      gl.clearColor(BACKDROP[0], BACKDROP[1], BACKDROP[2], BACKDROP[3]);
       // The picture was drawn over; put it back on the next frame.
       this.dirty = true;
 

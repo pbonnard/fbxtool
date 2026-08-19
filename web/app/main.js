@@ -4321,7 +4321,6 @@
       await viewer.setTextures(textures.images);
       await viewer.setFinishTextures(textures.finish);
       await viewer.setBumpTextures(textures.bump);
-    await viewer.setDetailTextures(textures.detail);
       await viewer.setDetailTextures(textures.detail);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
@@ -4534,7 +4533,6 @@
       await viewer.setTextures(textures.images);
       await viewer.setFinishTextures(textures.finish);
       await viewer.setBumpTextures(textures.bump);
-    await viewer.setDetailTextures(textures.detail);
       await viewer.setDetailTextures(textures.detail);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0

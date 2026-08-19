@@ -2651,14 +2651,19 @@ def kn5_mesh(name: str, vertices, indices, material: int = 0, *,
     """A mesh node: interleaved vertices, ushort indices, then the tail.
 
     *vertices* is a list of ``(position, normal, uv, tangent)``; the game
-    writes all four for every vertex, 44 bytes apiece.
+    writes all four for every vertex, 44 bytes apiece.  As the game writes
+    them: V is stored negated — a sampler's V is the value's negation, since
+    the game measures downwards from the top of a texture — so a *uv* given
+    the way the reader will report it (V upwards, in ``[0, 1]``) is written
+    with its V turned over, exactly as a real file holds it.
     """
     out = bytearray(struct.pack("<i", 2) + _kn5_text(name)
                     + struct.pack("<i", 0) + b"\x01")
     out += bytes((1, 1 if visible else 0, 0))
     out += struct.pack("<I", len(vertices))
     for position, normal, uv, tangent in vertices:
-        out += struct.pack("<3f3f2f3f", *position, *normal, *uv, *tangent)
+        out += struct.pack("<3f3f2f3f", *position, *normal,
+                           uv[0], -uv[1], *tangent)
     out += struct.pack("<I", len(indices))
     out += struct.pack(f"<{len(indices)}H", *indices)
     out += struct.pack("<iI", material, layer)

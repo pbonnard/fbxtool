@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,8 @@ def lib():
     LIBRARY.parent.mkdir(parents=True, exist_ok=True)
     newest = max((path.stat().st_mtime for path in SOURCES), default=0)
     if not LIBRARY.exists() or newest > LIBRARY.stat().st_mtime:
+        if shutil.which("clang") is None:
+            pytest.skip("clang is required to build the native test library")
         result = subprocess.run(
             ["clang", "-DFBX_NATIVE", "-O2", "-shared",
              "-Wno-unknown-attributes", "-o", str(LIBRARY), str(SOURCE)],

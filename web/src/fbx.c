@@ -38,6 +38,12 @@ typedef float f32;
 
 #ifdef FBX_NATIVE
 #include <stdlib.h>
+/* The decoders use clang's sqrtf builtin; MSVC — which can build the native
+ * test library too — has none, so it is spelt out for it. */
+#if !defined(__clang__)
+#include <math.h>
+#define __builtin_sqrtf sqrtf
+#endif
 static void *heap_base_ptr = NULL;
 #else
 extern u8 __heap_base;
@@ -140,6 +146,7 @@ typedef struct {
     int bitcnt;
     u8 *dst;
     u8 *dst_end;
+    u8 *dst_start;
     int error;
 } Inflator;
 
@@ -253,8 +260,12 @@ static int inflate_block(Inflator *s, const Huff *lit, const Huff *dist) {
             int dsym = huff_decode(s, dist);
             if (dsym < 0 || dsym >= 30) return 0;
             u32 offset = DIST_BASE[dsym] + bits_get(s, DIST_EXTRA[dsym]);
-            u8 *from = s->dst - offset;
+            /* A match may reach back only as far as the output already written;
+             * a larger distance is an invalid stream (zlib calls it "distance
+             * too far back") and reading it would walk before the buffer. */
             if (offset == 0) return 0;
+            if (offset > (u32)(s->dst - s->dst_start)) return 0;
+            u8 *from = s->dst - offset;
             if ((u32)(s->dst_end - s->dst) < length) return 0;
             for (u32 i = 0; i < length; i++) *s->dst++ = *from++;
         }
@@ -282,6 +293,7 @@ static i32 inflate_raw(const u8 *src, u32 src_len, u8 *dst, u32 dst_cap) {
     s.bitcnt = 0;
     s.dst = dst;
     s.dst_end = dst + dst_cap;
+    s.dst_start = dst;
     s.error = 0;
 
     u8 lengths[320];

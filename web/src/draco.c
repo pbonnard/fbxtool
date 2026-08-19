@@ -284,6 +284,11 @@ static int symbol_decoder_create(SymbolDecoder *sd, DBuf *b, int symbols_bit_len
     sd->num_symbols = db_varu32(b);
     if (b->failed) return 0;
     if (sd->num_symbols / 64u > db_left(b)) return 0;
+    /* The table and the probability array hold one entry per symbol plus a
+     * guard slot; a count large enough to overflow either multiplication is
+     * not a table anyone wrote, whatever the buffer is willing to claim. */
+    if (sd->num_symbols > (u32)-1 / (u32)sizeof(RansSym) - 1u) return 0;
+    if (sd->num_symbols > (u32)-1 / 4u - 1u) return 0;
 
     sd->table = (RansSym *)heap_alloc((sd->num_symbols + 1) * (u32)sizeof(RansSym));
     sd->lut = (u32 *)heap_alloc(sd->precision * 4u);
@@ -663,7 +668,11 @@ static void d_update_corners_after_merge(Draco *d, i32 c, i32 v) {
     i32 opp_corner = d_pos_opposite(d, c);
     if (opp_corner >= 0) {
         i32 corner_n = d_next(opp_corner);
+        u32 fan_steps = 0;
         while (corner_n >= 0) {
+            /* A swing around a vertex cannot visit more corners than the mesh
+             * has; a stream that walks further is looping. */
+            if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
             d_map_corner_to_vertex(d, corner_n, v);
             corner_n = d_swing_left(d, D_MESH_TABLE, corner_n);
         }
@@ -695,13 +704,16 @@ static void d_new_active_corner_reached(Draco *d, i32 new_corner, i32 symbol_id)
     int check_topology_split = 0;
     i32 vert = -1, next = -1, prev = -1;
     i32 corner_a = -1, corner_b = -1;
+    u32 fan_steps = 0;
 
     switch (d->last_symbol) {
     case D_TOPOLOGY_C:
         if (d->active_stack_size == 0) { d->error = D_ERR_CORRUPT; return; }
         corner_a = d->active_corner_stack[d->active_stack_size - 1];
         corner_b = d_previous(corner_a);
+        fan_steps = 0;
         while (d_pos_opposite(d, corner_b) >= 0) {
+            if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
             corner_b = d_previous(d_pos_opposite(d, corner_b));
         }
         d_set_opposite_corners(d, corner_a, new_corner + 1);
@@ -895,17 +907,24 @@ static void d_process_interior_edges(Draco *d) {
     Rans ans;
     if (!rans_init(&ans, d->start_face_buf.data, d->start_face_buf.size, D_L_RANS_BASE)) {
         if (d->start_face_buf.size) d->error = D_ERR_CORRUPT;
-        return;
-    }
+        return;    }
     while (d->active_stack_size > 0) {
         i32 corner_a = d->active_corner_stack[--d->active_stack_size];
         u32 interior_face = rabs_desc_read(&ans, d->start_face_prob_zero);
         if (!interior_face) continue;
 
         i32 corner_b = d_previous(corner_a);
-        while (d_pos_opposite(d, corner_b) >= 0) corner_b = d_previous(d_pos_opposite(d, corner_b));
+        u32 fan_steps = 0;
+        while (d_pos_opposite(d, corner_b) >= 0) {
+            if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
+            corner_b = d_previous(d_pos_opposite(d, corner_b));
+        }
         i32 corner_c = d_next(corner_a);
-        while (d_pos_opposite(d, corner_c) >= 0) corner_c = d_next(d_pos_opposite(d, corner_c));
+        fan_steps = 0;
+        while (d_pos_opposite(d, corner_c) >= 0) {
+            if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
+            corner_c = d_next(d_pos_opposite(d, corner_c));
+        }
 
         i32 new_corner = (i32)(d->face_count * 3u);
         d_set_opposite_corners(d, new_corner, corner_a);
@@ -1045,6 +1064,11 @@ static void d_decode_edgebreaker_connectivity_data(Draco *d) {
 
     d->num_verts = d->num_encoded_vertices + d->num_encoded_split_symbols;
     d->num_corners = d->num_faces * 3u;
+    /* Every vertex must be incident to at least one corner, so a valid mesh
+     * has no more vertices than corners; the traversal hands out vertex ids
+     * up to three per symbol, which is at most `num_corners` in total, so
+     * this bound is what keeps those ids inside the arrays below. */
+    if (d->num_verts > d->num_corners) { d->error = D_ERR_LIMIT; return; }
 
     for (int i = 0; i < 3; i++) {
         d->face_to_vertex[i] = (i32 *)heap_alloc(d->num_faces * 4u);
@@ -1091,6 +1115,7 @@ static void d_decode_sequential_connectivity_data(Draco *d) {
     u32 method = db_u8(b);
     if (b->failed) { d->error = D_ERR_TRUNCATED; return; }
     if (d->num_faces == 0 || d->num_faces > (1u << 28) / 3u) { d->error = D_ERR_LIMIT; return; }
+    if (d->num_points == 0 || d->num_points > d->num_faces * 3u) { d->error = D_ERR_LIMIT; return; }
 
     d->num_corners = d->num_faces * 3u;
     d->num_verts = d->num_points;
@@ -1194,6 +1219,7 @@ static int d_is_vertex_on_attribute_seam(Draco *d, i32 attr, i32 vert) {
 static void d_recompute_vertices_internal(Draco *d, u32 attr) {
     DAttrData *ad = &d->attr_data[attr];
     u32 num_new_vertices = 0;
+    u32 fan_steps = 0;
 
     for (int i = 0; i < 3; i++) {
         ad->face_to_vertex[i] = (i32 *)heap_alloc(d->num_faces * 4u);
@@ -1215,7 +1241,9 @@ static void d_recompute_vertices_internal(Draco *d, u32 attr) {
         i32 first_c = c;
         if (d_is_vertex_on_attribute_seam(d, (i32)attr, (i32)v)) {
             i32 act_c = d_attr_swing_left(d, attr, first_c);
+            fan_steps = 0;
             while (act_c >= 0) {
+                if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
                 first_c = act_c;
                 act_c = d_attr_swing_left(d, attr, act_c);
             }
@@ -1223,7 +1251,9 @@ static void d_recompute_vertices_internal(Draco *d, u32 attr) {
         ad->corner_to_vertex[first_c] = first_vert_id;
         ad->vertex_to_left_most_corner[first_vert_id] = first_c;
         i32 act_c = d_swing_right(d, D_MESH_TABLE, first_c);
+        fan_steps = 0;
         while (act_c >= 0 && act_c != first_c) {
+            if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
             i32 next_act_c = d_next(act_c);
             if (d_is_edge_on_seam(d, attr, next_act_c)) {
                 first_vert_id = (i32)num_new_vertices++;
@@ -1246,6 +1276,7 @@ static void d_recompute_vertices_internal(Draco *d, u32 attr) {
 /** Attribute_AssignPointsToCorners(): a point per distinct set of attributes. */
 static void d_assign_points_to_corners(Draco *d) {
     u32 count = 0;
+    u32 fan_steps = 0;
     for (u32 i = 0; i < d->num_corners; i++) d->corner_to_point_map[i] = -1;
 
     for (u32 v = 0; v < d->num_verts; v++) {
@@ -1261,7 +1292,9 @@ static void d_assign_points_to_corners(Draco *d) {
                 i32 vert_id = d->attr_data[attr].corner_to_vertex[c];
                 i32 act_c = d_swing_right(d, D_MESH_TABLE, c);
                 int seam_found = 0;
+                fan_steps = 0;
                 while (act_c >= 0 && act_c != c) {
+                    if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
                     i32 act_vert_id = d->attr_data[attr].corner_to_vertex[act_c];
                     if (act_vert_id != vert_id) {
                         deduplication_first_corner = act_c;
@@ -1278,7 +1311,9 @@ static void d_assign_points_to_corners(Draco *d) {
         d->corner_to_point_map[c] = (i32)count++;
         i32 prev_c = c;
         c = d_swing_right(d, D_MESH_TABLE, c);
+        fan_steps = 0;
         while (c >= 0 && c != deduplication_first_corner) {
+            if (++fan_steps > d->num_corners + 1u) { d->error = D_ERR_CORRUPT; return; }
             int attribute_seam = 0;
             for (u32 attr = 0; attr < d->num_attribute_data; attr++) {
                 i32 *map = d->attr_data[attr].corner_to_vertex;
@@ -1628,6 +1663,9 @@ static int d_is_in_bottom_left(const i32 *p) {
 
 static int d_most_significant_bit(i32 n) {
     int msb = -1;
+    /* A negative value shifts arithmetically forever; a zero has no bit set.
+     * Either way the caller's +1 lands on a shift of one, which is safe. */
+    if (n <= 0) return 0;
     while (n != 0) { msb++; n >>= 1; }
     return msb;
 }
@@ -2094,6 +2132,9 @@ static void d_decode_prediction_data(Draco *d, i32 method) {
         /* The transform data comes first for this one. */
         if (a->transform_type == D_TRANSFORM_NORMAL_OCT_CANON) {
             a->normal_max_q_val = db_i32(&d->buf);
+            /* A value beyond 2^30 makes the caller's `1 << bits` overflow;
+             * no quantizer wrote that. */
+            if (a->normal_max_q_val > (1 << 30)) { d->error = D_ERR_LIMIT; return; }
             (void)db_i32(&d->buf);          /* unused centre value */
         } else if (a->transform_type == D_TRANSFORM_WRAP) {
             a->wrap_min = db_i32(&d->buf);
@@ -2119,6 +2160,7 @@ static void d_decode_prediction_data(Draco *d, i32 method) {
             a->wrap_max = db_i32(&d->buf);
         } else if (a->transform_type == D_TRANSFORM_NORMAL_OCT_CANON) {
             a->normal_max_q_val = db_i32(&d->buf);
+            if (a->normal_max_q_val > (1 << 30)) { d->error = D_ERR_LIMIT; return; }
             (void)db_i32(&d->buf);
         }
     }
@@ -2223,11 +2265,14 @@ static void d_decode_data_needed_by_portable_transforms(Draco *d) {
         DAttribute *a = &ad->attributes[i];
         if (a->decoder_type == D_SEQ_NORMALS) {
             a->quantization_bits = db_u8(&d->buf);
+            if (a->quantization_bits > 30) { d->error = D_ERR_LIMIT; return; }
         } else if (a->decoder_type == D_SEQ_QUANTIZATION) {
             u32 nc = d_num_components(d);
             for (u32 j = 0; j < nc && j < 8; j++) a->min_values[j] = db_f32(&d->buf);
             a->range = db_f32(&d->buf);
             a->quantization_bits = db_u8(&d->buf);
+            /* A shift past thirty overflows the dequantizer's `1u << bits`. */
+            if (a->quantization_bits > 30) { d->error = D_ERR_LIMIT; return; }
         }
     }
     if (d->buf.failed) d->error = D_ERR_TRUNCATED;
@@ -2563,7 +2608,11 @@ FBX_EXPORT("fbx_draco_decode") u32 fbx_draco_decode(u32 src_off, u32 src_len) {
             } else {
                 point = d->face_to_vertex[k][f];
             }
-            indices[f * 3u + k] = point < 0 ? 0u : (u32)point;
+            /* The caller indexes per-point attribute arrays with these; a
+             * value past the point count (possible from a hostile index
+             * stream) must not reach it. */
+            if (point < 0 || (u32)point >= d->num_points) point = 0;
+            indices[f * 3u + k] = (u32)point;
         }
     }
 

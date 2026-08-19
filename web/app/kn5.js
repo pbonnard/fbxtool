@@ -525,8 +525,12 @@ const FbxKn5 = (function () {
       normals[i * 3 + 1] = view.getFloat32(at + 16, true);
       normals[i * 3 + 2] = view.getFloat32(at + 20, true);
       uvs[i * 2] = view.getFloat32(at + 24, true);
-      // The game measures V down from the top of the texture; FBX up.
-      uvs[i * 2 + 1] = 1 - view.getFloat32(at + 28, true);
+      // The file stores V negated: the sampler's V is the value's negation
+      // (the game measures down from the top of the texture and FBX up, so
+      // the two are each other's mirror). Undoing the negation leaves V
+      // measured upwards in [0, 1], the convention every other reader here
+      // writes.
+      uvs[i * 2 + 1] = -view.getFloat32(at + 28, true);
     }
     return { count, positions, normals, uvs };
   }
