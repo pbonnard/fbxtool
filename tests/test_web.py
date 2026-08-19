@@ -2764,6 +2764,70 @@ def test_every_spelling_the_export_is_written_in(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_what_a_gltf_can_be_made_to_hold_of_a_game_material(built, tmp_path):
+    """glTF describes one shading model and a `.kn5` states rather more.
+
+    What has a slot goes in it. What has an extension goes there: an emissive
+    past white is the factor at its brightest channel with the rest in
+    `KHR_materials_emissive_strength`, which is the same light written the way
+    the format allows — clamped instead, every dash LED exports as merely
+    white. Everything else goes in `extras`, which readers that do not know it
+    ignore, and without which a car written out and opened again is a PBR
+    approximation of the car that went in.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([180, 180, 180, 255]) * 16)
+    speck = fb.dds_bgra(4, 4, (bytes([120, 120, 120, 255]) * 8)
+                        + (bytes([150, 150, 150, 255]) * 8))
+    tilt = fb.dds_bgra(4, 4, bytes([255, 128, 210, 255]) * 16)
+    lamp = fb.dds_bgra(4, 4, bytes([255, 255, 255, 255]) * 16)
+    # One material stating everything this tool reads out of a game's own.
+    properties = (fb.kn5_property("ksAmbient", 0.4) + fb.kn5_property("ksDiffuse", 0.45)
+                  + fb.kn5_property("ksSpecular", 0.6)
+                  + fb.kn5_property("ksSpecularEXP", 50.0)
+                  + fb.kn5_property("ksEmissive", 0.0, c=(10.0, 9.0, 0.0))
+                  + fb.kn5_property("ksAlphaRef", 0.4)
+                  + fb.kn5_property("fresnelC", 0.07)
+                  + fb.kn5_property("fresnelEXP", 3.5)
+                  + fb.kn5_property("fresnelMaxLevel", 0.6)
+                  + fb.kn5_property("isAdditive", 1.0)
+                  + fb.kn5_property("sunSpecular", 0.05)
+                  + fb.kn5_property("sunSpecularEXP", 90.0)
+                  + fb.kn5_property("useDetail", 1.0)
+                  + fb.kn5_property("detailUVMultiplier", 20.0)
+                  + fb.kn5_property("detailNormalBlend", 0.3))
+    material = fb.kn5_material(
+        "everything", "ksPerPixelMultiMap_NMDetail", alpha_tested=True,
+        properties=properties, property_count=15,
+        slots=(("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "speck.dds"),
+               ("txNormalDetail", 4, "tilt.dds"), ("txGlow", 5, "lamp.dds")))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    model = tmp_path / "everything.kn5"
+    model.write_bytes(fb.build_kn5(
+        6, textures=[("grey.dds", grey), ("speck.dds", speck),
+                     ("tilt.dds", tilt), ("lamp.dds", lamp)],
+        materials=[material],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("cube", vertices, indices), 1)))
+
+    result = _run(["node", str(WEB / "test" / "carry.js"), str(tmp_path), str(model)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
 def test_gltf_export(built, tmp_path):
     """Export through the page and take the result apart.
 

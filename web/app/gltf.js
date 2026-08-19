@@ -166,13 +166,24 @@ const FbxGltf = (function () {
     }
     if (at.normal >= 0) out.normalTexture = { index: at.normal };
     if (at.occlusion >= 0) out.occlusionTexture = { index: at.occlusion };
-    // An emissive image multiplies the factor, which glTF defaults to black —
-    // so passing the map through without the colour beside it writes a map
-    // that can never light anything.
+    /* An emissive past white, which glTF's own factor cannot hold.
+     *
+     * The factor is defined inside the unit range, and a game states 15 for a
+     * dash LED and 10 for a display — how much brighter than the room the
+     * thing reads rather than a shade it is painted. Clamped, every one of
+     * them exports as merely white. The extension is exactly for this: the
+     * colour keeps its hue at the brightest channel and the strength carries
+     * the rest, which is the same light written the way the format allows. */
     const emissive = entry.emissive || (at.emissive >= 0 ? [1, 1, 1] : null);
     if (emissive && emissive.some((c) => c > 0)) {
-      out.emissiveFactor = emissive.map((c) => Math.min(Math.max(c, 0), 1));
+      const peak = Math.max(emissive[0], emissive[1], emissive[2]);
+      const strength = peak > 1 ? peak : 1;
+      out.emissiveFactor = emissive.map((c) => Math.min(Math.max(c / strength, 0), 1));
       if (at.emissive >= 0) out.emissiveTexture = { index: at.emissive };
+      if (strength > 1) {
+        out.extensions = out.extensions || {};
+        out.extensions.KHR_materials_emissive_strength = { emissiveStrength: strength };
+      }
     }
     // glTF fixes a dielectric's reflectance at 4% unless this extension says
     // otherwise. The extension defines it as 0.04 × specularColorFactor, so
@@ -191,9 +202,47 @@ const FbxGltf = (function () {
       const peak = Math.max(factor[0], factor[1], factor[2]);
       if (peak > 1) for (let i = 0; i < 3; i++) factor[i] /= peak;
       if (factor.some((c) => c < 0.999)) {
-        out.extensions = { KHR_materials_specular: { specularColorFactor: factor } };
+        out.extensions = out.extensions || {};
+        out.extensions.KHR_materials_specular = { specularColorFactor: factor };
       }
     }
+    /* And everything else the file said, under `extras`.
+     *
+     * glTF describes one shading model, and a game states a surface in rather
+     * more than that: how fast a reflection comes up and how far it is let
+     * get, how much of the sun's highlight the surface takes and how tight,
+     * whether what it returns is added or laid over, how often a grain is
+     * tiled and how much of that grain's relief is taken. None of it has a
+     * slot, and dropped it a car written out and opened again is a PBR
+     * approximation of the car that went in.
+     *
+     * `extras` is the place the format keeps for this: readers that do not
+     * know it ignore it, and this one reads it back. `stated` is what the
+     * file said in its own words, so that anything not derived here is still
+     * there to be derived later.
+     */
+    const extras = {};
+    if (entry.shader) extras.shader = entry.shader;
+    if (entry.tintTexture) extras.tintsTexture = true;
+    /* The reflectance as it was read, beside the capped one the extension
+     * carries. `KHR_materials_specular` is held at the 4% a dielectric has —
+     * which is what the pipelines downstream of this want — so the number the
+     * file actually stated would otherwise be gone. */
+    if (entry.specular && entry.specular.some((c) => Math.abs(c - 0.04) > 0.005)) {
+      extras.reflectance = entry.specular.slice();
+    }
+    for (const key of ['fresnelExp', 'fresnelCeiling', 'sunRoughness', 'coat',
+      'coatRoughness', 'detailTiling', 'detailScale', 'detailNormalBlend']) {
+      if (typeof entry[key] === 'number') extras[key] = entry[key];
+    }
+    if (typeof entry.specularWeight === 'number' && entry.specularWeight !== 1) {
+      extras.specularWeight = entry.specularWeight;
+    }
+    if (entry.additive) extras.additive = true;
+    // The grain's own relief, which glTF has no second normal slot for.
+    if (at.detailNormal >= 0) extras.detailNormalTexture = { index: at.detailNormal };
+    if (entry.stated && Object.keys(entry.stated).length) extras.stated = entry.stated;
+    if (Object.keys(extras).length) out.extras = extras;
     return out;
   }
 
@@ -327,7 +376,12 @@ const FbxGltf = (function () {
       return index;
     };
 
-    const SLOTS = new Set(['normal', 'occlusion', 'emissive', 'metallicRoughness']);
+    /* The maps carried across. `detailNormal` has no slot of its own in
+     * glTF and is written all the same, named from `extras` — a reader that
+     * does not know it sees an image nothing points at, which is a great
+     * deal better than a grain with no shape. */
+    const SLOTS = new Set(['normal', 'occlusion', 'emissive', 'metallicRoughness',
+      'detailNormal']);
 
     /** Every map a material wears, written and named by index. */
     const slotsFor = (entry) => {

@@ -3145,8 +3145,15 @@
     // part was deleted, and a list of triangles means it was split and only
     // some of it is left. A part nobody touched keeps `null` — all of it — so
     // untouched instances of one geometry go on sharing a mesh.
+    /* A part the car's own config takes away is not part of the car, so it
+     * does not go out either. That is a `HIDE` in a model replacement — a
+     * number plate a livery does not want — and what leaves has to be what is
+     * on the screen rather than what was in the file before it was read. */
+    const gone = new Set((partTable || [])
+      .filter((part) => part.hidden).map((part) => part.segment));
     const kept = new Map();
     for (const segment of currentSegments()) {
+      if (gone.has(segment)) continue;
       const here = kept.get(segment.source) || [];
       here.push(segment);
       kept.set(segment.source, here);
@@ -3664,6 +3671,42 @@
     dom.materialsClear.addEventListener('click', clearMaterials);
   }
 
+  /* The FBX properties a material is expected to have, so that what is left
+   * over is what the file said in its own words. Every reader here writes
+   * these; a game's own parameters — `fresnelEXP`, `ksDiffuse`, `isAdditive` —
+   * are the ones with nowhere standard to sit. */
+  const STANDARD_PROPERTIES = new Set([
+    'ShadingModel', 'MultiLayer', 'EmissiveColor', 'EmissiveFactor', 'AmbientColor',
+    'AmbientFactor', 'DiffuseColor', 'DiffuseFactor', 'TransparentColor',
+    'TransparencyFactor', 'Opacity', 'NormalMap', 'Bump', 'BumpFactor',
+    'DisplacementColor', 'DisplacementFactor', 'VectorDisplacementColor',
+    'VectorDisplacementFactor', 'SpecularColor', 'SpecularFactor', 'Shininess',
+    'ShininessExponent', 'ReflectionColor', 'ReflectionFactor', 'Metallic',
+    'Roughness', 'AlphaMode', 'AlphaCutoff', 'TintsTexture', 'ShaderName',
+  ]);
+
+  /**
+   * What a file said about a material in its own words.
+   *
+   * A game states a surface in parameters of its own — `fresnelEXP` for how
+   * fast a reflection comes up, `isAdditive` for how it is put back,
+   * `detailUVMultiplier` for how often a grain is tiled — and most of them
+   * have nowhere standard to sit in an FBX or a glTF. They are read here, and
+   * carried through the palette so that an export can put them back where the
+   * format allows it: a car written out and opened again is then the car that
+   * went in rather than a PBR approximation of it.
+   */
+  function statedProperties(props) {
+    const out = {};
+    for (const [key, value] of Object.entries(props)) {
+      if (STANDARD_PROPERTIES.has(key)) continue;
+      if (typeof value === 'number' || typeof value === 'boolean') out[key] = value;
+      else if (Array.isArray(value) && value.every((v) => typeof v === 'number')) {
+        out[key] = value.slice();
+      }
+    }
+    return out;
+  }
   /** One palette entry: how a material shades, and the image it wears. */
   function materialEntry(material, analysis, index) {
     const info = analysis || currentAnalysis;
@@ -3752,6 +3795,11 @@
        * either way round they are the difference between black rims and
        * white ones. */
       tintTexture: props.TintsTexture === 1 || props.TintsTexture === true,
+      /* And what the file said in its own words, kept so an export can put it
+       * back: a game states most of a surface in parameters no format has a
+       * slot for, its own shading model among them. */
+      shader: typeof props.ShaderName === 'string' ? props.ShaderName : null,
+      stated: statedProperties(props),
       // The maps this tool does not show, kept as they were read.
       textures: rest,
       layer: -1,
