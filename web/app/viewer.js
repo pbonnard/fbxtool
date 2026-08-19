@@ -39,7 +39,7 @@ const FbxViewer = (function () {
    * is what a material that states no exponent gets — and it is the ceiling
    * on a stated one as well, since the number is there to say a surface
    * reflects across more of itself than a fifth power does, never less. */
-  const PALETTE_ROWS = 7;
+  const PALETTE_ROWS = 8;
   const SCHLICK_POWER = 5;
 
   /* The three-quarter view a model opens on. */
@@ -385,6 +385,7 @@ ${ENVIRONMENT}
   // Bump and normal maps, linear for the same reason.
   uniform highp sampler2DArray uBump;
   uniform highp sampler2DArray uDetail;
+  uniform highp sampler2DArray uGlow;
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -807,8 +808,26 @@ ${SHADOW_LOOKUP}
                                vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     float coverage = clamp(opacity + (1.0 - opacity) * max(mirrored, lensFilter), 0.0, 1.0);
 
+    /* What this surface gives off on its own, which nothing about the room
+     * changes: a lit dial is as lit in shadow as in the sun, and that is the
+     * whole of what makes it read as lit rather than as pale paint.
+     *
+     * The colour and the picture are two different materials rather than two
+     * halves of one — 29 of the cars' materials state a colour and bind no
+     * map, 89 bind a map and state no colour, and none does both — so the two
+     * multiply and whichever is absent stands at one. */
+    vec3 glow = vec3(0.0);
+    if (uPaletteSize > 0 && uMode == 0) {
+      vec4 given = texelFetch(uPalette, ivec2(slot, 7), 0);
+      glow = max(given.rgb, vec3(0.0));
+      int glowLayer = int(given.a + 0.5) - 1;
+      if (uUseTextures == 1 && glowLayer >= 0 && glow != vec3(0.0)) {
+        glow *= texture(uGlow, vec3(vUv, float(glowLayer))).rgb;
+      }
+    }
     // A marked material glows a little, so it reads even where it is in shadow.
-    vec3 lit = direct + ambient + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
+    vec3 lit = direct + ambient + glow
+      + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
     fragColour = vec4(encodeSrgb(toneMap(lit)), marked ? 1.0 : coverage);
   }`;
 
@@ -1015,6 +1034,7 @@ ${SHADOW_LOOKUP}
         finish: gl.getUniformLocation(program, 'uFinish'),
         bump: gl.getUniformLocation(program, 'uBump'),
         detail: gl.getUniformLocation(program, 'uDetail'),
+        glow: gl.getUniformLocation(program, 'uGlow'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -1188,6 +1208,8 @@ ${SHADOW_LOOKUP}
       this.bumpLayers = 0;
       this.detailArray = gl.createTexture();
       this.detailLayers = 0;
+      this.glowArray = gl.createTexture();
+      this.glowLayers = 0;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -1388,6 +1410,21 @@ ${SHADOW_LOOKUP}
           ? Math.min(SCHLICK_POWER, Math.max(0, material.fresnelExp)) : SCHLICK_POWER;
         data[(width * 6 + i) * 4 + 1] = typeof material.fresnelCeiling === 'number'
           ? Math.min(1, Math.max(0, material.fresnelCeiling)) : 1;
+        /* And what it gives off on its own, with the picture of that where it
+         * has one.
+         *
+         * Not held under white: a game states 15 for a dash LED, which is how
+         * much brighter than the room the thing reads rather than a shade it
+         * is painted. The tone map at the end is what brings it back down, and
+         * what it leaves is a blown white core with the colour around it,
+         * which is what a small bright light looks like. */
+        const glow = material.emissive || [0, 0, 0];
+        for (let k = 0; k < 3; k++) {
+          data[(width * 7 + i) * 4 + k] = Math.max(0, glow[k] || 0);
+        }
+        const glowLayer = Number.isInteger(material.emissiveLayer)
+          ? material.emissiveLayer : -1;
+        data[(width * 7 + i) * 4 + 3] = Math.max(0, glowLayer + 1);
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -1464,6 +1501,18 @@ ${SHADOW_LOOKUP}
       return this._uploadArray(this.detailArray, images, this.gl.SRGB8_ALPHA8, edge);
     }
 
+    /**
+     * The pictures of what a surface gives off, where it gives off a shape
+     * rather than a flat colour.
+     *
+     * sRGB, like the base colour and unlike the maps that carry numbers: a
+     * glow map is a picture of a lit dial or a lit badge, drawn the way a
+     * picture is drawn.
+     */
+    async setGlowTextures(images, edge = 1024) {
+      this.glowLayers = images.length;
+      return this._uploadArray(this.glowArray, images, this.gl.SRGB8_ALPHA8, edge);
+    }
     async _uploadArray(target, images, internalFormat, edge = 1024) {
       const gl = this.gl;
       if (!images.length) { this.dirty = true; return; }
@@ -2101,13 +2150,16 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE6);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.detailArray);
       gl.uniform1i(this.uniforms.detail, 6);
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.glowArray);
+      gl.uniform1i(this.uniforms.glow, 7);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
         ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0
-          || this.detailLayers > 0)
+          || this.detailLayers > 0 || this.glowLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,

@@ -583,10 +583,11 @@
     await viewer.setFinishTextures(textures.finish);
     await viewer.setBumpTextures(textures.bump);
     await viewer.setDetailTextures(textures.detail);
+    await viewer.setGlowTextures(textures.glow);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
       && textures.finish.length === 0 && textures.bump.length === 0
-      && textures.detail.length === 0;
+      && textures.detail.length === 0 && textures.glow.length === 0;
     return textures;
   }
 
@@ -4051,6 +4052,13 @@
     const grain = await resolveLayer(palette,
       (m) => (wanted(m, 'detail') && m.detailTiling && m.textures
         ? m.textures.detail : null), 'detailLayer');
+    /* And the picture of what a surface gives off, for the ones that give off
+     * anything at all. A material stating no emission needs no map of it: a
+     * brake disc binds one and states its heat as nought, and that layer would
+     * be a square of atlas multiplied by black. */
+    const glow = await resolveLayer(palette,
+      (m) => (wanted(m, 'emissive') && m.emissive && m.emissive.some((v) => v > 0)
+        && m.textures ? m.textures.emissive : null), 'emissiveLayer');
     // Which kind each layer turned out to be, and how hard to take it. A
     // normal map states its own slopes and is taken as written; a height has
     // to be turned into one, and the strength is what says how deep it reads.
@@ -4077,12 +4085,13 @@
       // A map that was named and did not arrive is worth saying so about,
       // whichever of the three it was.
       missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing,
-        ...grain.missing])],
+        ...grain.missing, ...glow.missing])],
       unreadable: [...new Set([...base.unreadable, ...finish.unreadable,
-        ...relief.unreadable, ...grain.unreadable])],
+        ...relief.unreadable, ...grain.unreadable, ...glow.unreadable])],
       finish: finish.images,
       bump: relief.images,
       detail: grain.images,
+      glow: glow.images,
     };
   }
 
@@ -4365,12 +4374,12 @@
       await viewer.setTextures(textures.images);
       await viewer.setFinishTextures(textures.finish);
       await viewer.setBumpTextures(textures.bump);
-    await viewer.setDetailTextures(textures.detail);
       await viewer.setDetailTextures(textures.detail);
+      await viewer.setGlowTextures(textures.glow);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0
-        && textures.detail.length === 0;
+        && textures.detail.length === 0 && textures.glow.length === 0;
       applyUpAxis(built.mesh);
 
       const size = [0, 1, 2].map((i) => (built.mesh.max[i] - built.mesh.min[i]));
@@ -4578,12 +4587,12 @@
       await viewer.setTextures(textures.images);
       await viewer.setFinishTextures(textures.finish);
       await viewer.setBumpTextures(textures.bump);
-    await viewer.setDetailTextures(textures.detail);
       await viewer.setDetailTextures(textures.detail);
+      await viewer.setGlowTextures(textures.glow);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0
-        && textures.detail.length === 0;
+        && textures.detail.length === 0 && textures.glow.length === 0;
 
       const chosen = applyUpAxis(mesh);
 

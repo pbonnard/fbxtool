@@ -48,6 +48,7 @@ const FbxKn5 = (function () {
     txDiffuse: 'DiffuseColor',
     txNormal: 'NormalMap',
     txGlow: 'EmissiveColor',
+    txEmissive: 'EmissiveColor',
   };
 
   /**
@@ -706,14 +707,38 @@ const FbxKn5 = (function () {
       if (material.alphaTested) {
         props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
       }
-      // What the surface gives off on its own. `ksEmissive` is written as a
-      // colour when it is one and as a single number when it is not.
+      /* What the surface gives off on its own.
+       *
+       * `ksEmissive` is written as a colour when it is one and as a single
+       * number when it is not, and it goes well past white — a Honda's dash
+       * LED states 15, a Mercedes' display 10 — because it is a light rather
+       * than a shade of paint.
+       *
+       * The colour and the map are two different materials rather than two
+       * halves of one. Of the cars to hand, 29 state a colour and bind no map,
+       * 89 bind a map and state no colour, and not one does both: a dial or a
+       * display is the map, and an LED is the colour.
+       *
+       * So a map with no colour beside it is taken as white, times whatever
+       * level the file states. That level is the whole of what keeps a brake
+       * disc dark: `txGlow` is bound almost only by `ksBrakeDisc` — 36 of the
+       * 37 that bind it — and its `glowLevel` is the heat in the disc, which
+       * is nought in a car standing still. Read as a map to be drawn at full
+       * strength, every car here parks with its brakes glowing.
+       */
       const emissive = material.props.get('ksEmissive');
-      if (emissive) {
-        const colour = emissive[2].some((v) => v) ? emissive[2]
-          : [emissive[0], emissive[0], emissive[0]];
-        props.push(p70('EmissiveColor', 'Color', ...colour.map(D)));
+      const stated = emissive && emissive[2].some((v) => v) ? emissive[2]
+        : [scalarOf(material, 'ksEmissive', 0), scalarOf(material, 'ksEmissive', 0),
+          scalarOf(material, 'ksEmissive', 0)];
+      const glows = material.slots.some((entry) => entry.slot === 'txGlow'
+        || entry.slot === 'txEmissive');
+      if (stated.some((v) => v)) {
+        props.push(p70('EmissiveColor', 'Color', ...stated.map(D)));
         props.push(p70('EmissiveFactor', 'Number', D(1)));
+      } else if (glows) {
+        props.push(p70('EmissiveColor', 'Color', D(1), D(1), D(1)));
+        props.push(p70('EmissiveFactor', 'Number',
+          D(Math.max(scalarOf(material, 'glowLevel', 1), 0))));
       }
       // Then everything the file said, under the name it said it with, so that
       // a shader parameter with no FBX spelling is still there to be read. A

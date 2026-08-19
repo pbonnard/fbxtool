@@ -583,9 +583,16 @@ const FbxAnalyze = (function () {
     const coatShininess = number(source.CoatShininess, 1024);
     const coatRoughness = clamp(fromShininess(coatShininess), 0.05, 1);
 
-    // What the surface gives off on its own. Nothing here edits it, but a
-    // material carrying an emissive map and no colour beside it is a map that
-    // can never light anything, so the two travel together.
+    /* What the surface gives off on its own. Nothing here edits it, but a
+     * material carrying an emissive map and no colour beside it is a map that
+     * can never light anything, so the two travel together.
+     *
+     * Not held under white, which a colour is and a light is not: a game
+     * states 15 for a dash LED and 10 for a display, and those are how much
+     * brighter than the scene the thing is meant to read rather than a shade
+     * of paint. glTF's factor has to be inside the unit range and is clamped
+     * where it is written; FBX has no such rule and neither has the viewer,
+     * and clamping here made every LED merely white. */
     const emissive = scale(vector(source.EmissiveColor, [0, 0, 0]),
       number(source.EmissiveFactor, 1));
 
@@ -593,7 +600,7 @@ const FbxAnalyze = (function () {
       colour: albedo.map((v) => Math.max(0, v)),
       base: base.map((v) => Math.max(0, v)),
       specular: specularRgb.map((v) => clamp(v, 0, 1)),
-      emissive: emissive.map((v) => clamp(v, 0, 1)),
+      emissive: emissive.map((v) => Math.max(0, v)),
       roughness,
       specularWeight,
       fresnelExp,

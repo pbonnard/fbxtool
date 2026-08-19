@@ -1020,6 +1020,70 @@ def test_which_skin_a_file_came_from(path, expected):
 
 @needs_clang
 @needs_node
+def test_what_a_surface_gives_off_on_its_own(built, tmp_path):
+    """A dial, a display and an LED are lit rather than pale, and what makes
+    them read that way is that nothing about the room changes them.
+
+    The colour and the map are two different materials: across the 67 cars to
+    hand 29 state an emissive colour and bind no map, 89 bind a map and state
+    no colour, and not one does both. And `txGlow` is bound almost only by
+    `ksBrakeDisc` — 36 of the 37 that bind it — where the level beside it is
+    the heat in the disc, which is nought in a car standing still.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([128, 128, 128, 255]) * 16)
+    lamp = fb.dds_bgra(4, 4, bytes([255, 255, 255, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, emissive, glow_level in (
+        ("dark", None, None),
+        # Amber, and past white in its red: a game states how much brighter
+        # than the room the thing reads, not what shade it is painted.
+        ("lit", (2.0, 0.4, 0.0), None),
+        ("mapped", None, 1.0),
+        ("cold", None, 0.0),
+    ):
+        properties = fb.kn5_property("ksAmbient", 0.5) + fb.kn5_property("ksDiffuse", 0.6)
+        count = 2
+        if emissive is not None:
+            # A kn5 writes an emissive colour in the three-float group, and a
+            # plain number in the first: the reader takes whichever is set.
+            properties += fb.kn5_property("ksEmissive", 0.0, c=emissive)
+            count += 1
+        slots = [("txDiffuse", 0, "grey.dds")]
+        textures = [("grey.dds", grey)]
+        if glow_level is not None:
+            properties += fb.kn5_property("glowLevel", glow_level)
+            count += 1
+            slots.append(("txGlow", 4, "lamp.dds"))
+            textures.append(("lamp.dds", lamp))
+        material = fb.kn5_material("panel", "ksPerPixel", properties=properties,
+                                   property_count=count, slots=tuple(slots))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=textures, materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "emissive.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
 def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
     """A car's interior is one atlas of flat panels with the leather, the
     carpet and the carbon laid over them, tiled sixty or a hundred times
