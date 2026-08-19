@@ -1051,6 +1051,73 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_the_fresnel_a_material_states_is_the_one_it_is_drawn_with(built, tmp_path):
+    """Schlick's term is one shape: a base at nothing rising to a mirror over a
+    fifth power. A `.kn5` writes both of those numbers loose — `fresnelEXP` for
+    how fast the reflection comes up as the surface turns away, and
+    `fresnelMaxLevel` for how far it is let get — and read as a base alone the
+    other two are lost.
+
+    1428 of the 3427 materials across the 67 cars to hand state a base of
+    nought, so read that way they reflect nothing at all: a Jaguar Mk2's paint
+    is nought, a half and a quarter, which is a body reflecting a quarter of
+    the room from every angle but dead head-on, and it drew as a matte panel.
+    The median ceiling across the same materials is 0.1, so the other half of
+    the sentence is at least as often a limit — a fifth power rising to a
+    mirror at a grazing angle is the thing most of them spent a number saying
+    they do not do.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    # Two pairs, each differing in one number and nothing else. The first pair
+    # shares a base of nought and a ceiling of a quarter and differs only in
+    # how fast it gets there. The second shares a base and an exponent of
+    # nought — the rise at its full height from every angle, which 626 of the
+    # materials to hand write — and differs only in the ceiling that holds it:
+    # one at a mirror, one at the base it started from. Both are lit dimly —
+    # `ksAmbient` and `ksDiffuse` at a tenth — so what is measured is the
+    # reflection rather than the panel under it.
+    for name, base, exponent, ceiling in (
+        ("broad", 0.0, 0.5, 0.25),
+        ("dull", 0.0, 5.0, 0.25),
+        ("open", 0.05, 0.0, 1.0),
+        ("capped", 0.05, 0.0, 0.05),
+    ):
+        material = fb.kn5_material(
+            "panel", "ksPerPixel",
+            properties=(fb.kn5_property("ksAmbient", 0.1)
+                        + fb.kn5_property("ksDiffuse", 0.1)
+                        + fb.kn5_property("fresnelC", base)
+                        + fb.kn5_property("fresnelEXP", exponent)
+                        + fb.kn5_property("fresnelMaxLevel", ceiling)),
+            property_count=5, slots=())
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[], materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "fresnel.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
     """A `.kn5` holds the car unpainted: everything under `skins/<name>/`
     beside it replaces the texture of that name, and the skin's own two

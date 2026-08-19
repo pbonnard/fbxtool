@@ -3537,6 +3537,12 @@
           ? props.detailUVMultiplier : 1),
       // How much of the sun's highlight the surface takes, where it says.
       specularWeight: look.specularWeight,
+      /* And the shape of what it returns of the world: how fast the
+       * reflection rises as the surface turns away, and how far it is let
+       * get. A game states both; nothing else states either, and then the
+       * plain Schlick stands. */
+      fresnelExp: look.fresnelExp,
+      fresnelCeiling: look.fresnelCeiling,
       /* Whether the colour is read through the picture or replaced by it.
        *
        * Most files mean the second: a flat colour is a stand-in for the map

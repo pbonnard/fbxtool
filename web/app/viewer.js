@@ -32,6 +32,16 @@ const FbxViewer = (function () {
   const GRAIN_FLOOR = 0.1;
   const GRAIN_CEILING = 8;
 
+  /* How many rows of the palette a material takes, and the power a plain
+   * Schlick Fresnel rises over.
+   *
+   * Five is the shape of the term every file but a game's own implies, so it
+   * is what a material that states no exponent gets — and it is the ceiling
+   * on a stated one as well, since the number is there to say a surface
+   * reflects across more of itself than a fifth power does, never less. */
+  const PALETTE_ROWS = 7;
+  const SCHLICK_POWER = 5;
+
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
@@ -367,6 +377,28 @@ ${SHADOW_LOOKUP}
     return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
   }
 
+  /* The same term with the two numbers a game's material spends on it.
+   *
+   * Schlick's is one shape — a base rising to a mirror over a fifth power —
+   * and a kn5 writes both of those loose: fresnelEXP is how fast the
+   * reflection comes up as the surface turns away, and fresnelMaxLevel is
+   * how far it is let get. Reading only the base is reading the smallest of
+   * the three: a Jaguar's paint states nought, half and a quarter, which is a
+   * body reflecting a quarter of what is around it everywhere but dead
+   * head-on — and taken as a base alone it is a matte panel.
+   *
+   * The ceiling holds in the other direction just as often. The median
+   * across the 3427 materials to hand is 0.1, so what a fifth power does at a
+   * grazing angle — rise to a mirror — is the thing most of them spent a
+   * number saying they do not do.
+   */
+  vec3 fresnelStated(vec3 f0, float u, float power, float ceiling) {
+    // An exponent of nought is the rise at its full height from every angle,
+    // which 626 of the materials to hand ask for and pow() will not answer.
+    float rise = power <= 0.0 ? 1.0 : pow(1.0 - u, power);
+    return min(f0 + (1.0 - f0) * rise, vec3(ceiling));
+  }
+
   /* The frame a tangent-space map is written in, worked out here rather than
    * stored on the mesh.
    *
@@ -670,9 +702,18 @@ ${SHADOW_LOOKUP}
     float sunSpecular = uPaletteSize > 0 && uMode == 0
       ? texelFetch(uPalette, ivec2(slot, 5), 0).a : 1.0;
 
+    /* And the shape of what this surface returns of the world around it: how
+     * fast it comes up as the surface turns away, and how far it is let get.
+     * A file that stated neither is the plain Schlick, which is what the two
+     * defaults are. */
+    vec2 shape = vec2(${SCHLICK_POWER}.0, 1.0);
+    if (uPaletteSize > 0 && uMode == 0) {
+      shape = texelFetch(uPalette, ivec2(slot, 6), 0).rg;
+    }
+
     vec3 direct = vec3(0.0);
     if (nol > 0.0) {
-      vec3 specular = fresnelSchlick(f0, voh)
+      vec3 specular = fresnelStated(f0, voh, shape.x, shape.y)
         * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a) * sunSpecular);
       vec3 beneath = (diffuseColour / PI + specular) * under;
       if (coatF0 > 0.0) {
@@ -685,8 +726,16 @@ ${SHADOW_LOOKUP}
       direct = beneath * SUN_COLOUR * nol * shadow;
     }
 
-    // The environment, which is what makes a curved surface read as a surface.
-    vec3 reflectance = environmentBrdf(f0, roughness, nov);
+    /* The environment, which is what makes a curved surface read as a surface
+     * — and on car paint is the whole of what makes it read as paint.
+     *
+     * The split-sum fit integrates a Schlick over the lobe, so what is handed
+     * to it is this surface's own Fresnel already evaluated at this angle
+     * rather than its head-on base. For a material that stated nothing the
+     * two are the same reading; for one that stated a broad rise held under a
+     * low ceiling they are a body reflecting the room against a matte panel. */
+    vec3 reflectance = environmentBrdf(
+      fresnelStated(f0, nov, shape.x, shape.y), roughness, nov);
     vec3 ambient = (diffuseColour * environmentIrradiance(n)
       + environmentSpecular(r, roughness) * reflectance) * under;
     vec3 coatReflectance = vec3(0.0);
@@ -1171,13 +1220,16 @@ ${SHADOW_LOOKUP}
      * they connect to the model, which is what the per-polygon material index
      * refers to.
      *
-     * Five rows: the diffuse colour with the texture layer in alpha, the
+     * Seven rows: the diffuse colour with the texture layer in alpha, the
      * specular colour with roughness in alpha, then opacity, the material
      * group, the metallic-roughness map's layer and the metalness that map
      * scales, then the relief — which map shapes the surface, how strongly and
-     * which kind it is — and last the clear coat, which is how much a mirror
+     * which kind it is — then the clear coat, which is how much a mirror
      * laid over the whole reflects and how polished that mirror is, beside how
-     * the file asked to be blended and the threshold it asked to be cut at.
+     * the file asked to be blended and the threshold it asked to be cut at,
+     * then the grain, and last the shape of the Fresnel: how fast what the
+     * surface returns of the world rises as it turns away, and how far it is
+     * let get.
      *
      * Floats, because the values are linear and eight bits of a linear ramp
      * bands badly in the darks — the Mercedes' interior sits at 0.05.
@@ -1194,7 +1246,7 @@ ${SHADOW_LOOKUP}
         return;
       }
       const width = materials.length;
-      const data = new Float32Array(width * 6 * 4);
+      const data = new Float32Array(width * PALETTE_ROWS * 4);
       //: Which slots are see-through, which is the same question the shader
       //: asks of the same two numbers a few lines from the bottom.
       const blendedSlots = new Uint8Array(width);
@@ -1275,6 +1327,18 @@ ${SHADOW_LOOKUP}
          * nothing takes all of it. */
         data[(width * 5 + i) * 4 + 3] = typeof material.specularWeight === 'number'
           ? Math.min(1, Math.max(0, material.specularWeight)) : 1;
+        /* And the shape of the Fresnel this surface returns the world with.
+         *
+         * A file that says nothing gets the plain Schlick — a fifth power,
+         * with nothing over it — which is what every reader but a game's own
+         * means by a reflection. A `.kn5` says both, and both matter: the
+         * exponent is what makes a windscreen a sheet of glass across the
+         * whole of itself rather than a rim of light at its edge, and the
+         * ceiling is what keeps a rubber seal from turning to chrome there. */
+        data[(width * 6 + i) * 4] = typeof material.fresnelExp === 'number'
+          ? Math.min(SCHLICK_POWER, Math.max(0, material.fresnelExp)) : SCHLICK_POWER;
+        data[(width * 6 + i) * 4 + 1] = typeof material.fresnelCeiling === 'number'
+          ? Math.min(1, Math.max(0, material.fresnelCeiling)) : 1;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -1298,7 +1362,7 @@ ${SHADOW_LOOKUP}
       }
       this.blendedSlots = blendedSlots;
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 6, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, PALETTE_ROWS, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;

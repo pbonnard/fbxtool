@@ -543,6 +543,30 @@ const FbxAnalyze = (function () {
     }
 
 
+    /* How that reflection rises as the surface turns away, and how far it is
+     * let get.
+     *
+     * A Schlick term has one shape: a base at nothing rising to a mirror over
+     * a fifth power. The game's is the same sentence with both numbers loose
+     * — an exponent of its own, and a ceiling over the whole term — and a
+     * `.kn5` spends them. Of the 3427 materials across the 67 cars to hand
+     * that state a Fresnel, the exponent is 3.5 on car paint, 0 on the 626
+     * that write it that way, and fifteen other values besides; an exponent
+     * of nought is the term at its ceiling from every angle, and the median
+     * ceiling of that group is nothing at all.
+     *
+     * Both are needed or neither is worth reading. Left out, the fifth power
+     * says a rubber seal turns to chrome at its edge while the file's ceiling
+     * of 0.1 — the median across all of them — says it does not; and a
+     * windscreen whose base is nought and whose exponent is a half is a sheet
+     * of glass the whole way across, drawn matte.
+     *
+     * Null where nothing says so, which is every file but a `.kn5`, and then
+     * the plain unbounded Schlick every other reader means.
+     */
+    const fresnelExp = number(source.fresnelEXP, null);
+    const fresnelCeiling = number(source.fresnelMaxLevel, null);
+
     /* The clear coat over it, where the file states one.
      *
      * A car's paint is two surfaces and not one: a dark, half-rough base with
@@ -572,6 +596,8 @@ const FbxAnalyze = (function () {
       emissive: emissive.map((v) => clamp(v, 0, 1)),
       roughness,
       specularWeight,
+      fresnelExp,
+      fresnelCeiling,
       coat,
       coatRoughness,
       opacity: clamp(opacity, 0, 1),
