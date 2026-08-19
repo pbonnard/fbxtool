@@ -3673,6 +3673,11 @@
        * plain Schlick stands. */
       fresnelExp: look.fresnelExp,
       fresnelCeiling: look.fresnelCeiling,
+      /* How tight it answers a light with, where it says so apart from how
+       * rough it is, and whether what it returns is added on top of what is
+       * behind it rather than covering it. */
+      sunRoughness: look.sunRoughness,
+      additive: look.additive,
       /* Whether the colour is read through the picture or replaced by it.
        *
        * Most files mean the second: a flat colour is a stand-in for the map

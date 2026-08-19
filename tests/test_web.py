@@ -720,6 +720,50 @@ def test_a_mesh_used_twice_is_written_once(tmp_path):
 # ------------------------------------------ the paint beside a car
 
 
+def _analyze(expression: str):
+    """Evaluate an expression against the page's own ``analyze.js``, under Node."""
+    script = (
+        f"const A=require({str(WEB / 'app' / 'analyze.js')!r});"
+        f"console.log(JSON.stringify({expression}));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+@needs_node
+def test_the_highlight_a_game_writes_for_the_sun_alone():
+    """`ksSpecular` weighs what a surface throws back generally; `sunSpecular`
+    is the same number written for the one light in the sky, and where a
+    material states one it is the one that belongs on the sun's highlight.
+
+    868 of the materials across the 67 cars to hand state it, 846 of those
+    state something other than their `ksSpecular` and 403 state nought — a
+    surface that reflects its surroundings and takes no highlight, which read
+    off `ksSpecular` alone comes up polished. `sunSpecularEXP` goes with it and
+    is the width of that lobe rather than of the surface: its median is 90
+    against the 20 or so a `ksSpecularEXP` usually is.
+    """
+    stated = _analyze("A.materialAppearance({ksSpecular: 0.4, sunSpecular: 0.05,"
+                      " ksSpecularEXP: 20, sunSpecularEXP: 90})")
+    # 0.1 is the whole of the highlight this renderer's lobe gives, so 0.05 is
+    # half of it — where `ksSpecular` at 0.4 would have asked for all of it.
+    assert stated["specularWeight"] == pytest.approx(0.5)
+    assert 0 < stated["sunRoughness"] < stated["roughness"], (
+        "the sun is answered tighter than the room is")
+
+    # A surface that says it takes none of the sun takes none of it.
+    dark = _analyze("A.materialAppearance({ksSpecular: 0.4, sunSpecular: 0})")
+    assert dark["specularWeight"] == 0
+
+    # And every file but a game's own states neither, and keeps the whole of
+    # the highlight at the roughness it already has.
+    plain = _analyze("A.materialAppearance({ksSpecularEXP: 20})")
+    assert plain["specularWeight"] == 1 and plain["sunRoughness"] is None
+
+    # `isAdditive` is only read where there is something behind to add to.
+    assert _analyze("A.materialAppearance({isAdditive: 1})")["additive"] is True
+    assert _analyze("A.materialAppearance({isAdditive: 0})")["additive"] is False
+
 def _kn5js(expression: str):
     """Evaluate an expression against the page's own ``kn5.js``, under Node."""
     script = (
@@ -1293,6 +1337,52 @@ def test_the_fresnel_a_material_states_is_the_one_it_is_drawn_with(built, tmp_pa
     assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
     assert "all checks passed" in result.stdout
 
+
+@needs_clang
+@needs_node
+def test_a_surface_that_adds_what_it_returns(built, tmp_path):
+    """`isAdditive` tells a game's shader to put what a surface returns on top
+    of what is behind it rather than in place of some of it.
+
+    1109 materials across the 67 cars to hand state one — and 1015 of those are
+    opaque, named `body` and `carpaint` and `chrome`, where there is nothing
+    behind to add to. Whatever the number means there it is not this, so only
+    the 94 that also blend are taken.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    # Half-covered, so the near faces of the cube show the far ones through
+    # them and there is something for the addition to land on.
+    veil = fb.dds_bgra(4, 4, bytes([190, 190, 190, 128]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, additive in (("over", 0.0), ("added", 1.0)):
+        material = fb.kn5_material(
+            "veil", "ksPerPixelReflection", blend=1,
+            properties=(fb.kn5_property("fresnelC", 0.05)
+                        + fb.kn5_property("isAdditive", additive)),
+            property_count=2, slots=(("txDiffuse", 0, "veil.dds"),))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[("veil.dds", veil)], materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "additive.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
 
 @needs_clang
 @needs_node

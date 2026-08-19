@@ -765,14 +765,23 @@ ${SHADOW_LOOKUP}
      * A file that stated neither is the plain Schlick, which is what the two
      * defaults are. */
     vec2 shape = vec2(${SCHLICK_POWER}.0, 1.0);
+    /* How tight this surface answers a light with. A game writes it apart
+     * from how rough the surface is — a car's paint answers the sun with a
+     * sharper highlight than the roughness it shows the room — and where it
+     * says nothing the roughness is what it answers with. */
+    float lightA = a;
+    bool additive = false;
     if (uPaletteSize > 0 && uMode == 0) {
-      shape = texelFetch(uPalette, ivec2(slot, 6), 0).rg;
+      vec4 answer = texelFetch(uPalette, ivec2(slot, 6), 0);
+      shape = answer.rg;
+      if (answer.b > 0.0) lightA = max(answer.b * answer.b, 1e-3);
+      additive = answer.a > 0.5;
     }
 
     vec3 direct = vec3(0.0);
     if (nol > 0.0) {
       vec3 specular = fresnelStated(f0, voh, shape.x, shape.y)
-        * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a) * sunSpecular);
+        * (distributionGgx(noh, lightA) * visibilitySmith(nov, nol, lightA) * sunSpecular);
       vec3 beneath = (diffuseColour / PI + specular) * under;
       if (coatF0 > 0.0) {
         float coatSpec = fresnelSchlick(vec3(coatF0), voh).r
@@ -821,7 +830,7 @@ ${SHADOW_LOOKUP}
       float lnoh = max(dot(n, lh), 0.0);
       float lvoh = max(dot(v, lh), 0.0);
       vec3 lspec = fresnelStated(f0, lvoh, shape.x, shape.y)
-        * (distributionGgx(lnoh, a) * visibilitySmith(nov, lambert, a) * sunSpecular);
+        * (distributionGgx(lnoh, lightA) * visibilitySmith(nov, lambert, lightA) * sunSpecular);
       direct += (diffuseColour / PI + lspec) * under * tint.rgb * lambert * fall;
     }
     /* The environment, which is what makes a curved surface read as a surface
@@ -893,7 +902,17 @@ ${SHADOW_LOOKUP}
     // A marked material glows a little, so it reads even where it is in shadow.
     vec3 lit = direct + ambient + glow
       + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
-    fragColour = vec4(encodeSrgb(toneMap(lit)), marked ? 1.0 : coverage);
+    /* Premultiplied, which is what lets a surface choose. The blend is
+     * one-minus-source-alpha over a colour already multiplied by its own
+     * coverage, so a material that covers what is behind it comes out exactly
+     * where it did — and one the file calls additive writes no coverage at
+     * all and is added to what is behind instead of standing in front of it.
+     * That is what a lamp's glow is: light on top of the thing it lies on. */
+    float wrote = marked ? 1.0 : coverage;
+    vec3 out3 = encodeSrgb(toneMap(lit)) * wrote;
+    // Only in the pass that blends: the opaque one writes with blending off,
+    // and a coverage of nought there would mean nothing at best.
+    fragColour = vec4(out3, additive && !marked && uPass == 1 ? 0.0 : wrote);
   }`;
 
   /* ------------------------------------------------------------- matrices */
@@ -1557,6 +1576,13 @@ ${SHADOW_LOOKUP}
           ? Math.min(SCHLICK_POWER, Math.max(0, material.fresnelExp)) : SCHLICK_POWER;
         data[(width * 6 + i) * 4 + 1] = typeof material.fresnelCeiling === 'number'
           ? Math.min(1, Math.max(0, material.fresnelCeiling)) : 1;
+        /* How tight this surface answers a light with, where it says so apart
+         * from how rough it is. Nought is a material that says nothing, and
+         * then its own roughness stands. */
+        data[(width * 6 + i) * 4 + 2] = typeof material.sunRoughness === 'number'
+          ? Math.min(1, Math.max(0.05, material.sunRoughness)) : 0;
+        // And whether what it returns is added on top of what is behind it.
+        data[(width * 6 + i) * 4 + 3] = material.additive ? 1 : 0;
         /* And what it gives off on its own, with the picture of that where it
          * has one.
          *
@@ -2332,7 +2358,9 @@ ${SHADOW_LOOKUP}
       if (this.hasTransparency && this.mode === 0) {
         gl.uniform1i(this.uniforms.pass, 1);
         gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        // Premultiplied: the shader hands back a colour already multiplied by
+        // its own coverage, so a material can write no coverage and be added.
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
         // Its own half where that is known, the whole mesh where it is not.
         const from = this.opaqueTriangles * 3 * 4;

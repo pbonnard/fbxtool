@@ -509,7 +509,7 @@ const FbxAnalyze = (function () {
     const roughness = clamp(stated !== null ? stated
       : fromShininess(shininess), 0.05, 1);
 
-    /* How much of the sun's highlight the surface takes.
+    /* How much of the sun's highlight the surface takes, and how tight.
      *
      * `ksSpecular` is the peak of the Blinn-Phong highlight a game's shader
      * adds, and it is the third of a trio: `ksAmbient` and `ksDiffuse` weigh
@@ -526,12 +526,40 @@ const FbxAnalyze = (function () {
      * cannot be honoured by a lobe that conserves energy at all. So this only
      * ever takes a highlight away and never invents one.
      *
-     * A file that states nothing — which is every file but a `.kn5` — keeps
-     * the whole of it.
+     * `sunSpecular` is the same number written for the sun alone, and where a
+     * material states one it is the one that belongs here: `ksSpecular` then
+     * describes the surface generally — what it returns of the room — and this
+     * describes the one light in the sky. 868 materials state it and 846 of
+     * those state something other than their `ksSpecular`, 403 of them nought:
+     * a surface that reflects its surroundings and takes no highlight, which
+     * read off `ksSpecular` alone comes up polished.
+     *
+     * `sunSpecularEXP` goes with it and is the width of that lobe rather than
+     * of the surface. Its median is 90 against the 20 or so a `ksSpecularEXP`
+     * usually is, and 852 of the 868 differ — so a car's paint answers the sun
+     * with a tighter highlight than the roughness it shows the room. Null
+     * where nothing says, and then the surface's own roughness stands.
+     *
+     * A file that states none of it — which is every file but a `.kn5` — keeps
+     * the whole of the highlight at the roughness it is.
      */
-    const stray = number(source.ksSpecular, null);
+    const sunPeak = number(source.sunSpecular, null);
+    const stray = sunPeak === null ? number(source.ksSpecular, null) : sunPeak;
     const specularWeight = stray === null ? 1
       : clamp(stray / SPECULAR_REFERENCE, 0, 1);
+    const sunShininess = number(source.sunSpecularEXP, null);
+    const sunRoughness = sunShininess === null || sunShininess <= 0 ? null
+      : clamp(fromShininess(sunShininess), 0.05, 1);
+
+    /* Whether what this surface returns is added on top of it or taken out of
+     * it. `isAdditive` is how a game's shader is told to put a reflection back
+     * — over the surface, or in place of some of it — and on a surface that is
+     * see-through it is the difference between a lamp's glow lying on what is
+     * behind it and hiding it. 1109 materials state one; 1015 of those are
+     * opaque, where there is nothing behind to add to and whatever the number
+     * means there it is not this, so only the 94 that also blend are taken.
+     */
+    const additive = number(source.isAdditive, 0) > 0;
 
     let opacity;
     if (pbr.opacity !== undefined && scalar(pbr.opacity) !== null) {
@@ -603,6 +631,8 @@ const FbxAnalyze = (function () {
       emissive: emissive.map((v) => Math.max(0, v)),
       roughness,
       specularWeight,
+      sunRoughness,
+      additive,
       fresnelExp,
       fresnelCeiling,
       coat,
