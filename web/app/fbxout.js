@@ -228,6 +228,35 @@ const FbxOut = (function () {
     if (typeof entry.alphaCutoff === 'number') {
       props.push(p70('AlphaCutoff', 'Number', D(entry.alphaCutoff)));
     }
+    /* And the shading model the file named, beside everything else it said in
+     * its own words.
+     *
+     * This is the one thing FBX is better at than glTF here: it has no fixed
+     * set of material properties, so a game's own parameters go back under the
+     * names they arrived with and need no corner of the file to hide in. Which
+     * is exactly how they arrived — the kn5 reader writes them the same way —
+     * so a car written out and opened again derives the same surface from the
+     * same numbers rather than from a PBR approximation of them.
+     */
+    if (entry.shader) props.push(p70('ShaderName', 'KString', S(entry.shader)));
+    for (const [key, value] of Object.entries(entry.stated || {})) {
+      if (typeof value === 'number') props.push(p70(key, 'Number', D(value)));
+      else if (typeof value === 'boolean') props.push(p70(key, 'Bool', I(value ? 1 : 0)));
+      else if (Array.isArray(value) && value.length === 3) {
+        props.push(p70(key, 'Color', ...value.map(D)));
+      } else if (Array.isArray(value) && value.length) {
+        props.push(p70(key, `Vector${value.length}D`, ...value.map(D)));
+      }
+    }
+    /* The clear coat, where the file stated one. A coat states no index of
+     * refraction here, so the colour is the whole of how much it reflects —
+     * which is what a reader takes it for when none is named beside it. */
+    if (typeof entry.coat === 'number' && entry.coat > 0) {
+      props.push(p70('CoatColor', 'Color', D(entry.coat), D(entry.coat), D(entry.coat)));
+      const rough = typeof entry.coatRoughness === 'number' ? entry.coatRoughness : 0.05;
+      props.push(p70('CoatShininess', 'Number',
+        D(Math.max(2 / Math.max(rough ** 4, 1e-6) - 2, 0))));
+    }
     const uid = build.uid();
     build.objects.push(node('Material',
       [L(uid), S(`${entry.name || 'material'}${CLASS_SEP}Material`), S('')], [

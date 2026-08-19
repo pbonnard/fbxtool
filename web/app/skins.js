@@ -51,6 +51,20 @@ const FbxSkins = (function () {
     return null;
   }
 
+  /* The three shapes every one of these config readers wants: a section
+   * heading, a `key = value` line with any trailing comment dropped, and the
+   * line ending an ini file may be written with either of.
+   *
+   * A key may carry a digit: the numbered ones — PROP_0, PROP_1 — are how a
+   * shader replacement lists what it restates — and so may a full stop: a
+   * file writes PROP_... and [SHADER_REPLACEMENT_...] and lets the patch
+   * number them, which is a spelling half these configs use.
+   * keys it wants by name, so a wider key pattern finds more and mistakes
+   * nothing. */
+  const HEADING = /^\s*\[([^\]]*)\]/;
+  const SETTING = /^[ \t]*([A-Za-z_0-9.]+)[ \t]*=([^;]*)/;
+  const NEWLINE = /\r?\n/;
+
   /**
    * Which materials a config calls the car's paint, in the order it says them.
    *
@@ -72,8 +86,8 @@ const FbxSkins = (function () {
         if (trimmed && !out.includes(trimmed)) out.push(trimmed);
       }
     };
-    for (const line of String(text || '').split(/\r?\n/)) {
-      const heading = /^\s*\[([^\]]*)\]/.exec(line);
+    for (const line of String(text || '').split(NEWLINE)) {
+      const heading = HEADING.exec(line);
       if (heading) { section = heading[1]; continue; }
       const setting = /^[ \t]*(CarPaintMaterial|Materials)[ \t]*=([^;]*)/i.exec(line);
       if (!setting) continue;
@@ -167,6 +181,168 @@ const FbxSkins = (function () {
     return !!colour && (colour.enabled || !unset(colour.hex));
   }
 
+  /* How far a stated brightness is followed down.
+   *
+   * `BrightnessAdjustment` is half of a pair: it darkens the coat because the
+   * shader is about to add a great deal of specular back on top, and the
+   * settings that do the adding — `AmbientSpecular`, `SpecularBase`,
+   * `ClearCoatThickness` — sit in the same section. Taken alone it is only
+   * the darkening, which is right while it is a compensation and wrong once
+   * it is the whole description: a C-X75's rims state 0.05 beside a clear
+   * coat of 3, meaning the surface has no colour of its own and is all
+   * highlight. This viewer does not put that highlight back, so following the
+   * 0.05 down turns bright silver wheels black.
+   *
+   * A quarter is where the two readings part. Of the 229 settings across the
+   * cars to hand, 33 are under it — and 19 of those 33 are sections naming
+   * their own materials, the rims and trim and carbon, against 27 of the 196
+   * above. So what is under the floor is mostly not the car's paint at all.
+   */
+  const BRIGHTNESS_FLOOR = 0.25;
+  /* The settings in one of those sections that this viewer has somewhere to
+   * put. Everything else in them — the flakes, the clear coat, the cubemap
+   * blur — describes a shader that is not this one. */
+  const FINISH_KEYS = {
+    reflectance: 'reflectance',
+    smoothness: 'smoothness',
+    metalness: 'metalness',
+  };
+  /**
+   * Walk the `[Material_*]` sections of a config, handing each setting to
+   * *visit* along with the materials that section is about.
+   *
+   * Three things are the same in every one of these files and are done here
+   * once. A section names the materials it is for in `Materials`, and one
+   * that names none is about whatever the file calls its paint in
+   * `CarPaintMaterial` — which is gathered first, since it is written above
+   * the sections that rely on it. A section naming `Skins` is only for those
+   * skins; one folder's config can carry a block written for another. And a
+   * trailing comment is not part of a value.
+   */
+  function eachMaterialSection(text, name, visit) {
+    const lines = String(text || '').split(NEWLINE);
+    /* What a section naming no materials of its own is about.
+     *
+     * Only where it is written outside the material sections. `CarPaintMaterial`
+     * is spelt both ways: 165 of the 219 across the cars to hand sit above them
+     * and name the car's paint once for the file, and 54 sit inside one and
+     * name that section's own — a 550 Maranello writes four such sections, for
+     * its body, its rims and its exhaust, each naming itself. Read as a
+     * file-wide default those four all name every one of the others, and the
+     * last section's word lands on the body: the rims' brightness of 0.5 came
+     * out on the paint and a rosso corsa arrived half dark.
+     */
+    const fallback = [];
+    let heading = '';
+    for (const line of lines) {
+      const mark = HEADING.exec(line);
+      if (mark) { heading = mark[1]; continue; }
+      if (/^material_carpaint/i.test(heading)) continue;
+      const found = SETTING.exec(line);
+      if (found && found[1].toLowerCase() === 'carpaintmaterial') {
+        for (const one of found[2].split(',')) {
+          const trimmed = one.trim();
+          if (trimmed) fallback.push(trimmed);
+        }
+      }
+    }
+    let section = '';
+    let mine = true;
+    let materials = fallback;
+    for (const line of lines) {
+      const mark = HEADING.exec(line);
+      if (mark) { section = mark[1]; mine = true; materials = fallback; continue; }
+      if (!/^material_/i.test(section)) continue;
+      const found = SETTING.exec(line);
+      if (!found) continue;
+      const key = found[1].toLowerCase();
+      const value = found[2].trim();
+      if (key === 'skins') {
+        mine = value.split(',').some((one) => one.trim().toLowerCase()
+          === String(name).toLowerCase());
+      } else if (key === 'materials'
+        || (key === 'carpaintmaterial' && /^material_carpaint/i.test(section))) {
+        materials = value.split(',').map((one) => one.trim()).filter(Boolean);
+      } else if (mine) {
+        visit(key, value, materials, section);
+      }
+    }
+  }
+  /**
+   * How much of its stated colour a paint is actually drawn at.
+   *
+   * `BrightnessAdjustment` sits in the same `[Material_CarPaint_*]` section
+   * the rest of the paint is written in, and it is not a tweak: a Jaguar
+   * C-X75's Silver states `#FFFFFF` in its `cm_skin.json` and 0.66 here, and
+   * the two together are silver. Read without it the car is white — which is
+   * a colour a paint shop has, and not the one on the preview beside the skin.
+   *
+   * The comment those settings carry, over and over, is "compensates for
+   * ambient specular": a car's paint is drawn with a great deal of the room
+   * added on top of it, so the coat underneath is stated darker than the
+   * colour it is meant to come out as. Nothing is tinted — the whole of the
+   * colour is scaled.
+   *
+   * 37 of the 135 cars to hand state one on a paint: 229 settings, 140 of
+   * them in a skin rather than beside the car, and a median of 0.60. So it is
+   * most of a colour, most of the time it is written at all.
+   *
+   * A section naming no `Materials` is about the paint the file names in
+   * `CarPaintMaterial`, which is why that is gathered first; one that names
+   * some is about those. A section naming the skins it is for is only for
+   * those, the same as a colour is.
+   */
+  function paintBrightness(text, name) {
+    const out = new Map();
+    eachMaterialSection(text, name, (key, value, materials, section) => {
+      if (key !== 'brightnessadjustment') return;
+      if (!/^material_carpaint/i.test(section)) return;
+      const scale = Number(value);
+      // A blank or a word is not a number, and a surface stated darker than
+      // the floor is one whose colour the file put in its highlight rather
+      // than its coat — see `BRIGHTNESS_FLOOR`.
+      if (!Number.isFinite(scale) || scale < BRIGHTNESS_FLOOR) return;
+      for (const material of materials) out.set(material.toLowerCase(), scale);
+    });
+    return out;
+  }
+
+  /**
+   * What a car's config says its surfaces are made of.
+   *
+   * `Reflectance`, `Smoothness` and `Metalness` are the three numbers this
+   * viewer already has a slot for, and on a Custom Shaders Patch car they are
+   * where the material actually lives. The `ks*` values inside the `.kn5` are
+   * the pre-patch version of the same surface, left behind when the author
+   * moved the description out to `[Material_Metal]` and `[Material_Glass]`
+   * and the rest — so a car read from the model alone is read as the car it
+   * used to be, and its chrome comes back as plastic.
+   *
+   * 1121 `[Material_*]` blocks sit beside the 135 cars to hand, and 423 state
+   * a smoothness, 375 a reflectance, 194 a metalness.
+   *
+   * Held inside the unit range, which is what all three mean and not always
+   * what they say: the highest smoothness written is 3, the highest
+   * reflectance 2. The game does its own thing with the overshoot and there
+   * is nothing here for it to mean.
+   */
+  function materialFinish(text, name) {
+    const out = new Map();
+    const put = (material, key, value) => {
+      const at = material.toLowerCase();
+      if (!out.has(at)) out.set(at, {});
+      out.get(at)[key] = Math.min(1, Math.max(0, value));
+    };
+    eachMaterialSection(text, name, (key, value, materials) => {
+      const wanted = FINISH_KEYS[key];
+      if (!wanted) return;
+      const number = Number(value);
+      if (!Number.isFinite(number)) return;
+      for (const material of materials) put(material, wanted, number);
+    });
+    return out;
+  }
+
   /**
    * The colours a skin's own `ext_config.ini` states, for the ones with no
    * `cm_skin.json` to state them in.
@@ -184,8 +360,8 @@ const FbxSkins = (function () {
     const out = [];
     let section = '';
     let mine = true;
-    for (const line of String(text || '').split(/\r?\n/)) {
-      const heading = /^\s*\[([^\]]*)\]/.exec(line);
+    for (const line of String(text || '').split(NEWLINE)) {
+      const heading = HEADING.exec(line);
       if (heading) { section = heading[1]; mine = true; continue; }
       if (!/^material_carpaint/i.test(section)) continue;
       const setting = /^[ \t]*([A-Za-z]+)[ \t]*=([^;]*)/.exec(line);
@@ -259,6 +435,89 @@ const FbxSkins = (function () {
       gloss: found[0].gloss, reflection: found[0].reflection } : null;
   }
 
+  /* The two other kinds of section that describe the car rather than a skin's
+   * paint: one takes meshes away, one restates a material's numbers. */
+  const REPLACEMENT_SECTION = /^[ \t]*\[(MODEL_REPLACEMENT|SHADER_REPLACEMENT)[^\]]*\]/i;
+  const OFF = /^(0|0\.0+|false|no)$/i;
+
+  /**
+   * What a car's config takes away, and what it restates.
+   *
+   * `[MODEL_REPLACEMENT_*]` swaps one model for another, and the part of it
+   * this can honour is `HIDE`: the meshes the swap is meant to remove. 100 of
+   * the 101 such sections across the 135 cars to hand name some, and 77 of the
+   * 101 are written in a skin rather than beside the car — a number plate a
+   * livery does not want is the commonest thing in them. What is not honoured
+   * is the other half, `INSERT`: bringing a second model in, placing it and
+   * merging it is a whole car's worth of work and none of it is this.
+   *
+   * `[SHADER_REPLACEMENT_*]` restates a material. Its `PROP_n = name, value`
+   * lines are the very numbers a `.kn5` states about a surface and this
+   * already reads — `fresnelEXP`, `ksDiffuse`, `isAdditive`,
+   * `detailUVMultiplier` and the rest — so they are put where the file's own
+   * would have been and everything downstream follows.
+   *
+   * Only the sections that name `MATERIALS`. 53 of the 123 name `MESHES`
+   * instead, and a material here is shared across every mesh that wears it:
+   * one mesh's restatement applied to it would change parts the file never
+   * named.
+   */
+  function carReplacements(text, name) {
+    const hidden = new Set();
+    const shaders = new Map();
+    let kind = '';
+    let mine = true;
+    let active = true;
+    let hide = [];
+    let materials = [];
+    let props = new Map();
+    let shader = null;
+    let transparent = null;
+    const close = () => {
+      if (kind && mine && active) {
+        for (const one of hide) hidden.add(one.toLowerCase());
+        for (const one of materials) {
+          const at = one.toLowerCase();
+          const held = shaders.get(at) || { props: new Map(), shader: null, transparent: null };
+          for (const [key, value] of props) held.props.set(key, value);
+          if (shader) held.shader = shader;
+          if (transparent !== null) held.transparent = transparent;
+          shaders.set(at, held);
+        }
+      }
+      kind = ''; mine = true; active = true;
+      hide = []; materials = []; props = new Map(); shader = null; transparent = null;
+    };
+    for (const line of String(text || '').split(NEWLINE)) {
+      if (line.trimStart().startsWith('[')) {
+        close();
+        const mark = REPLACEMENT_SECTION.exec(line);
+        if (mark) kind = mark[1].toUpperCase();
+        continue;
+      }
+      if (!kind) continue;
+      const setting = SETTING.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      const list = () => value.split(',').map((one) => one.trim()).filter(Boolean);
+      if (key === 'ACTIVE') active = !OFF.test(value);
+      else if (key === 'SKINS') {
+        mine = list().some((one) => one.toLowerCase() === String(name).toLowerCase());
+      } else if (key === 'HIDE' && kind === 'MODEL_REPLACEMENT') hide = list();
+      else if (key === 'MATERIALS' && kind === 'SHADER_REPLACEMENT') materials = list();
+      else if (kind !== 'SHADER_REPLACEMENT') continue;
+      else if (key === 'SHADER') shader = value;
+      else if (key === 'IS_TRANSPARENT') transparent = !OFF.test(value);
+      else if (/^PROP_/.test(key)) {
+        const [written, said] = list();
+        const number = Number(said);
+        if (written && Number.isFinite(number)) props.set(written, number);
+      }
+    }
+    close();
+    return { hidden, shaders };
+  }
   /**
    * Group supplied files into the skins they came from.
    *
@@ -303,6 +562,17 @@ const FbxSkins = (function () {
       replaces: [...skin.images.keys()].filter((n) => worn.has(n)).length,
       named: config ? paintMaterials(config) : [],
       colours,
+      /* And how much of that colour each material is actually drawn at,
+       * which is stated in the same section and is the difference between a
+       * white car and a silver one. */
+      brightness: config ? paintBrightness(config, skin.name) : new Map(),
+      /* And what this skin says its surfaces are made of, over whatever the
+       * car says about the same ones. */
+      finish: config ? materialFinish(config, skin.name) : new Map(),
+      /* And the meshes this skin takes away — a number plate a livery does not
+       * want, which is the commonest thing a model replacement says and is
+       * said in a skin far more often than beside the car. */
+      hidden: config ? carReplacements(config, skin.name).hidden : new Set(),
       /* And the picture of the paint, which nearly all of them carry. Whether
        * it is worth reading is settled later, once the car has said which of
        * its materials the paint is: handed back rather than opened here, since
@@ -322,9 +592,51 @@ const FbxSkins = (function () {
    */
   function fromChip(skin, hex, pictures) {
     if (!hex || !skin.wantsChip) return skin;
-    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
-    skin.paints = pair(skin.settled || [], skin.colours, new Set(pictures.keys()));
+    /* Marked as read off a picture, which is what settles how it is undone:
+     * a chip is a picture of a swatch and so a display colour, where a paint
+     * stated in a config is the game's own multiplier. */
+    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null,
+      reflection: null, picture: true }];
+    skin.paints = pair(skin.settled || [], skin.colours,
+      new Set(pictures.keys()), skin.brightness);
     return skin;
+  }
+
+  /**
+   * The materials a paint shop's own slot names reach, for a car naming none.
+   *
+   * Three quarters of the cars here say which material the paint is, in a
+   * config beside the skin or beside the car. The rest say it nowhere, and a
+   * Lamborghini LM002's fourteen skins are the shape of it: every one states
+   * its colour in `cm_skin.json` and not one of them, nor the car, carries an
+   * `ext_config.ini` at all. Read for names alone the folder is silent and
+   * fourteen good colours go nowhere.
+   *
+   * What is left is the name the paint shop filed the colour under. Content
+   * Manager opens `carPaint` on a car that has told it nothing, and the
+   * material the car actually wears is that name and a number: this one has
+   * `carPaint02` over its doors and hood and `carPaint03` over its four
+   * wheel-arch extenders, and the one stated colour belongs on both.
+   *
+   * Only a number, though. The same car has `carPaint_010101FF`, which is a
+   * side-marker trim wearing its own colour in its own name — the author's
+   * convention, and five materials here follow it. A slot name reaching that
+   * would paint a black trim in body colour, so the tail has to be digits and
+   * nothing else.
+   */
+  function slotMaterials(colours, materials) {
+    const out = [];
+    for (const colour of colours || []) {
+      const slot = String(colour.key || '').toLowerCase();
+      if (!slot) continue;
+      for (const material of [...materials].sort()) {
+        if (!material.startsWith(slot)) continue;
+        const tail = material.slice(slot.length).replace(/^[_\-. ]+/, '');
+        if (tail && !/^[0-9]+$/.test(tail)) continue;
+        if (!out.includes(material)) out.push(material);
+      }
+    }
+    return out;
   }
 
   /**
@@ -334,14 +646,22 @@ const FbxSkins = (function () {
    * a Clio V6 names `wccarbody` and `aleron` — its body and its spoiler — and
    * states the one colour for both. Several are paired by order, which is the
    * only thing the two lists share.
+   *
+   * *brightness* is how much of that colour each material is drawn at, out of
+   * the config beside it — see `paintBrightness`. A material the file says
+   * nothing about is drawn at the whole of what it states.
    */
-  function pair(named, colours, materials) {
+  function pair(named, colours, materials, brightness) {
     const out = [];
+    const scales = brightness || new Map();
     for (let at = 0; at < named.length; at++) {
       const colour = colours.length === 1 ? colours[0] : colours[at];
       if (!stated(colour)) continue;
       if (!materials.has(named[at].toLowerCase())) continue;
-      out.push({ material: named[at], hex: colour.hex });
+      const scale = scales.get(named[at].toLowerCase());
+      out.push({ material: named[at], hex: colour.hex,
+        scale: typeof scale === 'number' ? scale : 1,
+        picture: colour.picture === true });
     }
     return out;
   }
@@ -361,7 +681,13 @@ const FbxSkins = (function () {
    * that names nothing the car has is answered this way, and only from names
    * its own siblings used.
    */
-  function settle(skins, { pictures, fallback }) {
+  function settle(skins, { pictures, fallback, brightness }) {
+    /* The car's own word, read for each skin rather than once for the car: a
+     * config states some of its settings per skin — a 550 Maranello writes
+     * its body once for its reds and once for its silvers — so a single
+     * reading of it is the reading for no skin at all. */
+    const carSays = typeof brightness === 'function'
+      ? brightness : () => brightness || new Map();
     //: Material name -> the picture it wears, both lowercased.
     const materials = new Set(pictures.keys());
     const known = [];
@@ -374,8 +700,19 @@ const FbxSkins = (function () {
       let named = skin.named.filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = (fallback || []).filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = known;
+      /* And for a car that named the paint in none of those three, the name
+       * the paint shop filed the colour under. Weakest of the four, and last
+       * for the same reason the chip is: a slot name is what Content Manager
+       * opened at rather than anything the car said about itself. */
+      if (!named.length) named = slotMaterials(skin.colours, materials);
       skin.settled = named;
-      skin.paints = pair(named, skin.colours, materials);
+      /* A skin's own reading of how bright its paint is, over the car's.
+       * Both are the same setting in the same shape of section — one written
+       * beside the model for every skin, one written for this skin — and a
+       * skin that states it means it for itself. */
+      skin.brightness = new Map([...carSays(skin.name),
+        ...(skin.brightness || new Map())]);
+      skin.paints = pair(named, skin.colours, materials, skin.brightness);
       /* And whether the picture of the paint is worth reading, which is for
        * the skins that came out of all that with nothing on the car.
        *
@@ -406,7 +743,8 @@ const FbxSkins = (function () {
   }
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
-    paintColours, configColours, chipColour, fromChip };
+    paintColours, configColours, chipColour, fromChip, paintBrightness,
+    materialFinish, carReplacements, slotMaterials };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;

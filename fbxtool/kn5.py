@@ -383,6 +383,20 @@ def _read_textures(cursor: _Cursor, doc: Document) -> list[_Texture]:
     textures: list[_Texture] = []
     for _ in range(count):
         kind = cursor.i32()
+        # A slot of kind nought is an empty one, and is the whole of the
+        # record: no name, no length, no bytes.
+        #
+        # Three of the 125 cars to hand open with one — a 53 MB Forester, a
+        # 313 MB Citroën and a 388 MB Renault — and read as though it were a
+        # texture it takes the next entry's kind for a name length and walks
+        # off the table four bytes in.  All three were refused as damaged at
+        # byte 27, which is a whole car turned away over an empty slot.
+        #
+        # Counted, since the table says how many entries it has and this is
+        # one of them; kept out of what is handed on, since a texture with no
+        # name is not one anything can ask for.
+        if kind == 0:
+            continue
         name = cursor.text()
         size = cursor.u32()
         # A slot marked inactive still carries its bytes; the game just does
@@ -913,6 +927,61 @@ def _skin_states(folder: str) -> tuple[list[str], list[str]]:
     return _paint_materials(config), colours
 
 
+def _slot_names(text: str) -> list[str]:
+    """What the paint shop filed each colour under, in the order it states them.
+
+    The same walk `_paint_colours` makes and the same sections, so the two
+    lists line up entry for entry and can be read together.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    return [str(key) for key, value in data.items()
+            if isinstance(value, dict) and "color" in value]
+
+
+def _slot_materials(text: str, materials: set[str]) -> list[str]:
+    """The materials a paint shop's own slot names reach, for a car naming none.
+
+    Three quarters of the cars here say which material the paint is, in a
+    config beside the skin or beside the car.  The rest say it nowhere, and a
+    Lamborghini LM002's fourteen skins are the shape of it: every one states
+    its colour in ``cm_skin.json`` and not one of them, nor the car, carries an
+    ``ext_config.ini`` at all.  Read for names alone the folder is silent and
+    fourteen good colours go nowhere.
+
+    What is left is the name the paint shop filed the colour under.  Content
+    Manager opens ``carPaint`` on a car that has told it nothing, and the
+    material the car actually wears is that name and a number: this one has
+    ``carPaint02`` over its doors and hood and ``carPaint03`` over its four
+    wheel-arch extenders, and the one stated colour belongs on both.
+
+    Only a number, though.  The same car has ``carPaint_010101FF``, which is a
+    side-marker trim wearing its own colour in its own name — the author's
+    convention, and five materials here follow it.  A slot name reaching that
+    would paint a black trim in body colour, so the tail has to be digits and
+    nothing else.
+    """
+    out: list[str] = []
+    for slot in _slot_names(text):
+        low = slot.lower()
+        for material in sorted(materials):
+            if material == low:
+                tail = ""
+            elif material.startswith(low):
+                tail = material[len(low):].lstrip("_-. ")
+            else:
+                continue
+            if tail and not tail.isdigit():
+                continue
+            if material not in out:
+                out.append(material)
+    return out
+
+
 def _pair(named: list[str], colours: list[str], materials: set[str]) -> list[dict]:
     """Which of the car's materials wear which of a skin's colours.
 
@@ -1083,7 +1152,8 @@ def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[
             continue
         stated, colours = _skin_states(inside)
         out.append({"name": name, "replaces": len(files & named),
-                    "stated": stated, "colours": colours, "files": files})
+                    "stated": stated, "colours": colours, "files": files,
+                    "meta": _read(os.path.join(inside, "cm_skin.json")) or ""})
 
     # What the car's paint is called, settled across the whole folder.  Three
     # places say so, in the order they are trusted: the skin's own config; the
@@ -1106,6 +1176,13 @@ def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[
         stated = [n for n in skin.pop("stated") if n.lower() in materials]
         if not stated:
             stated = [n for n in fallback if n.lower() in materials] or known
+        # And for a car that named the paint in none of those three, the name
+        # the paint shop filed the colour under.  Weakest of the four, and last
+        # for the same reason the chip is: a slot name is what Content Manager
+        # opened at rather than anything the car said about itself.
+        if not stated:
+            stated = _slot_materials(skin["meta"], materials)
+        skin.pop("meta")
         colours = skin.pop("colours")
         files = skin.pop("files")
         # And last, for the skins that came out of all that with nothing on

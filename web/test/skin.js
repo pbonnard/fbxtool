@@ -140,7 +140,7 @@ async function main() {
   });
   console.log('what the folder brought');
   check('the picker is offered', offered.hidden === false);
-  check('every skin is listed, and what each brings', offered.options.length === 7,
+  check('every skin is listed, and what each brings', offered.options.length === 8,
     offered.options.join(' | '));
   check('the one that states a material in its own config says so',
     offered.options.some((o) => /^Red — 1 texture \+ 1 paint$/.test(o)),
@@ -153,6 +153,10 @@ async function main() {
     offered.options.join(' | '));
   check('the one taking its materials from the car states both',
     offered.options.some((o) => /^Pair — 1 texture \+ 2 paints$/.test(o)),
+    offered.options.join(' | '));
+
+  check('and the one shouting the material name is read as naming it',
+    offered.options.some((o) => /^Shouted — 1 texture \+ 1 paint$/.test(o)),
     offered.options.join(' | '));
 
   console.log('\nthe car as the file has it');
@@ -170,22 +174,49 @@ async function main() {
 
   console.log('\nwearing the skin that names its paint');
   const red = await wear(page, 'Red');
+  /* Red, and the map still under it.
+   *
+   * Twice its own green rather than three times: a paint a config states is
+   * the game's own multiplier and goes on as the number it says, so the `20`
+   * of `#DD2010` is an eighth of the light and not the fiftieth the sRGB
+   * curve would make of it. A stated colour is less saturated in the light
+   * than it looks in a picker, which is the whole of what that reading is. */
   check('painted, and the map still under it',
-    red[0] > red[1] * 3 && red[0] > red[2] * 3, `rgb(${red})`);
+    red[0] > red[1] * 2 && red[0] > red[2] * 2, `rgb(${red})`);
   check('and darker than the bare car, since a tint multiplies',
     red[1] < bare[1], `rgb(${red}) against rgb(${bare})`);
 
   console.log('\nwearing the one that takes its materials from the car itself');
   await wear(page, 'Pair');
   const first = await colourOf(page, 'carpaint');
-  const second = await colourOf(page, 'trim');
-  check('the first colour went on the first material named', first === '#2010dd', first);
-  check('and the second on the second, paired by order', second === '#10dd20', second);
+  const second = await colourOf(page, 'Trim');
+  /* The colours the skin states, shown as the light they are rather than as
+   * the swatch they were written as: `#2010dd` taken straight is a brighter,
+   * bluer thing than the same six characters read through the sRGB curve, and
+   * this is what it looks like once it is light. */
+  check('the first colour went on the first material named', first === '#6347ef', first);
+  check('and the second on the second, paired by order', second === '#47ef63', second);
+
+  console.log('\nwearing the one that spells the material in another case');
+  /* The two names meeting here come out of different files and need not
+   * agree on case: this skin's config says `trim` and the model wears
+   * `Trim`. Matched letter for letter the colour is found, paired and
+   * carried all the way to the palette, and then laid on nothing at all —
+   * the picker says a paint went on and the car stays white, which is the
+   * worst of the three ways this can fail. */
+  await wear(page, 'Shouted');
+  const shouted = await colourOf(page, 'Trim');
+  /* #dd10dd taken straight and shown as the light it is, the same way
+   * `Pair` above turns #2010dd into #6347ef. Asked only whether it
+   * changed, this check would pass on the colour the last skin left
+   * behind, which is the state a failure here actually leaves. */
+  check('the paint goes on the material the model spells differently',
+    shouted === '#ef47ef', shouted);
 
   console.log('\nwearing the one whose config names a material this car has not got');
   const stranger = await wear(page, 'Stranger');
   check('the car answers with its own paint',
-    stranger[0] > stranger[1] * 3, `rgb(${stranger})`);
+    stranger[0] > stranger[1] * 2, `rgb(${stranger})`);
 
   console.log('\nand the one that states no colour at all');
   const unpainted = await wear(page, 'Bare');
@@ -214,8 +245,8 @@ async function main() {
   check('a skin bringing the paint its picture is not painted over it',
     carried !== '#2010dd', carried);
   check('and the material is left as the car had it',
-    carried === await colourOf(page, 'trim'),
-    `${carried} against ${await colourOf(page, 'trim')}`);
+    carried === await colourOf(page, 'Trim'),
+    `${carried} against ${await colourOf(page, 'Trim')}`);
 
   console.log('\nand taking it off again');
   const off = await wear(page, '');

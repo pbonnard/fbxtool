@@ -255,6 +255,24 @@ def test_the_alpha_of_a_bc3_tile_is_interpolated_the_way_it_was_written(tmp_path
 
 
 @needs_node
+def test_the_alpha_of_a_bc2_tile_survives_the_colour_written_over_it(tmp_path):
+    """BC2's alpha is the eight bytes in front of the colour half, and the
+    colour half writes an opaque fourth channel of its own — so decoded in
+    file order the colour lands on top and every BC2 texture comes back
+    solid.
+
+    A Mercedes CLK's headlight glass is a 32-square BC2 at 27% alpha and its
+    `highlights` map is a 1024-square of cut-out shapes; read that way round
+    the lamps are lumps of plaster and the highlights a grey sheet.
+    """
+    import fbxbuild as fb
+
+    image = _decode_dds(tmp_path, fb.dds_bc2(alphas=(0, 1, 8, 15) + (4,) * 12))
+    assert image is not None
+    assert image["rgba"][3::4][:4] == [0, 17, 136, 255]
+
+
+@needs_node
 def test_an_uncompressed_surface_is_read_by_its_channel_masks(tmp_path):
     """A mask says which bits of a pixel are which channel, so B8G8R8A8 needs
     no entry in a table of layouts — and neither does anything else."""
@@ -702,6 +720,111 @@ def test_a_mesh_used_twice_is_written_once(tmp_path):
 # ------------------------------------------ the paint beside a car
 
 
+def _analyze(expression: str):
+    """Evaluate an expression against the page's own ``analyze.js``, under Node."""
+    script = (
+        f"const A=require({str(WEB / 'app' / 'analyze.js')!r});"
+        f"console.log(JSON.stringify({expression}));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+@needs_node
+def test_the_highlight_a_game_writes_for_the_sun_alone():
+    """`ksSpecular` weighs what a surface throws back generally; `sunSpecular`
+    is the same number written for the one light in the sky, and where a
+    material states one it is the one that belongs on the sun's highlight.
+
+    868 of the materials across the 67 cars to hand state it, 846 of those
+    state something other than their `ksSpecular` and 403 state nought — a
+    surface that reflects its surroundings and takes no highlight, which read
+    off `ksSpecular` alone comes up polished. `sunSpecularEXP` goes with it and
+    is the width of that lobe rather than of the surface: its median is 90
+    against the 20 or so a `ksSpecularEXP` usually is.
+    """
+    stated = _analyze("A.materialAppearance({ksSpecular: 0.4, sunSpecular: 0.05,"
+                      " ksSpecularEXP: 20, sunSpecularEXP: 90})")
+    # 0.1 is the whole of the highlight this renderer's lobe gives, so 0.05 is
+    # half of it — where `ksSpecular` at 0.4 would have asked for all of it.
+    assert stated["specularWeight"] == pytest.approx(0.5)
+    assert 0 < stated["sunRoughness"] < stated["roughness"], (
+        "the sun is answered tighter than the room is")
+
+    # A surface that says it takes none of the sun takes none of it.
+    dark = _analyze("A.materialAppearance({ksSpecular: 0.4, sunSpecular: 0})")
+    assert dark["specularWeight"] == 0
+
+    # And every file but a game's own states neither, and keeps the whole of
+    # the highlight at the roughness it already has.
+    plain = _analyze("A.materialAppearance({ksSpecularEXP: 20})")
+    assert plain["specularWeight"] == 1 and plain["sunRoughness"] is None
+
+    # `isAdditive` is only read where there is something behind to add to.
+    assert _analyze("A.materialAppearance({isAdditive: 1})")["additive"] is True
+    assert _analyze("A.materialAppearance({isAdditive: 0})")["additive"] is False
+
+def _kn5js(expression: str):
+    """Evaluate an expression against the page's own ``kn5.js``, under Node."""
+    script = (
+        f"const K=require({str(WEB / 'app' / 'kn5.js')!r});"
+        f"console.log(JSON.stringify({expression}));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@needs_node
+def test_what_a_cars_lighting_config_says_lights_up():
+    """`[EMISSIVE_*]` names meshes and says what colour each goes with the
+    lights on, and often what it sits at with them off. 56 of the 135 cars to
+    hand carry them, 1544 sections between them.
+
+    The colour is a hue and a level rather than a colour: `220, 33, 33, 1` and
+    `5, 5, 5, 2` are both written, and neither is in the nought-to-one the
+    rest of this works in. Of the 2023 such triples across those cars, 80%
+    have a channel above one and their median largest channel is 10 — so the
+    triple says which colour and the fourth number says how much.
+    """
+    config = """\
+[EMISSIVE_...]
+NAME=tail_l, tail_r
+COLOR=255, 40, 40, 2
+OFF_COLOR=255, 40, 40, 0.1
+LAG=0.8
+[EMISSIVE_LIGHT_...]
+NAME=plate
+OFF_COLOR=5, 5, 5, 1
+[LIGHT_EXTRA_...]
+COLOR=50,40,30,5
+POSITION=0.05, 1.26, -0.23
+DIRECTION=0, -1, 0
+RANGE=1.5
+SPOT=100
+SPOT_SHARPNESS=0.2
+"""
+    read = _kn5js(f"(()=>{{const o=K.carLighting({config!r});"
+                  "return {lamps:[...o.lamps], lights:o.lights};})()")
+    lamps = dict(read["lamps"])
+    # The triple divided by its own largest channel, times the level beside it.
+    assert lamps["tail_l"]["on"] == pytest.approx([2, 40 / 255 * 2, 40 / 255 * 2])
+    assert lamps["tail_l"]["off"] == pytest.approx([0.1, 40 / 255 * 0.1, 40 / 255 * 0.1])
+    assert lamps["tail_r"] == lamps["tail_l"], "a section names as many meshes as it likes"
+    # A section stating one colour has one colour, whichever way the switch is.
+    assert lamps["plate"]["on"] == pytest.approx([1, 1, 1])
+    assert lamps["plate"]["off"] == pytest.approx([1, 1, 1])
+
+    assert len(read["lights"]) == 1
+    light = read["lights"][0]
+    assert light["position"] == pytest.approx([0.05, 1.26, -0.23])
+    assert light["colour"] == pytest.approx([5, 4, 3])
+    assert light["range"] == 1.5 and light["spot"] == 100
+    assert light["sharpness"] == pytest.approx(0.2)
+
+    empty = _kn5js("(()=>{const o=K.carLighting('nothing here');"
+                   "return {lamps:[...o.lamps], lights:o.lights};})()")
+    assert empty == {"lamps": [], "lights": []}
 def _skins(expression: str):
     """Evaluate an expression against the page's own ``skins.js``, under Node."""
     script = (
@@ -745,6 +868,81 @@ CarPaintMaterial=booody_aooo
 
 
 @needs_node
+def test_how_bright_a_skin_says_its_paint_is_drawn():
+    """`BrightnessAdjustment` is written in the same section as the rest of
+    the paint, and without it a Jaguar C-X75's Silver is the `#FFFFFF` its
+    `cm_skin.json` states rather than the silver its preview shows.
+
+    A section naming no materials is about whatever `CarPaintMaterial` names;
+    one that names some is about those. 37 of the 135 cars to hand state one
+    on a paint, 140 of the 229 settings in a skin rather than beside the car.
+    """
+    config = """\
+[INCLUDE: common/materials_carpaint.ini]
+CarPaintMaterial = Paint
+DisableDev = 1
+
+[Material_CarPaint_Metallic]
+FresnelMax = 0.4
+BrightnessAdjustment = 0.66 ; compensates for ambient specular
+
+[Material_CarPaint_Metallic]
+Materials = Rim_colour, Trim
+BrightnessAdjustment = 0.55
+
+[Material_CarPaint_Solid]
+Skins = SomeoneElse
+Materials = Paint
+BrightnessAdjustment = 0.4
+
+[Material_Plastic_v2]
+Materials = Paint
+BrightnessAdjustment = 0.07
+"""
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'Silver')]")) == {
+        "paint": 0.66, "rim_colour": 0.55, "trim": 0.55,
+    }, "the unnamed section is the paint, a named one is what it names"
+    # And a block written for another skin is that skin's, not this one's.
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'SomeoneElse')]"))["paint"] == 0.4
+
+    # A surface stated darker than the floor is one the file has turned into
+    # its own highlight — a C-X75's rims are 0.05 beside a clear coat of 3 —
+    # and this viewer does not put that highlight back, so following it down
+    # would draw bright silver wheels black.
+    mirror = """\
+[Material_CarPaint_Metallic]
+Materials = Rim_colour
+BrightnessAdjustment = 0.05
+ClearCoatThickness = 3
+"""
+    assert dict(_skins(f"[...S.paintBrightness({mirror!r}, 'Silver')]")) == {}
+    assert dict(_skins("[...S.paintBrightness('nothing here', 'Silver')]")) == {}
+
+@needs_node
+def test_the_materials_a_paint_shop_slot_name_reaches():
+    """A quarter of the cars here name the paint material in no file at all —
+    a Lamborghini LM002 states a colour in every one of its fourteen skins and
+    carries no `ext_config.ini` anywhere — so the last thing left to ask is
+    what the paint shop filed the colour under.
+
+    Content Manager opens `carPaint` on a car that has told it nothing, and the
+    material the car wears is that name and a number.  Only a number: the same
+    car's `carPaint_010101FF` is a side-marker trim wearing its own colour in
+    its own name, and painting that in the body colour is what this must not do.
+    """
+    car = "['carpaint02','carpaint03','carpaint_010101ff','rubbertrim_020202ff']"
+    slots = "[{key:'carPaint'}]"
+    assert _skins(f"S.slotMaterials({slots}, new Set({car}))") == [
+        "carpaint02", "carpaint03"], "the body and the extenders, not the trim"
+    # A slot naming the material outright still reaches it.
+    assert _skins(f"S.slotMaterials([{{key:'carPaint02'}}], new Set({car}))") == [
+        "carpaint02"]
+    # And one naming nothing the car has reaches nothing.
+    assert _skins(f"S.slotMaterials([{{key:'extBody1'}}], new Set({car}))") == []
+    assert _skins(f"S.slotMaterials([], new Set({car}))") == []
+
+
+@needs_node
 def test_what_content_manager_says_the_paint_is():
     meta = ('{"carPaint":{"color":"#FF1A2025","enabled":true,"gloss":0.178,'
             '"reflection":0.767},"carpet":{"enabled":true}}')
@@ -757,6 +955,160 @@ def test_what_content_manager_says_the_paint_is():
     assert _skins("S.paintColour('not json')") is None
     assert _skins("S.paintColour('{}')") is None
 
+
+@needs_node
+def test_a_stated_paint_is_the_number_it_says_not_a_shade():
+    """A colour somebody picked is a display colour and is undone through the
+    sRGB curve to get at the light. A paint stated in a `cm_skin.json` is not
+    that: it is the multiplier the game's own shader uses.
+
+    Measured off two cars' previews, four stated greys apiece out of the one
+    showroom, with the black car giving the floor and the white the scale. A
+    550 Maranello's `#A0A0A0` behaves as 0.73 of white and its `#525254` as
+    0.39. Read straight those are 0.63 and 0.32 — out by a constant the
+    showroom's own exposure covers. Read through the curve they are 0.35 and
+    0.08, which is out by four times on the dark one and cannot be a constant
+    anything.
+
+    A Mercedes GL63's carmine is `#5E0000`, and read through the curve it
+    arrives at a third of itself and the car comes out a dusty mauve.
+    """
+    stated = _skins("(()=>{const P=require(%r);return {"
+                    "picked: P.fromHex('#525254'), said: P.fromStatedHex('#525254'),"
+                    "white: P.fromStatedHex('#FFFFFF')};})()"
+                    % str(WEB / "app" / "palette.js"))
+    assert stated["said"][0] == pytest.approx(0x52 / 255, abs=1e-6)
+    assert stated["picked"][0] == pytest.approx(0.084, abs=0.002)
+    assert stated["white"] == [1, 1, 1], "and white is white either way round"
+
+    # Where it lands: the paint a skin states goes on as the number it says,
+    # and the colour read off a livery chip — a picture of a swatch, and so a
+    # display colour — keeps the curve.
+    paints = _skins(
+        "(()=>{const skins=[{name:'a',named:['body'],colours:"
+        "[{key:'carPaint',hex:'#5e0000',enabled:true}],images:new Map()}];"
+        "S.settle(skins,{pictures:new Map([['body','body.dds']]),fallback:[]});"
+        "return skins[0].paints;})()")
+    assert paints[0]["picture"] is False, "a stated paint is not read off a picture"
+
+@needs_node
+def test_which_material_a_carpaint_section_is_about():
+    """`CarPaintMaterial` is spelt two ways and means two things. 165 of the
+    219 across the 135 cars to hand sit above the material sections and name
+    the car's paint once for the whole file; 54 sit inside one and name that
+    section's own.
+
+    A 550 Maranello writes four such sections — for its body, its rims and its
+    exhaust — each naming itself. Read as a file-wide default, all four name
+    every one of the others and the last section's word lands on the body: the
+    rims' brightness of 0.5 came out on the paint, and a rosso corsa arrived
+    at half the red it states.
+    """
+    per_section = """\
+[Material_CarPaint_Solid]
+CarPaintMaterial = body
+FresnelMax = 0.5
+[Material_CarPaint_Metallic]
+CarPaintMaterial = rim
+BrightnessAdjustment = 0.5
+[Material_CarPaint_Metallic]
+CarPaintMaterial = exhaust1
+BrightnessAdjustment = 0.4
+"""
+    assert dict(_skins(f"[...S.paintBrightness({per_section!r}, '')]")) == {
+        "rim": 0.5, "exhaust1": 0.4,
+    }, "a section naming its own material is about that one and no other"
+
+    # And the other spelling still means the whole file.
+    wide = """\
+[INCLUDE: common/materials_carpaint.ini]
+CarPaintMaterial = Paint
+[Material_CarPaint_Metallic]
+BrightnessAdjustment = 0.66
+"""
+    assert dict(_skins(f"[...S.paintBrightness({wide!r}, '')]")) == {"paint": 0.66}
+
+
+@needs_node
+def test_a_car_states_some_of_what_it_says_per_skin():
+    """A config beside the car gates its sections by skin — a 550 Maranello
+    writes its body once for its reds and once for its silvers — so a single
+    reading of it is the reading for no skin at all, and every gated section
+    is dropped for every skin.
+    """
+    config = """\
+[Material_CarPaint_Metallic]
+CarPaintMaterial = body
+Skins = argento, grigio
+BrightnessAdjustment = 0.9
+"""
+    # Read for the skin it names, and for one it does not.
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'argento')]")) == {"body": 0.9}
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'rosso')]")) == {}
+
+    # And `settle` asks for it per skin rather than being handed one answer.
+    settled = _skins(
+        "(()=>{const skins=[{name:'argento',named:['body'],colours:"
+        "[{key:'carPaint',hex:'#a0a0a0',enabled:true}],images:new Map()},"
+        "{name:'rosso',named:['body'],colours:"
+        "[{key:'carPaint',hex:'#d30300',enabled:true}],images:new Map()}];"
+        "S.settle(skins,{pictures:new Map([['body','body.dds']]),fallback:[],"
+        "brightness:(name)=>new Map(name==='argento'?[['body',0.9]]:[])});"
+        "return skins.map(s=>[s.name,s.paints]);})()")
+    assert dict(settled)["argento"][0]["scale"] == 0.9
+    assert dict(settled)["rosso"][0]["scale"] == 1
+
+@needs_node
+def test_what_a_cars_config_takes_away_and_restates():
+    """`[MODEL_REPLACEMENT_*]` swaps one model for another and the part of that
+    this can honour is `HIDE` — 100 of the 101 such sections across the 135
+    cars to hand name some, and 77 of the 101 are written in a skin rather
+    than beside the car. `[SHADER_REPLACEMENT_*]` restates a material in the
+    very numbers a `.kn5` states about a surface.
+
+    Both are written with the patch's own auto-numbering — `[SECTION_...]` and
+    `PROP_...`, a full stop where an index would be — which half these configs
+    use and which a reader wanting a plain key name never sees.
+    """
+    config = """\
+[MODEL_REPLACEMENT_...]
+ACTIVE = 1
+FILE = car.kn5
+HIDE = plate, plate_screw
+[MODEL_REPLACEMENT_...]
+SKINS = Another
+HIDE = wing
+[MODEL_REPLACEMENT_...]
+ACTIVE = 0
+HIDE = roof
+[SHADER_REPLACEMENT_...]
+MATERIALS = zahlens, jantao
+SHADER = ksWindscreen
+IS_TRANSPARENT = 1
+PROP_... = ksAmbient, 0.4
+PROP_... = ksSpecularEXP, 13
+[SHADER_REPLACEMENT_...]
+MESHES = only_a_mesh
+PROP_... = ksAmbient, 0.9
+"""
+    read = _skins(f"(()=>{{const o=S.carReplacements({config!r}, 'Silver');"
+                  "return {hidden:[...o.hidden], shaders:[...o.shaders]"
+                  ".map(([k,v])=>[k,{props:[...v.props],shader:v.shader,"
+                  "transparent:v.transparent}])};})()")
+    # A section for another skin is that skin's, and one switched off is nobody's.
+    assert sorted(read["hidden"]) == ["plate", "plate_screw"]
+
+    shaders = dict(read["shaders"])
+    assert sorted(shaders) == ["jantao", "zahlens"], (
+        "a section naming meshes rather than materials is not applied: a material"
+        " here is shared across every mesh that wears it")
+    assert dict(shaders["zahlens"]["props"]) == {"ksAmbient": 0.4, "ksSpecularEXP": 13}
+    assert shaders["zahlens"]["shader"] == "ksWindscreen"
+    assert shaders["zahlens"]["transparent"] is True
+
+    empty = _skins("(()=>{const o=S.carReplacements('nothing here','');"
+                   "return {hidden:[...o.hidden], shaders:[...o.shaders]};})()")
+    assert empty == {"hidden": [], "shaders": []}
 
 @needs_node
 def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
@@ -784,9 +1136,12 @@ def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
         "Object.assign(s, { images: new Map() })), "
         f"{{pictures: new Map([['booody_aooo', 'skin_00.dds']]), fallback: []}})")
     assert [(s["name"], s["paints"]) for s in settled] == [
-        ("knows", [{"material": "booody_aooo", "hex": "#111111"}]),
-        ("copied", [{"material": "booody_aooo", "hex": "#222222"}]),
-        ("silent", [{"material": "booody_aooo", "hex": "#333333"}]),
+        ("knows", [{"material": "booody_aooo", "hex": "#111111", "scale": 1,
+                    "picture": False}]),
+        ("copied", [{"material": "booody_aooo", "hex": "#222222", "scale": 1,
+                     "picture": False}]),
+        ("silent", [{"material": "booody_aooo", "hex": "#333333", "scale": 1,
+                     "picture": False}]),
         ("colourless", []),
     ]
 
@@ -883,7 +1238,8 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
 
     stated = settled([{"key": "carPaint", "hex": "#0c0c0c", "enabled": True}], [])
     assert stated["wantsChip"] is False, "a colour it stated needs no picture"
-    assert stated["paints"] == [{"material": "carpaint", "hex": "#0c0c0c"}]
+    assert stated["paints"] == [
+        {"material": "carpaint", "hex": "#0c0c0c", "scale": 1, "picture": False}]
 
     # One that switched its colour off and left the white it opens with stated
     # none, which is where a chip comes in: an Audi's Sakhir Orange says
@@ -909,7 +1265,8 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     # and the car is red.
     anyway = settled([{"key": "carPaint", "hex": "#7f0000", "enabled": False}], [])
     assert anyway["wantsChip"] is False
-    assert anyway["paints"] == [{"material": "carpaint", "hex": "#7f0000"}]
+    assert anyway["paints"] == [
+        {"material": "carpaint", "hex": "#7f0000", "scale": 1, "picture": False}]
 
     # And a slot the car pairs with nothing does not answer for the body: an
     # Audi RS4's Nardo Grey states two colours, both of them its wheels, and
@@ -929,7 +1286,8 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
 
     # And where it is wanted, the colour lands on the material the car settled.
     assert settled([], ["badge.dds"], chip="#941a0a")["paints"] == [
-        {"material": "carpaint", "hex": "#941a0a"}]
+        # Read off the livery chip, which is a picture of a swatch.
+        {"material": "carpaint", "hex": "#941a0a", "scale": 1, "picture": True}]
     assert settled([], ["body.dds"], chip="#941a0a")["paints"] == [],         "and a chip nobody wanted is not put on anyway"
 
 
@@ -946,6 +1304,178 @@ def test_which_skin_a_file_came_from(path, expected):
     tells them apart."""
     assert _skins(f"S.skinOf({path!r})") == expected
 
+
+@needs_clang
+@needs_node
+def test_what_a_surface_gives_off_on_its_own(built, tmp_path):
+    """A dial, a display and an LED are lit rather than pale, and what makes
+    them read that way is that nothing about the room changes them.
+
+    The colour and the map are two different materials: across the 67 cars to
+    hand 29 state an emissive colour and bind no map, 89 bind a map and state
+    no colour, and not one does both. And `txGlow` is bound almost only by
+    `ksBrakeDisc` — 36 of the 37 that bind it — where the level beside it is
+    the heat in the disc, which is nought in a car standing still.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([128, 128, 128, 255]) * 16)
+    lamp = fb.dds_bgra(4, 4, bytes([255, 255, 255, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, emissive, glow_level in (
+        ("dark", None, None),
+        # Amber, and past white in its red: a game states how much brighter
+        # than the room the thing reads, not what shade it is painted.
+        ("lit", (2.0, 0.4, 0.0), None),
+        ("mapped", None, 1.0),
+        ("cold", None, 0.0),
+    ):
+        properties = fb.kn5_property("ksAmbient", 0.5) + fb.kn5_property("ksDiffuse", 0.6)
+        count = 2
+        if emissive is not None:
+            # A kn5 writes an emissive colour in the three-float group, and a
+            # plain number in the first: the reader takes whichever is set.
+            properties += fb.kn5_property("ksEmissive", 0.0, c=emissive)
+            count += 1
+        slots = [("txDiffuse", 0, "grey.dds")]
+        textures = [("grey.dds", grey)]
+        if glow_level is not None:
+            properties += fb.kn5_property("glowLevel", glow_level)
+            count += 1
+            slots.append(("txGlow", 4, "lamp.dds"))
+            textures.append(("lamp.dds", lamp))
+        material = fb.kn5_material("panel", "ksPerPixel", properties=properties,
+                                   property_count=count, slots=tuple(slots))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=textures, materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "emissive.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_a_surface_drawn_from_behind_its_own_normal(built, tmp_path):
+    """A surface whose normal faces away from the eye has nowhere to go: the
+    angle is past a right angle, and clamped back to something a cosine will
+    take it becomes exactly grazing — the one place a Fresnel term goes to a
+    mirror. The surface then reflects the whole room whatever colour it is.
+
+    Which happens to a whole model at a time. A Smart Roadster out of a file
+    converter states its normals the other way round from its winding, and
+    drew all 28 of its colours as the same pale grey — its near-black tyres
+    included. With every colour on it set to black it still came back at 124
+    of 255, which is a mirror and not a car.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    # Black, so that anything on the screen is the room and not the surface.
+    dark = fb.dds_bgra(4, 4, bytes([0, 0, 0, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    material = fb.kn5_material("panel", "ksPerPixel",
+                               properties=fb.kn5_property("fresnelC", 0.04),
+                               property_count=1,
+                               slots=(("txDiffuse", 0, "dark.dds"),))
+    files = []
+    for name, inward in (("out", False), ("in", True)):
+        vertices, indices = fb.kn5_cube(1.0, inward=inward)
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[("dark.dds", dark)], materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "facing.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_the_shape_that_goes_with_a_grain(built, tmp_path):
+    """A grain is two maps: what colour the surface is at that scale and what
+    shape it is. Every one of the 575 materials across the 67 cars to hand
+    that binds `txNormalDetail` binds `txDetail` as well, and only three of
+    them are the same file — so the shape is its own picture, of the leather
+    rather than of the panel.
+
+    53 of those 575 blend it at nothing, which has to come back
+    indistinguishable from carrying none at all.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([180, 180, 180, 255]) * 16)
+    # A grain that varies, so it is a grain rather than a flat colour and is
+    # not dropped before the relief that goes with it can be tiled by it.
+    speck = fb.dds_bgra(4, 4, (bytes([120, 120, 120, 255]) * 8)
+                        + (bytes([150, 150, 150, 255]) * 8))
+    # A relief pointing one way across the whole of itself, so what it does is
+    # the surface turning rather than a texture appearing. BGRA in, so this is
+    # r=210, g=128, b=255: tilted along the surface's own x.
+    tilt = fb.dds_bgra(4, 4, bytes([255, 128, 210, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, relief, blend in (("plain", False, 1.0), ("tilted", True, 1.0),
+                                ("off", True, 0.0)):
+        slots = [("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "speck.dds")]
+        textures = [("grey.dds", grey), ("speck.dds", speck)]
+        properties = (fb.kn5_property("fresnelC", 0.05)
+                      + fb.kn5_property("useDetail", 1.0)
+                      + fb.kn5_property("detailUVMultiplier", 3.0)
+                      + fb.kn5_property("detailNormalBlend", blend))
+        if relief:
+            slots.append(("txNormalDetail", 4, "tilt.dds"))
+            textures.append(("tilt.dds", tilt))
+        material = fb.kn5_material("panel", "ksPerPixelMultiMap_NMDetail",
+                                   properties=properties, property_count=4,
+                                   slots=tuple(slots))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=textures, materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "relief.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
 
 @needs_clang
 @needs_node
@@ -985,7 +1515,17 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
     # And one dark enough that taking it as neutral asks for forty-seven times
     # the light back, where the viewer allows eight. An Audi S8's paint asks
     # for ten, so the ceiling is a real one and both sides must hold to it.
-    deep = fb.dds_bgra(4, 4, bytes([40, 40, 40, 255]) * 16)
+    # Dark and darker rather than one flat dark: a grain has to differ from
+    # its own average somewhere to be a grain at all, and this one is here to
+    # ask about the ceiling rather than about that.
+    deep = fb.dds_bgra(4, 4,
+                       (bytes([35, 35, 35, 255]) * 8) + (bytes([45, 45, 45, 255]) * 8))
+    # And the same flat grain in a colour, which is the slot filled in and
+    # never authored: 55 of the 581 detail maps in the 67 cars to hand are one
+    # of these, under names like `PURE_RED.dds` and `NULL.dds`. Its average is
+    # one number in grey and three in colour, so neutralised by the one it
+    # comes back three times its own red and paints whatever wears it.
+    dummy = fb.dds_bgra(4, 4, bytes([0, 0, 255, 255]) * 16)
     identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
     vertices, indices = fb.kn5_cube(1.0)
@@ -998,6 +1538,8 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
          [("grey.dds", grey), ("flat.dds", flat)]),
         ("deep", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "deep.dds")),
          [("grey.dds", grey), ("deep.dds", deep)]),
+        ("dummy", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "dummy.dds")),
+         [("grey.dds", grey), ("dummy.dds", dummy)]),
     ):
         material = fb.kn5_material(
             "panel", "ksPerPixelMultiMap",
@@ -1021,6 +1563,308 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_the_fresnel_a_material_states_is_the_one_it_is_drawn_with(built, tmp_path):
+    """Schlick's term is one shape: a base at nothing rising to a mirror over a
+    fifth power. A `.kn5` writes both of those numbers loose — `fresnelEXP` for
+    how fast the reflection comes up as the surface turns away, and
+    `fresnelMaxLevel` for how far it is let get — and read as a base alone the
+    other two are lost.
+
+    1428 of the 3427 materials across the 67 cars to hand state a base of
+    nought, so read that way they reflect nothing at all: a Jaguar Mk2's paint
+    is nought, a half and a quarter, which is a body reflecting a quarter of
+    the room from every angle but dead head-on, and it drew as a matte panel.
+    The median ceiling across the same materials is 0.1, so the other half of
+    the sentence is at least as often a limit — a fifth power rising to a
+    mirror at a grazing angle is the thing most of them spent a number saying
+    they do not do.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    # Two pairs, each differing in one number and nothing else. The first pair
+    # shares a base of nought and a ceiling of a quarter and differs only in
+    # how fast it gets there. The second shares a base and an exponent of
+    # nought — the rise at its full height from every angle, which 626 of the
+    # materials to hand write — and differs only in the ceiling that holds it:
+    # one at a mirror, one at the base it started from. Both are lit dimly —
+    # `ksAmbient` and `ksDiffuse` at a tenth — so what is measured is the
+    # reflection rather than the panel under it.
+    for name, base, exponent, ceiling in (
+        ("broad", 0.0, 0.5, 0.25),
+        ("dull", 0.0, 5.0, 0.25),
+        ("open", 0.05, 0.0, 1.0),
+        ("capped", 0.05, 0.0, 0.05),
+    ):
+        material = fb.kn5_material(
+            "panel", "ksPerPixel",
+            properties=(fb.kn5_property("ksAmbient", 0.1)
+                        + fb.kn5_property("ksDiffuse", 0.1)
+                        + fb.kn5_property("fresnelC", base)
+                        + fb.kn5_property("fresnelEXP", exponent)
+                        + fb.kn5_property("fresnelMaxLevel", ceiling)),
+            property_count=5, slots=())
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[], materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "fresnel.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
+def test_a_surface_that_adds_what_it_returns(built, tmp_path):
+    """`isAdditive` tells a game's shader to put what a surface returns on top
+    of what is behind it rather than in place of some of it.
+
+    1109 materials across the 67 cars to hand state one — and 1015 of those are
+    opaque, named `body` and `carpaint` and `chrome`, where there is nothing
+    behind to add to. Whatever the number means there it is not this, so only
+    the 94 that also blend are taken.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    # Half-covered, so the near faces of the cube show the far ones through
+    # them and there is something for the addition to land on.
+    veil = fb.dds_bgra(4, 4, bytes([190, 190, 190, 128]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, additive in (("over", 0.0), ("added", 1.0)):
+        material = fb.kn5_material(
+            "veil", "ksPerPixelReflection", blend=1,
+            properties=(fb.kn5_property("fresnelC", 0.05)
+                        + fb.kn5_property("isAdditive", additive)),
+            property_count=2, slots=(("txDiffuse", 0, "veil.dds"),))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[("veil.dds", veil)], materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "additive.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_what_a_cars_config_takes_away_and_what_it_restates(built, tmp_path):
+    """A model replacement's `HIDE` takes meshes away — a number plate a livery
+    does not want, which is the commonest thing in them — and 77 of the 101
+    such sections across the 135 cars to hand are written in a skin rather than
+    beside the car, so it has to follow the skin.
+
+    A shader replacement restates a material in the very numbers a `.kn5`
+    states about a surface, so what it says arrives as though the model had
+    said it.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([200, 200, 200, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    # The model says a dim, nearly mirror-smooth surface.
+    material = fb.kn5_material(
+        "panel", "ksPerPixel",
+        properties=(fb.kn5_property("ksAmbient", 0.1)
+                    + fb.kn5_property("ksDiffuse", 0.1)
+                    + fb.kn5_property("ksSpecularEXP", 400.0)),
+        property_count=3, slots=(("txDiffuse", 0, "grey.dds"),))
+    model = fb.build_kn5(6, textures=[("grey.dds", grey)], materials=[material],
+                         tree=fb.kn5_dummy("car", identity,
+                                           fb.kn5_mesh("panel", vertices, indices), 1))
+    # Written the way half these configs are: the patch's own auto-numbering,
+    # a full stop where an index would be.
+    hide = ("[MODEL_REPLACEMENT_...]" + chr(10) + "ACTIVE = 1" + chr(10)
+            + "FILE = car.kn5" + chr(10) + "HIDE = panel" + chr(10))
+    # And the config says a bright, blunt one.
+    restate = ("[SHADER_REPLACEMENT_...]" + chr(10) + "MATERIALS = panel" + chr(10)
+               + "PROP_... = ksAmbient, 0.5" + chr(10)
+               + "PROP_... = ksDiffuse, 0.5" + chr(10)
+               + "PROP_... = ksSpecularEXP, 4" + chr(10))
+    folders = []
+    for name, config, skin in (("plain", None, None), ("hidden", hide, None),
+                               ("restated", restate, None), ("skinned", None, hide)):
+        car = tmp_path / name
+        car.mkdir()
+        (car / f"{name}.kn5").write_bytes(model)
+        if config:
+            (car / "extension").mkdir()
+            (car / "extension" / "ext_config.ini").write_text(config, encoding="utf-8")
+        if skin:
+            plain = car / "skins" / "Plain"
+            plain.mkdir(parents=True)
+            (plain / "ext_config.ini").write_text(skin, encoding="utf-8")
+            # A skin is only offered for the pictures it replaces, so it brings
+            # the one the car wears.
+            (plain / "grey.dds").write_bytes(grey)
+        folders.append(str(car))
+
+    result = _run(["node", str(WEB / "test" / "replace.js"), *folders],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_a_car_lights_its_own_lamps(built, tmp_path):
+    """A car's lighting config names meshes and says what colour each goes
+    when the lights are on. 56 of the 135 cars to hand carry those sections,
+    1544 between them, and they are the whole of what makes a lamp read as a
+    lamp rather than as red plastic.
+
+    The switch is offered only where a car brought a config saying what its
+    lights are, and starts off: a showroom photograph has the lamps dark.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    # A dark housing lit dimly, so what the middle of the viewport shows is
+    # the lamp rather than the plastic around it.
+    grey = fb.dds_bgra(4, 4, bytes([40, 40, 40, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    material = fb.kn5_material("plastic", "ksPerPixel",
+                               properties=(fb.kn5_property("fresnelC", 0.05)
+                                           + fb.kn5_property("ksAmbient", 0.1)
+                                           + fb.kn5_property("ksDiffuse", 0.1)),
+                               property_count=3,
+                               slots=(("txDiffuse", 0, "grey.dds"),))
+    # The one mesh is the lamp, so what the config says about it is what the
+    # middle of the viewport shows.
+    model = fb.build_kn5(6, textures=[("grey.dds", grey)], materials=[material],
+                         tree=fb.kn5_dummy("car", identity,
+                                           fb.kn5_mesh("tail", vertices, indices), 1))
+    folders = []
+    for name, config in (
+        ("lamp", "[EMISSIVE_...]" + chr(10) + "NAME=tail" + chr(10)
+         # A hue and a level, which is how these are written: the triple is
+         # divided by its own largest channel and the fourth says how much.
+         + "COLOR=255, 40, 40, 3" + chr(10)
+         + "OFF_COLOR=255, 40, 40, 0.15" + chr(10)),
+        ("plain", None),
+    ):
+        car = tmp_path / name
+        car.mkdir()
+        (car / f"{name}.kn5").write_bytes(model)
+        if config:
+            (car / "extension").mkdir()
+            (car / "extension" / "ext_config.ini").write_text(config, encoding="utf-8")
+        folders.append(str(car))
+
+    result = _run(["node", str(WEB / "test" / "lights.js"), *folders],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_what_a_cars_config_says_its_surfaces_are_made_of(built, tmp_path):
+    """`Reflectance`, `Smoothness` and `Metalness` sit in the `[Material_*]`
+    blocks beside the model, and on a Custom Shaders Patch car they are where
+    the material lives — the `ks*` values still inside the `.kn5` describe the
+    same surface as it was before the author moved the description out.
+
+    1121 of those blocks sit beside the 135 cars to hand: 423 state a
+    smoothness, 375 a reflectance, 194 a metalness. Read from the model alone
+    a car is read as the car it used to be, and the chrome it was given comes
+    back as plastic.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([200, 200, 200, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    material = fb.kn5_material(
+        "panel", "ksPerPixel",
+        properties=(fb.kn5_property("fresnelC", 0.05)
+                    + fb.kn5_property("fresnelMaxLevel", 0.6)
+                    + fb.kn5_property("ksSpecularEXP", 20.0)),
+        property_count=3, slots=(("txDiffuse", 0, "grey.dds"),))
+    model = fb.build_kn5(6, textures=[("grey.dds", grey)], materials=[material],
+                         tree=fb.kn5_dummy("car", identity,
+                                           fb.kn5_mesh("cube", vertices, indices), 1))
+    folders = []
+    for name, config in (
+        ("plain", None),
+        # Chrome, in the three numbers a `.kn5` has no way of saying.
+        ("polished", "[Material_Metal_v2]" + chr(10) + "Materials = panel" + chr(10)
+         + "Smoothness = 0.95" + chr(10) + "Reflectance = 0.9" + chr(10)
+         + "Metalness = 1.0" + chr(10)),
+        # And a smoothness written past anything that means something, which
+        # is a thing these files do: the highest written is 3.
+        ("matte", "[Material_Plastic_v2]" + chr(10) + "Materials = panel" + chr(10)
+         + "Smoothness = 3.0" + chr(10) + "Reflectance = 0.02" + chr(10)),
+    ):
+        car = tmp_path / name
+        car.mkdir()
+        (car / f"{name}.kn5").write_bytes(model)
+        if config:
+            (car / "extension").mkdir()
+            (car / "extension" / "ext_config.ini").write_text(config, encoding="utf-8")
+        folders.append(str(car))
+
+    result = _run(["node", str(WEB / "test" / "finish.js"), *folders],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
 def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
     """A `.kn5` holds the car unpainted: everything under `skins/<name>/`
     beside it replaces the texture of that name, and the skin's own two
@@ -1041,7 +1885,7 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
 
     car = tmp_path / "car"
     (car / "extension").mkdir(parents=True)
-    for name in ("Red", "Stranger", "Pair", "Bare", "Chip", "Livery"):
+    for name in ("Red", "Stranger", "Shouted", "Pair", "Bare", "Chip", "Livery"):
         (car / "skins" / name).mkdir(parents=True)
     # A paint map is the panels in white, because the colour is what the game
     # multiplies through it.
@@ -1055,7 +1899,11 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
                         properties=fb.kn5_property("fresnelC", 0.05),
                         property_count=1,
                         slots=(("txDiffuse", 0, picture),))
-        for name, picture in (("carpaint", "paint.dds"), ("trim", "trim.dds"))
+        # `Trim` with a capital, which is what a real car does — a Lamborghini
+        # LM002 wears `carPaint02` while its skins say `carPaint`. Every file
+        # naming it below says `trim`, so the name a skin states and the name
+        # the model carries differ by case and by nothing else.
+        for name, picture in (("carpaint", "paint.dds"), ("Trim", "trim.dds"))
     ]
     # And one that takes almost none of the light, which is what an Audi's
     # wheels are: the same white map under it, and black on the screen.
@@ -1094,6 +1942,11 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
     for name, names_it, meta in (
         ("Red", "carpaint", '{"carPaint": {"color": "#FFDD2010"}}'),
         ("Stranger", "some_other_car", '{"carPaint": {"color": "#FFDD2010"}}'),
+        # And one spelling the material in another case than the model does.
+        # The two names meeting here come out of different files and need not
+        # agree: a config saying `trim` and a model wearing `Trim` are the same
+        # material, and matched letter for letter the car stays bare.
+        ("Shouted", "trim", '{"carPaint": {"color": "#FFDD10DD"}}'),
         # No config of its own, two colours under the names half of them use.
         ("Pair", None,
          '{"extBody1": {"color": "#FF2010DD"}, "extBody2": {"color": "#FF10DD20"}}'),
@@ -1941,6 +2794,70 @@ def test_every_spelling_the_export_is_written_in(built, tmp_path):
     assert len(objects.get_all("Model")) == 3, "one model per part"
     assert len(objects.get_all("Geometry")) == 1, "one cube under three transforms"
 
+
+@needs_clang
+@needs_node
+def test_what_a_gltf_can_be_made_to_hold_of_a_game_material(built, tmp_path):
+    """glTF describes one shading model and a `.kn5` states rather more.
+
+    What has a slot goes in it. What has an extension goes there: an emissive
+    past white is the factor at its brightest channel with the rest in
+    `KHR_materials_emissive_strength`, which is the same light written the way
+    the format allows — clamped instead, every dash LED exports as merely
+    white. Everything else goes in `extras`, which readers that do not know it
+    ignore, and without which a car written out and opened again is a PBR
+    approximation of the car that went in.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([180, 180, 180, 255]) * 16)
+    speck = fb.dds_bgra(4, 4, (bytes([120, 120, 120, 255]) * 8)
+                        + (bytes([150, 150, 150, 255]) * 8))
+    tilt = fb.dds_bgra(4, 4, bytes([255, 128, 210, 255]) * 16)
+    lamp = fb.dds_bgra(4, 4, bytes([255, 255, 255, 255]) * 16)
+    # One material stating everything this tool reads out of a game's own.
+    properties = (fb.kn5_property("ksAmbient", 0.4) + fb.kn5_property("ksDiffuse", 0.45)
+                  + fb.kn5_property("ksSpecular", 0.6)
+                  + fb.kn5_property("ksSpecularEXP", 50.0)
+                  + fb.kn5_property("ksEmissive", 0.0, c=(10.0, 9.0, 0.0))
+                  + fb.kn5_property("ksAlphaRef", 0.4)
+                  + fb.kn5_property("fresnelC", 0.07)
+                  + fb.kn5_property("fresnelEXP", 3.5)
+                  + fb.kn5_property("fresnelMaxLevel", 0.6)
+                  + fb.kn5_property("isAdditive", 1.0)
+                  + fb.kn5_property("sunSpecular", 0.05)
+                  + fb.kn5_property("sunSpecularEXP", 90.0)
+                  + fb.kn5_property("useDetail", 1.0)
+                  + fb.kn5_property("detailUVMultiplier", 20.0)
+                  + fb.kn5_property("detailNormalBlend", 0.3))
+    material = fb.kn5_material(
+        "everything", "ksPerPixelMultiMap_NMDetail", alpha_tested=True,
+        properties=properties, property_count=15,
+        slots=(("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "speck.dds"),
+               ("txNormalDetail", 4, "tilt.dds"), ("txGlow", 5, "lamp.dds")))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    model = tmp_path / "everything.kn5"
+    model.write_bytes(fb.build_kn5(
+        6, textures=[("grey.dds", grey), ("speck.dds", speck),
+                     ("tilt.dds", tilt), ("lamp.dds", lamp)],
+        materials=[material],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("cube", vertices, indices), 1)))
+
+    result = _run(["node", str(WEB / "test" / "carry.js"), str(tmp_path), str(model)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
 
 @needs_clang
 @needs_node

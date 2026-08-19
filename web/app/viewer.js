@@ -37,20 +37,78 @@ const FbxViewer = (function () {
    * what the viewport shows. */
   const BACKDROP = [0.086, 0.094, 0.114, 1];
 
+  /* How many rows of the palette a material takes, and the power a plain
+   * Schlick Fresnel rises over.
+   *
+   * Five is the shape of the term every file but a game's own implies, so it
+   * is what a material that states no exponent gets — and it is the ceiling
+   * on a stated one as well, since the number is there to say a surface
+   * reflects across more of itself than a fifth power does, never less. */
+  /* How many of a car's own lamps the viewer will carry as lights. The
+   * busiest of the 135 cars to hand states sixteen. */
+  const MAX_LIGHTS = 24;
+
+  const PALETTE_ROWS = 9;
+  const SCHLICK_POWER = 5;
+
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
   const QUARTER_TURN = Math.PI / 2;
 
   /* Shared by the model and background shaders: one studio environment, in
-   * linear radiance. A bright horizon band is what paint and chrome pick up. */
+   * linear radiance.
+   *
+   * A dark room with one broad panel over it, which is the showroom a car is
+   * photographed in — and the one this tool is most often pointed at, since
+   * every `.kn5` here ships its own pictures of it. Those previews say what
+   * it is more exactly than a description could: the backdrop reads 0,0,0 to
+   * the byte, and a Jaguar's chrome bumper — a mirror, so a picture of the
+   * room — is black across the whole of itself but for one white streak along
+   * its top edge.
+   *
+   * So the walls are nearly out and the panel is bright, which is a wider
+   * range than a horizon band and the reason a car reads as paint here at
+   * all: what makes a panel look wet is a dark surround with something bright
+   * in it to catch, and an even grey wash gives it nothing to reflect. The
+   * ceiling is lit rather than black, since a showroom's fill has to come
+   * from somewhere and in those previews a shaded flank sits three-quarters
+   * as bright as a lit one rather than in the dark. */
   const ENVIRONMENT = `
-  const vec3 ENV_ZENITH  = vec3(0.090, 0.110, 0.150);
-  const vec3 ENV_HORIZON = vec3(0.380, 0.400, 0.440);
-  const vec3 ENV_GROUND  = vec3(0.012, 0.013, 0.016);
-  const vec3 ENV_SOFTBOX = vec3(0.900, 0.910, 0.950);
-  const vec3 SUN_COLOUR  = vec3(2.600, 2.520, 2.360);
-  const vec3 SUN_DIR     = normalize(vec3(0.35, 0.85, 0.40));
+  const vec3 ENV_ZENITH  = vec3(0.150, 0.158, 0.176);
+  const vec3 ENV_HORIZON = vec3(0.400, 0.414, 0.446);
+  const vec3 ENV_GROUND  = vec3(0.010, 0.010, 0.013);
+  const vec3 ENV_SOFTBOX = vec3(1.500, 1.515, 1.570);
+  const vec3 SUN_COLOUR  = vec3(1.750, 1.700, 1.605);
+  const vec3 SUN_DIR     = normalize(vec3(0.42, 0.74, 0.50));
+
+  /* What the camera sees where the model is not, which in a showroom is not
+   * the room lighting it.
+   *
+   * The panels are all around the car and the camera shoots from a hole in a
+   * black wall, so the one direction with nothing bright in it is the one
+   * being looked along. Nothing here can tell that direction from any other —
+   * the environment is a function of height alone — so the backdrop is given
+   * its own colour instead of being read out of the room. It is nearly out,
+   * which is what the previews say: theirs is 0,0,0 to the byte, everywhere.
+   */
+  /* What comes back up off the set around the car.
+   *
+   * A showroom floor is dark to look at and the car standing on it is still
+   * lit underneath, because a photographic set puts bounce at floor level
+   * where the camera is not pointing. So this is what a surface facing
+   * downwards gathers, and it is deliberately not what a mirror facing
+   * downwards sees: a chrome bumper in those previews is black across its
+   * whole underside, and a diffuse panel over the same floor is not.
+   */
+  const vec3 ENV_BOUNCE = vec3(0.210, 0.216, 0.230);
+
+  const vec3 BACKDROP_TOP  = vec3(0.00035, 0.00040, 0.00055);
+  const vec3 BACKDROP_BASE = vec3(0.00220, 0.00235, 0.00280);
+
+  vec3 backdropColour(vec3 dir) {
+    return mix(BACKDROP_BASE, BACKDROP_TOP, smoothstep(-0.15, 0.55, dir.y));
+  }
 
   /** Radiance arriving from direction dir, sun excluded. */
   vec3 environmentColour(vec3 dir) {
@@ -59,7 +117,7 @@ const FbxViewer = (function () {
     // panel, tight enough to read as a horizon rather than a grey wash.
     vec3 base = t >= 0.0
       ? mix(ENV_HORIZON, ENV_ZENITH, smoothstep(0.0, 0.16, t))
-      : mix(ENV_HORIZON, ENV_GROUND, smoothstep(0.0, 0.12, -t));
+      : mix(ENV_HORIZON, ENV_GROUND, smoothstep(0.0, 0.45, -t));
     // An overhead softbox, so bonnets and roofs have something to reflect.
     return base + ENV_SOFTBOX * smoothstep(0.62, 0.99, t);
   }
@@ -67,7 +125,7 @@ const FbxViewer = (function () {
   /** Cosine-weighted average of that environment about a normal. */
   vec3 environmentIrradiance(vec3 n) {
     vec3 sky = mix(ENV_HORIZON, ENV_ZENITH, 0.55) + ENV_SOFTBOX * 0.06;
-    vec3 ground = mix(ENV_HORIZON, ENV_GROUND, 0.7);
+    vec3 ground = mix(ENV_BOUNCE, ENV_GROUND, 0.35);
     return mix(ground, sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
   }
 
@@ -135,6 +193,16 @@ const FbxViewer = (function () {
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -143,6 +211,10 @@ const FbxViewer = (function () {
     return position + (centre - uCentre) * uExplode;
   }
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     gl_Position = uShadowMatrix * uModel * vec4(explode(aPosition, aPart), 1.0);
   }`;
 
@@ -176,7 +248,12 @@ ${SHADOW_LOOKUP}
     // Lit by the sky above it, darkened where the model blocks the sun.
     float shadow = sunlight(vWorld, 0.0);
     vec3 sky = mix(ENV_HORIZON, ENV_ZENITH, 0.55) + ENV_SOFTBOX * 0.06;
-    vec3 albedo = vec3(0.06);
+    /* A showroom floor is dark and the car is the lit thing on it. Measured
+     * off the previews the cars ship: theirs sits at 17,19,21 against a
+     * backdrop of nothing, which is a floor there to catch a shadow rather
+     * than to be looked at. Dark enough to read as that and no darker, since
+     * the contact shadow has to have something to darken. */
+    vec3 albedo = vec3(0.013);
     vec3 lit = albedo * (sky + SUN_COLOUR * max(SUN_DIR.y, 0.0) * shadow * 0.45);
 
     // A pool of floor around the model rather than a room: solid under it,
@@ -205,8 +282,8 @@ ${ENVIRONMENT}
   void main() {
     vec4 atNear = uInvProjection * vec4(vClip, 1.0, 1.0);
     vec3 dir = normalize(uViewToWorld * normalize(atNear.xyz / atNear.w));
-    // Darkened: the backdrop should not compete with the model it lights.
-    fragColour = vec4(encodeSrgb(toneMap(environmentColour(dir) * 0.2)), 1.0);
+    // Its own, not the room's: see backdropColour above.
+    fragColour = vec4(encodeSrgb(toneMap(backdropColour(dir))), 1.0);
   }`;
   const VERTEX_SHADER = `#version 300 es
   precision highp float;
@@ -236,6 +313,16 @@ ${ENVIRONMENT}
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -245,6 +332,10 @@ ${ENVIRONMENT}
   }
 
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vec3 position = explode(aPosition, aPart);
     vec4 viewPosition = uModelView * vec4(position, 1.0);
     vViewPosition = viewPosition.xyz;
@@ -276,6 +367,16 @@ ${ENVIRONMENT}
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -285,6 +386,10 @@ ${ENVIRONMENT}
   }
 
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vPart = int(aPart + 0.5);
     gl_Position = uProjection * uModelView * vec4(explode(aPosition, aPart), 1.0);
   }`;
@@ -331,6 +436,12 @@ ${ENVIRONMENT}
   // Bump and normal maps, linear for the same reason.
   uniform highp sampler2DArray uBump;
   uniform highp sampler2DArray uDetail;
+  uniform highp sampler2DArray uGlow;
+  uniform highp sampler2DArray uNormalDetail;
+  uniform highp sampler2D uLights;   // three texels a light: see setLightSources
+  uniform int uLightCount;
+  uniform int uLightsOn;
+  uniform mat4 uModel;               // the same one the vertex stage uses
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -370,6 +481,28 @@ ${SHADOW_LOOKUP}
 
   vec3 fresnelSchlick(vec3 f0, float u) {
     return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
+  }
+
+  /* The same term with the two numbers a game's material spends on it.
+   *
+   * Schlick's is one shape — a base rising to a mirror over a fifth power —
+   * and a kn5 writes both of those loose: fresnelEXP is how fast the
+   * reflection comes up as the surface turns away, and fresnelMaxLevel is
+   * how far it is let get. Reading only the base is reading the smallest of
+   * the three: a Jaguar's paint states nought, half and a quarter, which is a
+   * body reflecting a quarter of what is around it everywhere but dead
+   * head-on — and taken as a base alone it is a matte panel.
+   *
+   * The ceiling holds in the other direction just as often. The median
+   * across the 3427 materials to hand is 0.1, so what a fifth power does at a
+   * grazing angle — rise to a mirror — is the thing most of them spent a
+   * number saying they do not do.
+   */
+  vec3 fresnelStated(vec3 f0, float u, float power, float ceiling) {
+    // An exponent of nought is the rise at its full height from every angle,
+    // which 626 of the materials to hand ask for and pow() will not answer.
+    float rise = power <= 0.0 ? 1.0 : pow(1.0 - u, power);
+    return min(f0 + (1.0 - f0) * rise, vec3(ceiling));
   }
 
   /* The frame a tangent-space map is written in, worked out here rather than
@@ -434,9 +567,13 @@ ${SHADOW_LOOKUP}
     if (uPaletteSize > 0 && uUseTextures == 1) {
       vec4 relief = texelFetch(uPalette, ivec2(slot, 3), 0);
       int bumpLayer = int(relief.r + 0.5) - 1;
+      // Flat until something shapes it, so a surface carrying only the grain's
+      // relief and no map of its own still gets one.
+      vec3 tangentNormal = vec3(0.0, 0.0, 1.0);
+      bool shaped = false;
       if (bumpLayer >= 0) {
         vec3 uvw = vec3(vUv, float(bumpLayer));
-        vec3 tangentNormal;
+        shaped = true;
         if (relief.b > 0.5) {
           tangentNormal = texture(uBump, uvw).xyz * 2.0 - 1.0;
           tangentNormal.xy *= relief.g;
@@ -450,10 +587,31 @@ ${SHADOW_LOOKUP}
           float up = textureOffset(uBump, uvw, ivec2(0, 1)).r;
           tangentNormal = vec3((left - right) * relief.g, (down - up) * relief.g, 1.0);
         }
-        if (dot(tangentNormal, tangentNormal) > 1e-8) {
-          mat3 frame = surfaceFrame(normal, vViewPosition, vUv);
-          normal = normalize(frame * normalize(tangentNormal));
-        }
+      }
+      /* And the relief that goes with the grain, tiled the same number of
+       * times across the surface.
+       *
+       * A grain is two maps: what colour the surface is at that scale and what
+       * shape it is. Every one of the 575 materials to hand that binds the
+       * second binds the first as well, and three of them are the same file —
+       * so it is a picture of the leather rather than of the panel, and
+       * without it the leather is a photograph of leather on something flat.
+       *
+       * The two slopes add, which is the cheapest of the ways of putting two
+       * tangent normals together and the one that keeps the coarse shape: the
+       * panel still turns the way it turned and the grain rides on it. */
+      vec4 grain = texelFetch(uPalette, ivec2(slot, 5), 0);
+      vec4 fine = texelFetch(uPalette, ivec2(slot, 8), 0);
+      int fineLayer = int(fine.r + 0.5) - 1;
+      if (fineLayer >= 0 && fine.g > 0.0) {
+        vec3 fineNormal = texture(uNormalDetail,
+          vec3(vUv * max(grain.g, 1e-4), float(fineLayer))).xyz * 2.0 - 1.0;
+        tangentNormal = vec3(tangentNormal.xy + fineNormal.xy * fine.g, tangentNormal.z);
+        shaped = true;
+      }
+      if (shaped && dot(tangentNormal, tangentNormal) > 1e-8) {
+        mat3 frame = surfaceFrame(normal, vViewPosition, vUv);
+        normal = normalize(frame * normalize(tangentNormal));
       }
     }
 
@@ -643,6 +801,28 @@ ${SHADOW_LOOKUP}
     // with the camera; only the two directions need rotating.
     vec3 n = normalize(uViewToWorld * normal);
     vec3 v = normalize(uViewToWorld * viewDir);
+    /* Turned to face whoever is looking at it, where it was facing away.
+     *
+     * A surface drawn from behind its own normal has nowhere to go in what
+     * follows: the angle to the eye is past a right angle, and clamped back
+     * to something a cosine will take it becomes exactly grazing — which is
+     * the one place a Fresnel term goes to a mirror. So the surface reflects
+     * the whole room whatever colour it was, and a car comes out a wash of
+     * grey with its paint nowhere in it.
+     *
+     * Which happens to a whole model at a time. A converted scan states its
+     * normals the other way round from its winding and every triangle on it
+     * is drawn from behind — a Smart Roadster off one of the file converters
+     * draws every one of its 28 colours as the same pale grey, its near-black
+     * tyres included, and comes back the colours it states once its normals
+     * are turned round.
+     *
+     * Flipping is what a renderer does with a surface it draws from both
+     * sides, which this one does — it never culls a back face. And it costs
+     * nothing where the normals are right: a front-facing surface is already
+     * facing the eye, so there is nothing to turn.
+     */
+    if (dot(n, v) < 0.0) n = -n;
     vec3 r = reflect(-v, n);
     float nov = clamp(dot(n, v), 1e-4, 1.0);
     float a = max(roughness * roughness, 1e-3);
@@ -675,10 +855,28 @@ ${SHADOW_LOOKUP}
     float sunSpecular = uPaletteSize > 0 && uMode == 0
       ? texelFetch(uPalette, ivec2(slot, 5), 0).a : 1.0;
 
+    /* And the shape of what this surface returns of the world around it: how
+     * fast it comes up as the surface turns away, and how far it is let get.
+     * A file that stated neither is the plain Schlick, which is what the two
+     * defaults are. */
+    vec2 shape = vec2(${SCHLICK_POWER}.0, 1.0);
+    /* How tight this surface answers a light with. A game writes it apart
+     * from how rough the surface is — a car's paint answers the sun with a
+     * sharper highlight than the roughness it shows the room — and where it
+     * says nothing the roughness is what it answers with. */
+    float lightA = a;
+    bool additive = false;
+    if (uPaletteSize > 0 && uMode == 0) {
+      vec4 answer = texelFetch(uPalette, ivec2(slot, 6), 0);
+      shape = answer.rg;
+      if (answer.b > 0.0) lightA = max(answer.b * answer.b, 1e-3);
+      additive = answer.a > 0.5;
+    }
+
     vec3 direct = vec3(0.0);
     if (nol > 0.0) {
-      vec3 specular = fresnelSchlick(f0, voh)
-        * (distributionGgx(noh, a) * visibilitySmith(nov, nol, a) * sunSpecular);
+      vec3 specular = fresnelStated(f0, voh, shape.x, shape.y)
+        * (distributionGgx(noh, lightA) * visibilitySmith(nov, nol, lightA) * sunSpecular);
       vec3 beneath = (diffuseColour / PI + specular) * under;
       if (coatF0 > 0.0) {
         float coatSpec = fresnelSchlick(vec3(coatF0), voh).r
@@ -690,8 +888,56 @@ ${SHADOW_LOOKUP}
       direct = beneath * SUN_COLOUR * nol * shadow;
     }
 
-    // The environment, which is what makes a curved surface read as a surface.
-    vec3 reflectance = environmentBrdf(f0, roughness, nov);
+    /* And the car's own lamps, as lights rather than as surfaces.
+     *
+     * [LIGHT_EXTRA_*] is a lamp written as where it is, which way it points,
+     * how far it reaches and how tight its cone. 20 of the cars to hand carry
+     * them — a cabin light over the seats, a boot light, the pool a headlamp
+     * throws — and the positions are the model's own, so they go through the
+     * same matrix the model does and follow it when an axis is flipped.
+     *
+     * Falls off as the inverse square, faded to nothing at the range the file
+     * states so a lamp lights its own corner of the car rather than all of
+     * it. No shadows: the map this draws with is the sun's, and a light in the
+     * cabin would need its own. */
+    for (int i = 0; i < uLightCount; i++) {
+      vec4 place = texelFetch(uLights, ivec2(i, 0), 0);
+      vec4 tint = texelFetch(uLights, ivec2(i, 1), 0);
+      vec4 aim = texelFetch(uLights, ivec2(i, 2), 0);
+      vec3 at = (uModel * vec4(place.xyz, 1.0)).xyz;
+      vec3 toward = at - vWorld;
+      float far = length(toward);
+      if (far > place.w) continue;
+      vec3 ld = toward / max(far, 1e-4);
+      float lambert = max(dot(n, ld), 0.0);
+      if (lambert <= 0.0) continue;
+      // Inverse square, and out at the stated range rather than trailing on.
+      float reach = 1.0 - far / place.w;
+      float fall = reach * reach / (1.0 + far * far);
+      if (tint.w > -1.0) {
+        // A cone, softened over the sharpness the file states.
+        vec3 way = normalize((uModel * vec4(aim.xyz, 0.0)).xyz);
+        float within = dot(-ld, way);
+        fall *= smoothstep(tint.w, mix(1.0, tint.w, 1.0 - aim.w * 0.9), within);
+      }
+      if (fall <= 0.0) continue;
+      vec3 lh = normalize(ld + v);
+      float lnoh = max(dot(n, lh), 0.0);
+      float lvoh = max(dot(v, lh), 0.0);
+      vec3 lspec = fresnelStated(f0, lvoh, shape.x, shape.y)
+        * (distributionGgx(lnoh, lightA) * visibilitySmith(nov, lambert, lightA) * sunSpecular);
+      direct += (diffuseColour / PI + lspec) * under * tint.rgb * lambert * fall;
+    }
+    /* The environment, which is what makes a curved surface read as a surface
+     * — and on car paint is the whole of what makes it read as paint.
+     *
+     * The split-sum fit integrates a Schlick over the lobe, so what is handed
+     * to it is this surface's own Fresnel already evaluated at this angle
+     * rather than its head-on base. For a material that stated nothing the
+     * two are the same reading; for one that stated a broad rise held under a
+     * low ceiling they are a body reflecting the room against a matte panel. */
+    vec3 reflectance = environmentBrdf(
+      fresnelStated(f0, nov, shape.x, shape.y), roughness, nov);
     vec3 ambient = (diffuseColour * environmentIrradiance(n)
       + environmentSpecular(r, roughness) * reflectance) * under;
     vec3 coatReflectance = vec3(0.0);
@@ -714,9 +960,54 @@ ${SHADOW_LOOKUP}
                                vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     float coverage = clamp(opacity + (1.0 - opacity) * max(mirrored, lensFilter), 0.0, 1.0);
 
+    /* What this surface gives off on its own, which nothing about the room
+     * changes: a lit dial is as lit in shadow as in the sun, and that is the
+     * whole of what makes it read as lit rather than as pale paint.
+     *
+     * The colour and the picture are two different materials rather than two
+     * halves of one — 29 of the cars' materials state a colour and bind no
+     * map, 89 bind a map and state no colour, and none does both — so the two
+     * multiply and whichever is absent stands at one. */
+    vec3 glow = vec3(0.0);
+    if (uPaletteSize > 0 && uMode == 0) {
+      vec4 given = texelFetch(uPalette, ivec2(slot, 7), 0);
+      glow = max(given.rgb, vec3(0.0));
+      int glowLayer = int(given.a + 0.5) - 1;
+      if (uUseTextures == 1 && glowLayer >= 0 && glow != vec3(0.0)) {
+        glow *= texture(uGlow, vec3(vUv, float(glowLayer))).rgb;
+      }
+    }
+
+    /* And what this part gives off as a lamp of the car's own.
+     *
+     * A car's lighting config names meshes rather than materials: one lamp
+     * housing wears the same red plastic as the next and they are told to
+     * light up differently, so this is a part's own and sits beside its lens
+     * rather than in the palette. 56 of the 135 cars to hand carry these, and
+     * they are the whole of what makes a lamp read as a lamp rather than as
+     * red plastic.
+     *
+     * Two colours, and the switch chooses: what it is with the lights on, and
+     * what it sits at with them off — a tail lamp is a dull red unlit and a
+     * bright one lit. */
+    if (uPartCount > 0 && uMode == 0) {
+      vec4 lamp = texelFetch(uParts, ivec2(vPart, uLightsOn == 1 ? 2 : 3), 0);
+      glow += max(lamp.rgb, vec3(0.0));
+    }
     // A marked material glows a little, so it reads even where it is in shadow.
-    vec3 lit = direct + ambient + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
-    fragColour = vec4(encodeSrgb(toneMap(lit)), marked ? 1.0 : coverage);
+    vec3 lit = direct + ambient + glow
+      + (marked ? vec3(0.35, 0.12, 0.01) : vec3(0.0));
+    /* Premultiplied, which is what lets a surface choose. The blend is
+     * one-minus-source-alpha over a colour already multiplied by its own
+     * coverage, so a material that covers what is behind it comes out exactly
+     * where it did — and one the file calls additive writes no coverage at
+     * all and is added to what is behind instead of standing in front of it.
+     * That is what a lamp's glow is: light on top of the thing it lies on. */
+    float wrote = marked ? 1.0 : coverage;
+    vec3 out3 = encodeSrgb(toneMap(lit)) * wrote;
+    // Only in the pass that blends: the opaque one writes with blending off,
+    // and a coverage of nought there would mean nothing at best.
+    fragColour = vec4(out3, additive && !marked && uPass == 1 ? 0.0 : wrote);
   }`;
 
   /* ------------------------------------------------------------- matrices */
@@ -922,6 +1213,11 @@ ${SHADOW_LOOKUP}
         finish: gl.getUniformLocation(program, 'uFinish'),
         bump: gl.getUniformLocation(program, 'uBump'),
         detail: gl.getUniformLocation(program, 'uDetail'),
+        glow: gl.getUniformLocation(program, 'uGlow'),
+        normalDetail: gl.getUniformLocation(program, 'uNormalDetail'),
+        lights: gl.getUniformLocation(program, 'uLights'),
+        lightCount: gl.getUniformLocation(program, 'uLightCount'),
+        lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -1087,6 +1383,15 @@ ${SHADOW_LOOKUP}
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, null);
 
+      // And one texel per light, three rows of them: see setLightSources.
+      this.lightTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+
       this.textureArray = gl.createTexture();
       this.textureLayers = 0;
       this.finishArray = gl.createTexture();
@@ -1095,6 +1400,13 @@ ${SHADOW_LOOKUP}
       this.bumpLayers = 0;
       this.detailArray = gl.createTexture();
       this.detailLayers = 0;
+      this.glowArray = gl.createTexture();
+      this.glowLayers = 0;
+      this.normalDetailArray = gl.createTexture();
+      this.normalDetailLayers = 0;
+      this.lightSources = [];
+      this.lightCount = 0;
+      this.lightsOn = false;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -1122,13 +1434,67 @@ ${SHADOW_LOOKUP}
      * The scene's parts: what each is called, where its middle is, and how big
      * it is. The centres drive the explode; the rest is what a click reports.
      */
+    /**
+     * The lamps a car carries as lights rather than as surfaces.
+     *
+     * Each is where it is, which way it points, how far it reaches and how
+     * tight its cone — three texels a light, the same way the parts are held.
+     * The positions are in the model's own space and are put through uModel
+     * in the shader, so flipping an axis or standing a Z-up car up takes the
+     * lights with it.
+     */
+    setLightSources(lights) {
+      const gl = this.gl;
+      this.lightSources = Array.isArray(lights) ? lights.slice(0, MAX_LIGHTS) : [];
+      this.lightCount = this.lightSources.length;
+      this.dirty = true;
+      if (!this.lightCount) return;
+      const data = new Float32Array(this.lightCount * 12);
+      this.lightSources.forEach((light, i) => {
+        const at = i * 4;
+        const position = light.position || [0, 0, 0];
+        data[at] = position[0];
+        data[at + 1] = position[1];
+        data[at + 2] = position[2];
+        data[at + 3] = Math.max(light.range || 1, 1e-3);
+        const colour = light.colour || [1, 1, 1];
+        const to = (this.lightCount + i) * 4;
+        data[to] = Math.max(0, colour[0]);
+        data[to + 1] = Math.max(0, colour[1]);
+        data[to + 2] = Math.max(0, colour[2]);
+        /* A cone as the cosine of its half-angle, which is what the shader
+         * compares against. A spot of 180 or none at all is a lamp that
+         * shines every way, and -1 is every direction at once. */
+        const spot = light.spot > 0 && light.spot < 180
+          ? Math.cos((light.spot / 2) * Math.PI / 180) : -1;
+        data[to + 3] = spot;
+        const way = light.direction || [0, -1, 0];
+        const length = Math.hypot(way[0], way[1], way[2]) || 1;
+        const on = (this.lightCount * 2 + i) * 4;
+        data[on] = way[0] / length;
+        data[on + 1] = way[1] / length;
+        data[on + 2] = way[2] / length;
+        data[on + 3] = Math.min(Math.max(light.sharpness, 0), 1) || 0.5;
+      });
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.lightCount, 3, 0,
+        gl.RGBA, gl.FLOAT, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /** Whether the car's lights are on. */
+    setLightsOn(on) {
+      this.lightsOn = on !== false;
+      this.dirty = true;
+    }
     setParts(parts) {
       const gl = this.gl;
       this.parts = Array.isArray(parts) ? parts : [];
       this.partCount = this.parts.length;
       this.selectedPart = -1;
       if (!this.partCount) { this.dirty = true; return; }
-      /* Two rows: where each part's middle is, and what colour of lens it is.
+      /* Four rows: where each part's middle is, what colour of lens it is, and
+       * the two colours it gives off as a lamp — lit and unlit.
        *
        * The second is a part's own and not its material's — a car's glass is
        * one grey picture however many lamps wear it, and what makes a Renault
@@ -1136,7 +1502,7 @@ ${SHADOW_LOOKUP}
        * the car's lighting config. Its `glass_fog` mesh wears the material its
        * `glass_platelight` mesh wears, and the two are given different
        * colours, so there is nowhere else for it to go. */
-      const data = new Float32Array(this.partCount * 8);
+      const data = new Float32Array(this.partCount * 16);
       this.parts.forEach((part, i) => {
         const centre = part.centre || [0, 0, 0];
         data[i * 4] = centre[0];
@@ -1149,9 +1515,27 @@ ${SHADOW_LOOKUP}
         data[at + 1] = lens ? lens[1] : 1;
         data[at + 2] = lens ? lens[2] : 1;
         data[at + 3] = lens ? 1 : 0;
+        /* And what this part gives off as a lamp, lit and unlit. A car's
+         * lighting config names meshes rather than materials — one lamp
+         * housing wears the same red plastic as the next and they are told to
+         * light up differently — so this belongs beside the lens and not in
+         * the palette. */
+        const lamp = part.lamp || null;
+        const litAt = (this.partCount * 2 + i) * 4;
+        const darkAt = (this.partCount * 3 + i) * 4;
+        for (let k = 0; k < 3; k++) {
+          data[litAt + k] = lamp && lamp.on ? Math.max(0, lamp.on[k] || 0) : 0;
+          data[darkAt + k] = lamp && lamp.off ? Math.max(0, lamp.off[k] || 0) : 0;
+        }
+        data[litAt + 3] = lamp ? 1 : 0;
+        /* And whether the car's config takes this part away. A number plate a
+         * livery does not want is the commonest thing a model replacement
+         * says, and it is said per skin — so it is held here, where changing
+         * the skin can change it without the scene being built again. */
+        data[darkAt + 3] = part.hidden ? 1 : 0;
       });
       gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 2, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 4, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this._updateRadius();
@@ -1176,13 +1560,16 @@ ${SHADOW_LOOKUP}
      * they connect to the model, which is what the per-polygon material index
      * refers to.
      *
-     * Five rows: the diffuse colour with the texture layer in alpha, the
+     * Seven rows: the diffuse colour with the texture layer in alpha, the
      * specular colour with roughness in alpha, then opacity, the material
      * group, the metallic-roughness map's layer and the metalness that map
      * scales, then the relief — which map shapes the surface, how strongly and
-     * which kind it is — and last the clear coat, which is how much a mirror
+     * which kind it is — then the clear coat, which is how much a mirror
      * laid over the whole reflects and how polished that mirror is, beside how
-     * the file asked to be blended and the threshold it asked to be cut at.
+     * the file asked to be blended and the threshold it asked to be cut at,
+     * then the grain, and last the shape of the Fresnel: how fast what the
+     * surface returns of the world rises as it turns away, and how far it is
+     * let get.
      *
      * Floats, because the values are linear and eight bits of a linear ramp
      * bands badly in the darks — the Mercedes' interior sits at 0.05.
@@ -1199,7 +1586,7 @@ ${SHADOW_LOOKUP}
         return;
       }
       const width = materials.length;
-      const data = new Float32Array(width * 6 * 4);
+      const data = new Float32Array(width * PALETTE_ROWS * 4);
       //: Which slots are see-through, which is the same question the shader
       //: asks of the same two numbers a few lines from the bottom.
       const blendedSlots = new Uint8Array(width);
@@ -1280,6 +1667,49 @@ ${SHADOW_LOOKUP}
          * nothing takes all of it. */
         data[(width * 5 + i) * 4 + 3] = typeof material.specularWeight === 'number'
           ? Math.min(1, Math.max(0, material.specularWeight)) : 1;
+        /* The shape that goes with that grain: which layer, and how much of
+         * its slope is taken. Held inside the unit range — the files write
+         * -4 and 1000 among the 575 that state one, and neither is a share of
+         * anything — with a median of 1, which is the whole of it. */
+        const fineLayer = Number.isInteger(material.detailNormalLayer)
+          ? material.detailNormalLayer : -1;
+        data[(width * 8 + i) * 4] = Math.max(0, fineLayer + 1);
+        data[(width * 8 + i) * 4 + 1] = typeof material.detailNormalBlend === 'number'
+          ? Math.min(1, Math.max(0, material.detailNormalBlend)) : 1;
+        /* And the shape of the Fresnel this surface returns the world with.
+         *
+         * A file that says nothing gets the plain Schlick — a fifth power,
+         * with nothing over it — which is what every reader but a game's own
+         * means by a reflection. A `.kn5` says both, and both matter: the
+         * exponent is what makes a windscreen a sheet of glass across the
+         * whole of itself rather than a rim of light at its edge, and the
+         * ceiling is what keeps a rubber seal from turning to chrome there. */
+        data[(width * 6 + i) * 4] = typeof material.fresnelExp === 'number'
+          ? Math.min(SCHLICK_POWER, Math.max(0, material.fresnelExp)) : SCHLICK_POWER;
+        data[(width * 6 + i) * 4 + 1] = typeof material.fresnelCeiling === 'number'
+          ? Math.min(1, Math.max(0, material.fresnelCeiling)) : 1;
+        /* How tight this surface answers a light with, where it says so apart
+         * from how rough it is. Nought is a material that says nothing, and
+         * then its own roughness stands. */
+        data[(width * 6 + i) * 4 + 2] = typeof material.sunRoughness === 'number'
+          ? Math.min(1, Math.max(0.05, material.sunRoughness)) : 0;
+        // And whether what it returns is added on top of what is behind it.
+        data[(width * 6 + i) * 4 + 3] = material.additive ? 1 : 0;
+        /* And what it gives off on its own, with the picture of that where it
+         * has one.
+         *
+         * Not held under white: a game states 15 for a dash LED, which is how
+         * much brighter than the room the thing reads rather than a shade it
+         * is painted. The tone map at the end is what brings it back down, and
+         * what it leaves is a blown white core with the colour around it,
+         * which is what a small bright light looks like. */
+        const glow = material.emissive || [0, 0, 0];
+        for (let k = 0; k < 3; k++) {
+          data[(width * 7 + i) * 4 + k] = Math.max(0, glow[k] || 0);
+        }
+        const glowLayer = Number.isInteger(material.emissiveLayer)
+          ? material.emissiveLayer : -1;
+        data[(width * 7 + i) * 4 + 3] = Math.max(0, glowLayer + 1);
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -1303,7 +1733,7 @@ ${SHADOW_LOOKUP}
       }
       this.blendedSlots = blendedSlots;
       gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, 6, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, PALETTE_ROWS, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this.dirty = true;
@@ -1354,6 +1784,31 @@ ${SHADOW_LOOKUP}
     async setDetailTextures(images, edge = 1024) {
       this.detailLayers = images.length;
       return this._uploadArray(this.detailArray, images, this.gl.SRGB8_ALPHA8, edge);
+    }
+
+    /**
+     * The pictures of what a surface gives off, where it gives off a shape
+     * rather than a flat colour.
+     *
+     * sRGB, like the base colour and unlike the maps that carry numbers: a
+     * glow map is a picture of a lit dial or a lit badge, drawn the way a
+     * picture is drawn.
+     */
+    async setGlowTextures(images, edge = 1024) {
+      this.glowLayers = images.length;
+      return this._uploadArray(this.glowArray, images, this.gl.SRGB8_ALPHA8, edge);
+    }
+
+    /**
+     * The shape that goes with a grain, tiled the same number of times.
+     *
+     * Not sRGB: a normal map is three numbers about which way a surface faces
+     * rather than a picture of it, and decoded through a display curve every
+     * one of them comes out wrong.
+     */
+    async setNormalDetailTextures(images, edge = 1024) {
+      this.normalDetailLayers = images.length;
+      return this._uploadArray(this.normalDetailArray, images, this.gl.RGBA8, edge);
     }
 
     async _uploadArray(target, images, internalFormat, edge = 1024) {
@@ -1996,13 +2451,25 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE6);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.detailArray);
       gl.uniform1i(this.uniforms.detail, 6);
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.glowArray);
+      gl.uniform1i(this.uniforms.glow, 7);
+      gl.activeTexture(gl.TEXTURE8);
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.uniform1i(this.uniforms.lights, 8);
+      gl.activeTexture(gl.TEXTURE9);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.normalDetailArray);
+      gl.uniform1i(this.uniforms.normalDetail, 9);
+      gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
+      gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
         ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0
-          || this.detailLayers > 0)
+          || this.detailLayers > 0 || this.glowLayers > 0
+          || this.normalDetailLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,
@@ -2023,7 +2490,9 @@ ${SHADOW_LOOKUP}
       if (this.hasTransparency && this.mode === 0) {
         gl.uniform1i(this.uniforms.pass, 1);
         gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        // Premultiplied: the shader hands back a colour already multiplied by
+        // its own coverage, so a material can write no coverage and be added.
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
         // Its own half where that is known, the whole mesh where it is not.
         const from = this.opaqueTriangles * 3 * 4;

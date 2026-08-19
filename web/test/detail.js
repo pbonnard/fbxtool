@@ -1,6 +1,7 @@
 /* The grain a surface is tiled over with — a game's `txDetail`.
  *
- *   node web/test/detail.js <out-dir> <plain.kn5> <grained.kn5> <flat.kn5> <deep.kn5>
+ *   node web/test/detail.js <out-dir> <plain.kn5> <grained.kn5> <flat.kn5>
+ *       <deep.kn5> <dummy.kn5>
  *
  * A car's interior is one atlas of flat panels with the leather, the carpet
  * and the carbon laid over them, tiled sixty or a hundred times across: the
@@ -21,9 +22,13 @@
  * its own average, so it must do nothing at all — the strictest thing a grain
  * can be asked, and the one that says which light the multiply happened in:
  * read as the file writes it rather than as the card decodes it, a flat grain
- * over a grey panel turns it white. The last is dark enough that taking it as
+ * over a grey panel turns it white. One is dark enough that taking it as
  * neutral asks for forty-seven times the light back, where eight is as far as
- * anything here will lighten a surface.
+ * anything here will lighten a surface. The last is a flat one in a colour —
+ * pure red, which is the slot filled in and never authored, and a third of
+ * the detail maps in the cars to hand are one of these. Its average is grey
+ * to a single number and red to three, so neutralised by the one it comes
+ * back three times its own red and paints the panel with it.
  *
  * And each has to leave that way too. Neither glTF nor FBX has a second set of
  * coordinates to tile a map by, so a grain travels only by being multiplied
@@ -76,10 +81,11 @@ async function load(page, file) {
 }
 
 async function main() {
-  const [outDir, plainFile, grainedFile, flatFile, deepFile] = process.argv.slice(2);
-  if (!outDir || !plainFile || !grainedFile || !flatFile || !deepFile) {
+  const [outDir, plainFile, grainedFile, flatFile, deepFile, dummyFile]
+    = process.argv.slice(2);
+  if (!outDir || !plainFile || !grainedFile || !flatFile || !deepFile || !dummyFile) {
     console.error('usage: node web/test/detail.js <out-dir> '
-      + '<plain.kn5> <grained.kn5> <flat.kn5> <deep.kn5>');
+      + '<plain.kn5> <grained.kn5> <flat.kn5> <deep.kn5> <dummy.kn5>');
     process.exit(2);
   }
   if (!fs.existsSync(PAGE)) {
@@ -137,6 +143,16 @@ async function main() {
     [0, 1, 2].every((k) => Math.abs(flat[k] - plain[k]) <= 10),
     `rgb(${flat}) against rgb(${plain})`);
 
+  const dummy = await load(page, dummyFile);
+  /* The same question asked in a colour, which is where reading a grain's
+   * average as one number rather than three shows. A Jaguar Mk2's paint names
+   * a sixteen-pixel square of pure red here and its four skins are a red one
+   * and three in pale green; drawn with this grain taken for a grain, all four
+   * come out the red, liveries and previews notwithstanding. */
+  check('a flat grain in a colour does not paint the panel with it',
+    [0, 1, 2].every((k) => Math.abs(dummy[k] - plain[k]) <= 10),
+    `rgb(${dummy}) against rgb(${plain})`);
+
   const deep = await load(page, deepFile);
   /* A grain dark enough that taking it as neutral asks for forty-seven times
    * the light back gets eight, which is as far as the viewer will lighten
@@ -152,7 +168,7 @@ async function main() {
   console.log('and the same cubes written out and opened again');
   for (const [label, source, from, cast] of [
     ['grained', grained, grainedFile, true], ['flat', flat, flatFile, false],
-    ['deep', deep, deepFile, false]]) {
+    ['dummy', dummy, dummyFile, false], ['deep', deep, deepFile, false]]) {
     for (const format of ['glb', 'fbx']) {
       await load(page, from);
       written.length = 0;

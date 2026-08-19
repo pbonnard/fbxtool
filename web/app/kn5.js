@@ -48,6 +48,7 @@ const FbxKn5 = (function () {
     txDiffuse: 'DiffuseColor',
     txNormal: 'NormalMap',
     txGlow: 'EmissiveColor',
+    txEmissive: 'EmissiveColor',
   };
 
   /**
@@ -172,6 +173,126 @@ const FbxKn5 = (function () {
   const LAMP_SECTION = /^\s*\[(REFRACTING_HEADLIGHT[^\]]*)\]/;
   const LAMP_KEY = /^[ \t]*(SURFACE|GLASS_COLOR|EXTRA_GLASS_COLORIZATION)[ \t]*=([^;\n]*)/i;
 
+  /* The two kinds of section a car's lighting is written in: the meshes that
+   * light up, and the lights themselves. */
+  const GLOW_SECTION = /^[ \t]*\[(EMISSIVE[^\]]*)\]/i;
+  const LIGHT_SECTION = /^[ \t]*\[(LIGHT_EXTRA[^\]]*)\]/i;
+  const LIGHT_KEY = /^[ \t]*([A-Z_0-9]+)[ \t]*=([^;\n]*)/i;
+
+  /**
+   * One `COLOR = r, g, b, level` out of a lighting config.
+   *
+   * The triple is a hue and the fourth number is how bright: a lamp is written
+   * `220, 33, 33, 1` by one author and `5, 5, 5, 2` by another, and neither is
+   * a colour in the nought-to-one the rest of this works in. Of the 2023 such
+   * triples across the cars to hand, 80% have a channel above one, their
+   * median largest channel is 10 and their ninetieth is 150 — so the triple
+   * says what colour and says nothing about how much.
+   *
+   * Divided by its own largest channel it becomes that hue with its brightest
+   * channel at one, and the level then means what it says. A level of nought
+   * is a lamp that is off, which is a thing these files write.
+   */
+  function lampColour(value) {
+    const numbers = String(value).split(',').map((one) => Number(one.trim()));
+    if (numbers.length < 3 || numbers.slice(0, 3).some((c) => !Number.isFinite(c))) return null;
+    const rgb = numbers.slice(0, 3).map((c) => Math.max(0, c));
+    const peak = Math.max(...rgb);
+    if (!peak) return [0, 0, 0];
+    const level = numbers.length > 3 && Number.isFinite(numbers[3])
+      ? Math.max(0, numbers[3]) : 1;
+    return rgb.map((c) => (c / peak) * level);
+  }
+
+  /** A `POSITION = x, y, z`, in the car's own space. */
+  function lampVector(value) {
+    const numbers = String(value).split(',').map((one) => Number(one.trim()));
+    if (numbers.length < 3 || numbers.slice(0, 3).some((c) => !Number.isFinite(c))) return null;
+    return numbers.slice(0, 3);
+  }
+
+  /**
+   * What a car's lighting config says lights up, and what lights it.
+   *
+   * Two things, read in one walk because they are written in one file.
+   *
+   * `[EMISSIVE_*]` names meshes and says what colour each goes when the lights
+   * are on, and often what colour it sits at when they are off — a tail lamp
+   * that is a dull red unlit and a bright one lit. 56 of the 135 cars to hand
+   * carry them, 1544 sections between them, and they are the whole of what
+   * makes a car's lamps read as lamps rather than as red plastic.
+   *
+   * `[LIGHT_EXTRA_*]` is a lamp as a light rather than as a surface: where it
+   * is, which way it points, how far it reaches and how tight its cone. 20
+   * cars carry those, 100 between them.
+   *
+   * Nothing here reads what each is bound to. A file says whether a lamp
+   * follows the headlights, the brakes, the indicators or a door, and this
+   * has one switch rather than a dashboard — so what it offers is the car
+   * with its lights on, all of them at once.
+   */
+  function carLighting(text) {
+    const lamps = new Map();
+    const lights = [];
+    let kind = '';
+    let meshes = [];
+    let on = null;
+    let off = null;
+    let light = null;
+    const close = () => {
+      if (kind === 'glow' && (on || off)) {
+        for (const name of meshes) {
+          const at = name.toLowerCase();
+          /* A section stating only one of the two colours has one colour, and
+           * the lamp is that colour whichever way the switch is: a tail lamp
+           * written with an `OFF_COLOR` alone is a lamp that sits red. */
+          if (!lamps.has(at)) lamps.set(at, { on: on || off, off: off || [0, 0, 0] });
+        }
+      }
+      if (kind === 'light' && light && light.position && light.colour) {
+        lights.push(light);
+      }
+      kind = ''; meshes = []; on = null; off = null; light = null;
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+      if (line.trimStart().startsWith('[')) {
+        close();
+        if (GLOW_SECTION.test(line)) kind = 'glow';
+        else if (LIGHT_SECTION.test(line)) {
+          kind = 'light';
+          light = { position: null, direction: null, colour: null,
+            range: 6, spot: 0, sharpness: 0.5 };
+        }
+        continue;
+      }
+      if (!kind) continue;
+      const setting = LIGHT_KEY.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      if (kind === 'glow') {
+        if (key === 'NAME') meshes = value.split(',').map((n) => n.trim()).filter(Boolean);
+        else if (key === 'COLOR') on = lampColour(value);
+        else if (key === 'OFF_COLOR') off = lampColour(value);
+        continue;
+      }
+      if (key === 'POSITION') light.position = lampVector(value);
+      else if (key === 'DIRECTION') light.direction = lampVector(value);
+      else if (key === 'COLOR') light.colour = lampColour(value);
+      else if (key === 'RANGE') {
+        const range = Number(value);
+        if (Number.isFinite(range) && range > 0) light.range = range;
+      } else if (key === 'SPOT') {
+        const spot = Number(value);
+        if (Number.isFinite(spot)) light.spot = Math.min(Math.max(spot, 0), 180);
+      } else if (key === 'SPOT_SHARPNESS') {
+        const sharp = Number(value);
+        if (Number.isFinite(sharp)) light.sharpness = Math.min(Math.max(sharp, 0), 1);
+      }
+    }
+    close();
+    return { lamps, lights };
+  }
   /**
    * What colour each lamp lens is, out of a car's own lighting config.
    *
@@ -444,6 +565,19 @@ const FbxKn5 = (function () {
     const textures = [];
     for (let i = 0; i < count; i++) {
       const kind = cursor.i32();
+      /* A slot of kind nought is an empty one, and is the whole of the record:
+       * no name, no length, no bytes.
+       *
+       * Three of the 125 cars to hand open with one — a 53 MB Forester, a
+       * 313 MB Citroën and a 388 MB Renault — and read as though it were a
+       * texture it takes the next entry's kind for a name length and walks off
+       * the table four bytes in. All three were refused as damaged at byte 27,
+       * which is a whole car turned away over an empty slot.
+       *
+       * Counted, since the table says how many entries it has and this is one
+       * of them; kept out of what is handed on, since a texture with no name
+       * is not one anything can ask for. */
+      if (kind === 0) continue;
       const name = cursor.text();
       const size = cursor.u32();
       // A slot marked inactive still carries its bytes; the game just does not
@@ -453,7 +587,19 @@ const FbxKn5 = (function () {
     return textures;
   }
 
-  function readMaterials(cursor) {
+  /**
+   * The materials, with whatever the car's config restates about them put
+   * where the file's own numbers were.
+   *
+   * A `[SHADER_REPLACEMENT_*]` beside the car lists `PROP_n = name, value`,
+   * and those names are the very ones a `.kn5` states about a surface —
+   * `fresnelEXP`, `ksDiffuse`, `isAdditive`, `detailUVMultiplier`. Putting
+   * them here rather than anywhere downstream means everything that reads a
+   * material reads the restated one, without a second path for it: 102 of the
+   * 123 such sections across the cars to hand are written beside the car
+   * rather than in a skin, which is what makes here the right place.
+   */
+  function readMaterials(cursor, restated) {
     const count = cursor.i32();
     if (count < 0) throw new Error(`the material table claims ${count} entries`);
     const materials = [];
@@ -474,7 +620,21 @@ const FbxKn5 = (function () {
       for (let k = 0; k < slotCount; k++) {
         slots.push({ slot: cursor.text(), number: cursor.i32(), texture: cursor.text() });
       }
-      materials.push({ name, shader, blend, alphaTested, depthMode, props, slots });
+      const said = restated && restated.get(name.toLowerCase());
+      let shading = shader;
+      let blending = blend;
+      if (said) {
+        for (const [key, value] of said.props) {
+          props.set(key, [value, [0, 0], [0, 0, 0], [0, 0, 0, 0]]);
+        }
+        if (said.shader) shading = said.shader;
+        // A surface the config calls see-through is one, whatever the model
+        // was written with: the two are the same statement in two files.
+        if (said.transparent === true) blending = 1;
+        else if (said.transparent === false && blending === 1) blending = 0;
+      }
+      materials.push({ name, shader: shading, blend: blending, alphaTested,
+        depthMode, props, slots });
     }
     return materials;
   }
@@ -584,7 +744,7 @@ const FbxKn5 = (function () {
 
   /* ------------------------------------------------------------------ read */
 
-  function parse(bytes) {
+  function parse(bytes, options) {
     const warnings = [];
     const cursor = new Cursor(bytes);
     cursor.skip(6);
@@ -597,7 +757,7 @@ const FbxKn5 = (function () {
     }
 
     const textures = readTextures(cursor);
-    const materials = readMaterials(cursor);
+    const materials = readMaterials(cursor, options && options.shaders);
 
     const objects = [];
     const connections = [];
@@ -697,14 +857,38 @@ const FbxKn5 = (function () {
       if (material.alphaTested) {
         props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
       }
-      // What the surface gives off on its own. `ksEmissive` is written as a
-      // colour when it is one and as a single number when it is not.
+      /* What the surface gives off on its own.
+       *
+       * `ksEmissive` is written as a colour when it is one and as a single
+       * number when it is not, and it goes well past white — a Honda's dash
+       * LED states 15, a Mercedes' display 10 — because it is a light rather
+       * than a shade of paint.
+       *
+       * The colour and the map are two different materials rather than two
+       * halves of one. Of the cars to hand, 29 state a colour and bind no map,
+       * 89 bind a map and state no colour, and not one does both: a dial or a
+       * display is the map, and an LED is the colour.
+       *
+       * So a map with no colour beside it is taken as white, times whatever
+       * level the file states. That level is the whole of what keeps a brake
+       * disc dark: `txGlow` is bound almost only by `ksBrakeDisc` — 36 of the
+       * 37 that bind it — and its `glowLevel` is the heat in the disc, which
+       * is nought in a car standing still. Read as a map to be drawn at full
+       * strength, every car here parks with its brakes glowing.
+       */
       const emissive = material.props.get('ksEmissive');
-      if (emissive) {
-        const colour = emissive[2].some((v) => v) ? emissive[2]
-          : [emissive[0], emissive[0], emissive[0]];
-        props.push(p70('EmissiveColor', 'Color', ...colour.map(D)));
+      const stated = emissive && emissive[2].some((v) => v) ? emissive[2]
+        : [scalarOf(material, 'ksEmissive', 0), scalarOf(material, 'ksEmissive', 0),
+          scalarOf(material, 'ksEmissive', 0)];
+      const glows = material.slots.some((entry) => entry.slot === 'txGlow'
+        || entry.slot === 'txEmissive');
+      if (stated.some((v) => v)) {
+        props.push(p70('EmissiveColor', 'Color', ...stated.map(D)));
         props.push(p70('EmissiveFactor', 'Number', D(1)));
+      } else if (glows) {
+        props.push(p70('EmissiveColor', 'Color', D(1), D(1), D(1)));
+        props.push(p70('EmissiveFactor', 'Number',
+          D(Math.max(scalarOf(material, 'glowLevel', 1), 0))));
       }
       // Then everything the file said, under the name it said it with, so that
       // a shader parameter with no FBX spelling is still there to be read. A
@@ -953,7 +1137,7 @@ const FbxKn5 = (function () {
     };
   }
 
-  return { looksLikeKn5, lensColours, parse, placementOf, NODE_CLASSES };
+  return { looksLikeKn5, lensColours, carLighting, parse, placementOf, NODE_CLASSES };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxKn5;

@@ -2566,6 +2566,20 @@ def dds_bc3(alpha=(255, 0), colours=(0xF800, 0x001F)) -> bytes:
             + struct.pack("<HHI", *colours, 0))
 
 
+def dds_bc2(alphas=tuple(range(16)), colours=(0xF800, 0x001F)) -> bytes:
+    """One 4x4 BC2 tile: sixteen four-bit alphas, then a colour tile.
+
+    BC2 states an alpha a pixel straight, in the eight bytes in front of the
+    colour half rather than interpolated out of two endpoints the way BC3
+    does. *alphas* is those sixteen nibbles in reading order.
+    """
+    packed = 0
+    for at, value in enumerate(alphas):
+        packed |= (value & 0xF) << (4 * at)
+    return (_dds_header(4, 4, fourcc=b"DXT3") + packed.to_bytes(8, "little")
+            + struct.pack("<HHI", *colours, 0))
+
+
 def dds_bgra(width: int, height: int, pixels: bytes) -> bytes:
     """An uncompressed B8G8R8A8 surface — *pixels* is BGRA, as stored."""
     return _dds_header(width, height, bits=32,
@@ -2673,17 +2687,24 @@ def kn5_mesh(name: str, vertices, indices, material: int = 0, *,
     return bytes(out)
 
 
-def build_kn5(version: int = 6, *, textures=(), materials=(), tree: bytes = b"") -> bytes:
+def build_kn5(version: int = 6, *, textures=(), materials=(), tree: bytes = b"",
+              empty_slots: int = 0) -> bytes:
     """An Assetto Corsa model file from the parts above.
 
     *textures* is ``(name, bytes)`` pairs, written as the game writes them —
     a kind, a name, a length and the payload — and *materials* is already
     encoded by :func:`kn5_material`.
+
+    *empty_slots* writes that many empty entries in front of the real ones: a
+    kind of nought and nothing else, which three of the cars to hand open with.
+    They count towards the table's own total.
     """
     out = bytearray(KN5_MAGIC + struct.pack("<i", version))
     if version > 5:
         out += struct.pack("<i", 0)
-    out += struct.pack("<i", len(textures))
+    out += struct.pack("<i", len(textures) + empty_slots)
+    for _ in range(empty_slots):
+        out += struct.pack("<i", 0)
     for name, payload in textures:
         out += struct.pack("<i", 1) + _kn5_text(name)
         out += struct.pack("<I", len(payload)) + payload
@@ -2710,16 +2731,20 @@ _KN5_CUBE_FACES = [
 ]
 
 
-def kn5_cube(size: float = 1.0):
+def kn5_cube(size: float = 1.0, *, inward: bool = False):
     """A cube as ``(vertices, indices)`` for :func:`kn5_mesh`.
 
     Normals point out from the centre, so the shading reads as a rounded box
     rather than a flat one — which is beside the point here, but a vertex the
     game's layout has no room to leave out has to hold something true.
+
+    *inward* turns them round without touching the winding, which is a whole
+    model drawn from behind its own normals. Converters produce it: a Smart
+    Roadster out of one of them states every normal the wrong way about.
     """
     vertices = []
     for corner in _KN5_CUBE_CORNERS:
-        length = math.sqrt(3.0)
+        length = math.sqrt(3.0) * (-1.0 if inward else 1.0)
         normal = tuple(v / length for v in corner)
         vertices.append((tuple(v * size for v in corner), normal, (0.5, 0.5),
                          (1.0, 0.0, 0.0)))

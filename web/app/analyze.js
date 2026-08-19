@@ -274,6 +274,9 @@ const FbxAnalyze = (function () {
     ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
     ['detail', /^(txdetail|detail|detailmap|detailtexture)$/i],
+    // The shape that goes with that grain. A game spells it one way and
+    // keeps it in a slot of its own; nothing else writes one at all.
+    ['detailNormal', /^(txnormaldetail|detailnormal|detailnormalmap)$/i],
   ];
 
   /**
@@ -509,7 +512,7 @@ const FbxAnalyze = (function () {
     const roughness = clamp(stated !== null ? stated
       : fromShininess(shininess), 0.05, 1);
 
-    /* How much of the sun's highlight the surface takes.
+    /* How much of the sun's highlight the surface takes, and how tight.
      *
      * `ksSpecular` is the peak of the Blinn-Phong highlight a game's shader
      * adds, and it is the third of a trio: `ksAmbient` and `ksDiffuse` weigh
@@ -526,12 +529,40 @@ const FbxAnalyze = (function () {
      * cannot be honoured by a lobe that conserves energy at all. So this only
      * ever takes a highlight away and never invents one.
      *
-     * A file that states nothing — which is every file but a `.kn5` — keeps
-     * the whole of it.
+     * `sunSpecular` is the same number written for the sun alone, and where a
+     * material states one it is the one that belongs here: `ksSpecular` then
+     * describes the surface generally — what it returns of the room — and this
+     * describes the one light in the sky. 868 materials state it and 846 of
+     * those state something other than their `ksSpecular`, 403 of them nought:
+     * a surface that reflects its surroundings and takes no highlight, which
+     * read off `ksSpecular` alone comes up polished.
+     *
+     * `sunSpecularEXP` goes with it and is the width of that lobe rather than
+     * of the surface. Its median is 90 against the 20 or so a `ksSpecularEXP`
+     * usually is, and 852 of the 868 differ — so a car's paint answers the sun
+     * with a tighter highlight than the roughness it shows the room. Null
+     * where nothing says, and then the surface's own roughness stands.
+     *
+     * A file that states none of it — which is every file but a `.kn5` — keeps
+     * the whole of the highlight at the roughness it is.
      */
-    const stray = number(source.ksSpecular, null);
+    const sunPeak = number(source.sunSpecular, null);
+    const stray = sunPeak === null ? number(source.ksSpecular, null) : sunPeak;
     const specularWeight = stray === null ? 1
       : clamp(stray / SPECULAR_REFERENCE, 0, 1);
+    const sunShininess = number(source.sunSpecularEXP, null);
+    const sunRoughness = sunShininess === null || sunShininess <= 0 ? null
+      : clamp(fromShininess(sunShininess), 0.05, 1);
+
+    /* Whether what this surface returns is added on top of it or taken out of
+     * it. `isAdditive` is how a game's shader is told to put a reflection back
+     * — over the surface, or in place of some of it — and on a surface that is
+     * see-through it is the difference between a lamp's glow lying on what is
+     * behind it and hiding it. 1109 materials state one; 1015 of those are
+     * opaque, where there is nothing behind to add to and whatever the number
+     * means there it is not this, so only the 94 that also blend are taken.
+     */
+    const additive = number(source.isAdditive, 0) > 0;
 
     let opacity;
     if (pbr.opacity !== undefined && scalar(pbr.opacity) !== null) {
@@ -542,6 +573,30 @@ const FbxAnalyze = (function () {
       opacity = 1 - number(source.TransparencyFactor, 1 - number(source.Opacity, 1));
     }
 
+
+    /* How that reflection rises as the surface turns away, and how far it is
+     * let get.
+     *
+     * A Schlick term has one shape: a base at nothing rising to a mirror over
+     * a fifth power. The game's is the same sentence with both numbers loose
+     * — an exponent of its own, and a ceiling over the whole term — and a
+     * `.kn5` spends them. Of the 3427 materials across the 67 cars to hand
+     * that state a Fresnel, the exponent is 3.5 on car paint, 0 on the 626
+     * that write it that way, and fifteen other values besides; an exponent
+     * of nought is the term at its ceiling from every angle, and the median
+     * ceiling of that group is nothing at all.
+     *
+     * Both are needed or neither is worth reading. Left out, the fifth power
+     * says a rubber seal turns to chrome at its edge while the file's ceiling
+     * of 0.1 — the median across all of them — says it does not; and a
+     * windscreen whose base is nought and whose exponent is a half is a sheet
+     * of glass the whole way across, drawn matte.
+     *
+     * Null where nothing says so, which is every file but a `.kn5`, and then
+     * the plain unbounded Schlick every other reader means.
+     */
+    const fresnelExp = number(source.fresnelEXP, null);
+    const fresnelCeiling = number(source.fresnelMaxLevel, null);
 
     /* The clear coat over it, where the file states one.
      *
@@ -559,9 +614,16 @@ const FbxAnalyze = (function () {
     const coatShininess = number(source.CoatShininess, 1024);
     const coatRoughness = clamp(fromShininess(coatShininess), 0.05, 1);
 
-    // What the surface gives off on its own. Nothing here edits it, but a
-    // material carrying an emissive map and no colour beside it is a map that
-    // can never light anything, so the two travel together.
+    /* What the surface gives off on its own. Nothing here edits it, but a
+     * material carrying an emissive map and no colour beside it is a map that
+     * can never light anything, so the two travel together.
+     *
+     * Not held under white, which a colour is and a light is not: a game
+     * states 15 for a dash LED and 10 for a display, and those are how much
+     * brighter than the scene the thing is meant to read rather than a shade
+     * of paint. glTF's factor has to be inside the unit range and is clamped
+     * where it is written; FBX has no such rule and neither has the viewer,
+     * and clamping here made every LED merely white. */
     const emissive = scale(vector(source.EmissiveColor, [0, 0, 0]),
       number(source.EmissiveFactor, 1));
 
@@ -569,9 +631,13 @@ const FbxAnalyze = (function () {
       colour: albedo.map((v) => Math.max(0, v)),
       base: base.map((v) => Math.max(0, v)),
       specular: specularRgb.map((v) => clamp(v, 0, 1)),
-      emissive: emissive.map((v) => clamp(v, 0, 1)),
+      emissive: emissive.map((v) => Math.max(0, v)),
       roughness,
       specularWeight,
+      sunRoughness,
+      additive,
+      fresnelExp,
+      fresnelCeiling,
       coat,
       coatRoughness,
       opacity: clamp(opacity, 0, 1),
