@@ -4119,6 +4119,13 @@
         + `${skin.replaces === 1 ? '' : 's'}`
         + (skin.paints.length ? ` + ${skin.paints.length} paint`
           + `${skin.paints.length === 1 ? '' : 's'}` : '');
+      if (skin.paintLost) {
+        option.textContent += ' · paint not placed';
+        option.title = 'This skin states a colour, but no file among those '
+          + 'dropped says which material it is — usually the car\'s own '
+          + 'extension/ext_config.ini. Bring that with the car and the colour '
+          + 'lands on the body.';
+      }
       dom.skinSelect.appendChild(option);
     }
     dom.skinSelect.hidden = false;
@@ -4141,7 +4148,10 @@
       ? `${wearing.name}: ${wearing.replaces} texture(s) over the top of the car`
         + (wearing.paints.length
           ? `, and its paint on ${wearing.paints.map((p) => p.material).join(', ')}`
-          : '')
+          : (wearing.paintLost
+            ? ', but its paint stayed off — no file among those dropped says '
+              + 'which material it is (usually the car\'s extension/ext_config.ini)'
+            : ''))
       : 'The car as the file has it.');
     return textures;
   }
