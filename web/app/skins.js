@@ -713,6 +713,14 @@ const FbxSkins = (function () {
       skin.brightness = new Map([...carSays(skin.name),
         ...(skin.brightness || new Map())]);
       skin.paints = pair(named, skin.colours, materials, skin.brightness);
+      /* A skin that states a colour and ends with no material to put it on has
+       * lost its paint: nothing among the files that came with the car says
+       * which material the paint is, and not even the paint shop's own slot
+       * name reaches one — usually because the car's own
+       * `extension/ext_config.ini`, the one place a whole car declares it, was
+       * not among them. Marked so the car can say so rather than coming up
+       * unpainted as if nothing had gone wrong. */
+      skin.paintLost = !!skin.colours.length && !skin.paints.length && !named.length;
       /* And whether the picture of the paint is worth reading, which is for
        * the skins that came out of all that with nothing on the car.
        *

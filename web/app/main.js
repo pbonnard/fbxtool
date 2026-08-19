@@ -19,6 +19,7 @@
     geometrySelect: $('geometry-select'),
     skinSelect: $('skin-select'),
     modeSelect: $('mode-select'),
+    envSelect: $('env-select'),
     subdivSelect: $('subdiv-select'),
     upSelect: $('up-select'),
     flipButtons: [$('flip-x'), $('flip-y'), $('flip-z')],
@@ -4419,6 +4420,13 @@
         + `${skin.replaces === 1 ? '' : 's'}`
         + (skin.paints.length ? ` + ${skin.paints.length} paint`
           + `${skin.paints.length === 1 ? '' : 's'}` : '');
+      if (skin.paintLost) {
+        option.textContent += ' · paint not placed';
+        option.title = 'This skin states a colour, but no file among those '
+          + 'dropped says which material it is — usually the car\'s own '
+          + 'extension/ext_config.ini. Bring that with the car and the colour '
+          + 'lands on the body.';
+      }
       dom.skinSelect.appendChild(option);
     }
     dom.skinSelect.hidden = false;
@@ -4445,7 +4453,10 @@
       ? `${wearing.name}: ${wearing.replaces} texture(s) over the top of the car`
         + (wearing.paints.length
           ? `, and its paint on ${wearing.paints.map((p) => p.material).join(', ')}`
-          : '')
+          : (wearing.paintLost
+            ? ', but its paint stayed off — no file among those dropped says '
+              + 'which material it is (usually the car\'s extension/ext_config.ini)'
+            : ''))
       : 'The car as the file has it.');
     return textures;
   }
@@ -4938,6 +4949,11 @@
       modeChosen = true;
       viewer.setMode(Number(dom.modeSelect.value));
     });
+    dom.envSelect.addEventListener('change', () => {
+      if (!viewer) return;
+      viewer.setEnvironment(dom.envSelect.value);
+      try { window.localStorage.setItem('fbxtool.env', dom.envSelect.value); } catch (error) { /* no storage */ }
+    });
     dom.subdivSelect.addEventListener('change', () => {
       subdivisionLevel = Number(dom.subdivSelect.value) || 0;
       redraw();
@@ -5045,6 +5061,16 @@
     }
     try {
       viewer = new FbxViewer.Viewer(dom.canvas);
+      // The environment is a preference about the room the model stands in,
+      // so it is remembered between visits and applied to every file.
+      const savedEnv = (() => {
+        try { return window.localStorage.getItem('fbxtool.env'); } catch (error) { return null; }
+      })();
+      if (savedEnv && Array.from(dom.envSelect.options)
+        .some((option) => option.value === savedEnv)) {
+        dom.envSelect.value = savedEnv;
+      }
+      viewer.setEnvironment(dom.envSelect.value);
       /* A scene too big to draw has no other symptom: the model reads, the
        * parts are counted, the line says how many triangles are in it, and the
        * viewport stays empty. The card gives way a frame or more after the
