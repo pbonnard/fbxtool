@@ -32,25 +32,58 @@ const FbxViewer = (function () {
   const GRAIN_FLOOR = 0.1;
   const GRAIN_CEILING = 8;
 
-  /* The dark blue backdrop cleared to each frame. The pick pass clears to
-   * black instead and hands the colour back afterwards, so the two agree on
-   * what the viewport shows. */
-  const BACKDROP = [0.086, 0.094, 0.114, 1];
-
   /* The three-quarter view a model opens on. */
   const VIEW_YAW = 0.9;
   const VIEW_PITCH = 0.28;
   const QUARTER_TURN = Math.PI / 2;
 
-  /* Shared by the model and background shaders: one studio environment, in
-   * linear radiance. A bright horizon band is what paint and chrome pick up. */
+  /* The places a model can be looked at. Each is the analytic sky the model
+   * and the backdrop share (in linear radiance), the sun that casts the
+   * ground shadow, and the clear colour — a car reads differently in a
+   * showroom than under a street lamp, so a handful are offered. */
+  const ENVIRONMENTS = {
+    studio: {
+      zenith: [0.090, 0.110, 0.150], horizon: [0.380, 0.400, 0.440],
+      ground: [0.012, 0.013, 0.016], softbox: [0.900, 0.910, 0.950],
+      sun: [2.600, 2.520, 2.360], sunDir: [0.35, 0.85, 0.40],
+      backdrop: [0.086, 0.094, 0.114, 1],
+    },
+    garage: {
+      zenith: [0.030, 0.034, 0.040], horizon: [0.150, 0.152, 0.165],
+      ground: [0.022, 0.021, 0.020], softbox: [0.700, 0.650, 0.580],
+      sun: [2.200, 1.900, 1.500], sunDir: [0.45, 0.75, 0.45],
+      backdrop: [0.052, 0.048, 0.043, 1],
+    },
+    day: {
+      zenith: [0.200, 0.320, 0.480], horizon: [0.550, 0.600, 0.650],
+      ground: [0.060, 0.070, 0.060], softbox: [1.200, 1.250, 1.300],
+      sun: [5.000, 4.800, 4.400], sunDir: [0.25, 0.90, 0.35],
+      backdrop: [0.100, 0.130, 0.170, 1],
+    },
+    dusk: {
+      zenith: [0.070, 0.080, 0.130], horizon: [0.500, 0.340, 0.200],
+      ground: [0.020, 0.016, 0.014], softbox: [0.200, 0.180, 0.160],
+      sun: [2.800, 1.700, 0.900], sunDir: [0.60, 0.35, 0.45],
+      backdrop: [0.070, 0.052, 0.040, 1],
+    },
+    night: {
+      zenith: [0.010, 0.014, 0.030], horizon: [0.030, 0.036, 0.060],
+      ground: [0.006, 0.007, 0.010], softbox: [0.050, 0.060, 0.090],
+      sun: [0.350, 0.380, 0.500], sunDir: [0.30, 0.55, 0.50],
+      backdrop: [0.015, 0.018, 0.028, 1],
+    },
+  };
+
+  /* Shared by the model, background and ground shaders: the environment as
+   * uniforms, so a preset can be swapped in without recompiling anything.
+   * A bright horizon band is what paint and chrome pick up. */
   const ENVIRONMENT = `
-  const vec3 ENV_ZENITH  = vec3(0.090, 0.110, 0.150);
-  const vec3 ENV_HORIZON = vec3(0.380, 0.400, 0.440);
-  const vec3 ENV_GROUND  = vec3(0.012, 0.013, 0.016);
-  const vec3 ENV_SOFTBOX = vec3(0.900, 0.910, 0.950);
-  const vec3 SUN_COLOUR  = vec3(2.600, 2.520, 2.360);
-  const vec3 SUN_DIR     = normalize(vec3(0.35, 0.85, 0.40));
+  uniform vec3 ENV_ZENITH;
+  uniform vec3 ENV_HORIZON;
+  uniform vec3 ENV_GROUND;
+  uniform vec3 ENV_SOFTBOX;
+  uniform vec3 SUN_COLOUR;
+  uniform vec3 SUN_DIR;
 
   /** Radiance arriving from direction dir, sun excluded. */
   vec3 environmentColour(vec3 dir) {
@@ -725,13 +758,6 @@ ${SHADOW_LOOKUP}
     return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
   }
 
-  /** The sun, matching SUN_DIR in the shaders. */
-  const SUN = (() => {
-    const v = [0.35, 0.85, 0.40];
-    const length = Math.hypot(...v);
-    return v.map((c) => c / length);
-  })();
-
   /** A symmetric box, for the sun's view of the scene. */
   function orthographic(radius, depth) {
     const near = 0.01;
@@ -858,6 +884,9 @@ ${SHADOW_LOOKUP}
 
       this.mode = 0;
       this.upAxis = 'y';
+      /** Which environment is showing, and the sun direction it implies. */
+      this.env = ENVIRONMENTS.studio;
+      this.sun = [0.35, 0.85, 0.40];
       /** Which of the mesh's own axes are mirrored, as ±1 per axis. */
       this.flips = [1, 1, 1];
       this.hasUv = false;
@@ -883,7 +912,7 @@ ${SHADOW_LOOKUP}
       gl.enable(gl.DEPTH_TEST);
       gl.enable(gl.CULL_FACE);
       gl.cullFace(gl.BACK);
-      gl.clearColor(BACKDROP[0], BACKDROP[1], BACKDROP[2], BACKDROP[3]);
+      this.setEnvironment('studio');
 
       this._loop = this._loop.bind(this);
       requestAnimationFrame(this._loop);
@@ -932,6 +961,12 @@ ${SHADOW_LOOKUP}
         partCount: gl.getUniformLocation(program, 'uPartCount'),
         explode: gl.getUniformLocation(program, 'uExplode'),
         centre: gl.getUniformLocation(program, 'uCentre'),
+        envZenith: gl.getUniformLocation(program, 'ENV_ZENITH'),
+        envHorizon: gl.getUniformLocation(program, 'ENV_HORIZON'),
+        envGround: gl.getUniformLocation(program, 'ENV_GROUND'),
+        envSoftbox: gl.getUniformLocation(program, 'ENV_SOFTBOX'),
+        sunColour: gl.getUniformLocation(program, 'SUN_COLOUR'),
+        sunDir: gl.getUniformLocation(program, 'SUN_DIR'),
       };
 
       this.pickProgram = this._link(PICK_VERTEX, PICK_FRAGMENT, 'pick');
@@ -955,6 +990,12 @@ ${SHADOW_LOOKUP}
       this.backgroundUniforms = {
         invProjection: gl.getUniformLocation(background, 'uInvProjection'),
         viewToWorld: gl.getUniformLocation(background, 'uViewToWorld'),
+        envZenith: gl.getUniformLocation(background, 'ENV_ZENITH'),
+        envHorizon: gl.getUniformLocation(background, 'ENV_HORIZON'),
+        envGround: gl.getUniformLocation(background, 'ENV_GROUND'),
+        envSoftbox: gl.getUniformLocation(background, 'ENV_SOFTBOX'),
+        sunColour: gl.getUniformLocation(background, 'SUN_COLOUR'),
+        sunDir: gl.getUniformLocation(background, 'SUN_DIR'),
       };
       // A vertex array is still required to draw, even with no attributes.
       this.backgroundVao = gl.createVertexArray();
@@ -975,6 +1016,12 @@ ${SHADOW_LOOKUP}
         projection: gl.getUniformLocation(this.groundProgram, 'uProjection'),
         radius: gl.getUniformLocation(this.groundProgram, 'uRadius'),
         height: gl.getUniformLocation(this.groundProgram, 'uHeight'),
+        envZenith: gl.getUniformLocation(this.groundProgram, 'ENV_ZENITH'),
+        envHorizon: gl.getUniformLocation(this.groundProgram, 'ENV_HORIZON'),
+        envGround: gl.getUniformLocation(this.groundProgram, 'ENV_GROUND'),
+        envSoftbox: gl.getUniformLocation(this.groundProgram, 'ENV_SOFTBOX'),
+        sunColour: gl.getUniformLocation(this.groundProgram, 'SUN_COLOUR'),
+        sunDir: gl.getUniformLocation(this.groundProgram, 'SUN_DIR'),
       };
       this.uniforms.model = gl.getUniformLocation(program, 'uModel');
       for (const [name, uniforms] of [[this.groundProgram, this.groundUniforms],
@@ -1045,7 +1092,7 @@ ${SHADOW_LOOKUP}
     _shadowMatrix() {
       const radius = Math.max(this.radius, 1e-4) * 1.15;
       const distance = radius * 3;
-      const eye = SUN.map((v) => v * distance);
+      const eye = this.sun.map((v) => v * distance);
       const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
       const projection = orthographic(radius, radius * 4);
       return multiply(projection, view);
@@ -1522,6 +1569,39 @@ ${SHADOW_LOOKUP}
 
     setMode(mode) { this.mode = mode; this.dirty = true; }
 
+    /** Which environment the model is shown in: sky, sun and clear colour. */
+    setEnvironment(key) {
+      const env = ENVIRONMENTS[key];
+      if (!env) return;
+      this.env = env;
+      const d = env.sunDir;
+      const length = Math.hypot(d[0], d[1], d[2]) || 1;
+      this.sun = [d[0] / length, d[1] / length, d[2] / length];
+      const values = {
+        envZenith: env.zenith, envHorizon: env.horizon, envGround: env.ground,
+        envSoftbox: env.softbox, sunColour: env.sun, sunDir: this.sun,
+      };
+      const gl = this.gl;
+      for (const [program, uniforms] of this._environmentPrograms()) {
+        gl.useProgram(program);
+        for (const name of Object.keys(values)) gl.uniform3fv(uniforms[name], values[name]);
+      }
+      gl.useProgram(null);
+      gl.clearColor(env.backdrop[0], env.backdrop[1], env.backdrop[2], env.backdrop[3]);
+      // The sun moved, so the ground shadow has to be cast again.
+      this.shadowStale = true;
+      this.dirty = true;
+    }
+
+    /** The programs that read the environment, each with its uniform map. */
+    _environmentPrograms() {
+      return [
+        [this.program, this.uniforms],
+        [this.backgroundProgram, this.backgroundUniforms],
+        [this.groundProgram, this.groundUniforms],
+      ];
+    }
+
     /** How far apart to pull the parts: 0 is the model as it was built. */
     setExplode(amount) {
       const next = Math.max(0, Number(amount) || 0);
@@ -1914,7 +1994,8 @@ ${SHADOW_LOOKUP}
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       // The pick pass cleared to black; put the backdrop colour back so the
       // next frame clears to what the viewport is supposed to show.
-      gl.clearColor(BACKDROP[0], BACKDROP[1], BACKDROP[2], BACKDROP[3]);
+      gl.clearColor(this.env.backdrop[0], this.env.backdrop[1],
+        this.env.backdrop[2], this.env.backdrop[3]);
       // The picture was drawn over; put it back on the next frame.
       this.dirty = true;
 

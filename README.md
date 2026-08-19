@@ -207,6 +207,7 @@ from `file://` with no server, no CDN and no network; nothing is uploaded.
 - **Smooth ×1 / ×2** — Catmull-Clark over polygons before triangulation, with open borders smoothed as curves, normals and UVs subdivided linearly. Automatic level held to a 384 MiB vertex-buffer budget, and said when held back.
 - `Ctrl+Z` / `Ctrl+Y` undo and redo; **Restore all** puts the scene back.
 - **Ground** — a floor at the model's lowest point with a self-shadowing depth-map shadow; toggleable.
+- **Environment** — the model can be looked at in a **Studio**, a **Garage**, in **Daylight**, at **Dusk** or at **Night**: the sky its reflections read, the sun that casts the ground shadow and the backdrop all change together, and the choice is remembered.
 - WebGL context loss and out-of-memory reported rather than failing silently.
 
 ### Materials
