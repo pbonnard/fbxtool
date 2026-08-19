@@ -8010,8 +8010,11 @@ const FbxDds = (function () {
         if (fourCC === DXT1) {
           colourBlock(view, block, rgba, width, height, x0, y0, true);
         } else if (fourCC === DXT2 || fourCC === DXT3) {
-          explicitAlphaBlock(view, block, rgba, width, height, x0, y0);
+          // Colour first, alpha over it: the colour half writes an opaque
+          // fourth channel of its own, and a BC2 tile's alpha is the eight
+          // bytes in front of it rather than anything the colour says.
           colourBlock(view, block + 8, rgba, width, height, x0, y0, false);
+          explicitAlphaBlock(view, block, rgba, width, height, x0, y0);
         } else if (fourCC === DXT4 || fourCC === DXT5) {
           colourBlock(view, block + 8, rgba, width, height, x0, y0, false);
           interpolatedBlock(view, block, rgba, width, height, x0, y0, 3);

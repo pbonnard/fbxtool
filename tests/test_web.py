@@ -255,6 +255,24 @@ def test_the_alpha_of_a_bc3_tile_is_interpolated_the_way_it_was_written(tmp_path
 
 
 @needs_node
+def test_the_alpha_of_a_bc2_tile_survives_the_colour_written_over_it(tmp_path):
+    """BC2's alpha is the eight bytes in front of the colour half, and the
+    colour half writes an opaque fourth channel of its own — so decoded in
+    file order the colour lands on top and every BC2 texture comes back
+    solid.
+
+    A Mercedes CLK's headlight glass is a 32-square BC2 at 27% alpha and its
+    `highlights` map is a 1024-square of cut-out shapes; read that way round
+    the lamps are lumps of plaster and the highlights a grey sheet.
+    """
+    import fbxbuild as fb
+
+    image = _decode_dds(tmp_path, fb.dds_bc2(alphas=(0, 1, 8, 15) + (4,) * 12))
+    assert image is not None
+    assert image["rgba"][3::4][:4] == [0, 17, 136, 255]
+
+
+@needs_node
 def test_an_uncompressed_surface_is_read_by_its_channel_masks(tmp_path):
     """A mask says which bits of a pixel are which channel, so B8G8R8A8 needs
     no entry in a table of layouts — and neither does anything else."""

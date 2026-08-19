@@ -2566,6 +2566,20 @@ def dds_bc3(alpha=(255, 0), colours=(0xF800, 0x001F)) -> bytes:
             + struct.pack("<HHI", *colours, 0))
 
 
+def dds_bc2(alphas=tuple(range(16)), colours=(0xF800, 0x001F)) -> bytes:
+    """One 4x4 BC2 tile: sixteen four-bit alphas, then a colour tile.
+
+    BC2 states an alpha a pixel straight, in the eight bytes in front of the
+    colour half rather than interpolated out of two endpoints the way BC3
+    does. *alphas* is those sixteen nibbles in reading order.
+    """
+    packed = 0
+    for at, value in enumerate(alphas):
+        packed |= (value & 0xF) << (4 * at)
+    return (_dds_header(4, 4, fourcc=b"DXT3") + packed.to_bytes(8, "little")
+            + struct.pack("<HHI", *colours, 0))
+
+
 def dds_bgra(width: int, height: int, pixels: bytes) -> bytes:
     """An uncompressed B8G8R8A8 surface — *pixels* is BGRA, as stored."""
     return _dds_header(width, height, bits=32,
