@@ -33,6 +33,8 @@
     restoreAll: $('restore-all'),
     spinToggle: $('spin-toggle'),
     groundToggle: $('ground-toggle'),
+    lightsToggle: $('lights-toggle'),
+    lightsLabel: $('lights-label'),
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     exportGltf: $('export-gltf'),
@@ -93,6 +95,10 @@
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
   let lensColours = new Map();
+  /** What the same config says lights up when the car's lights are on, and
+   *  the lamps it carries as lights rather than as surfaces. */
+  let carLamps = new Map();
+  let carLightSources = [];
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
   /* What a BeamNG car keeps beside its model: `main.materials.json` and the
@@ -393,6 +399,8 @@
      * skin — a Renault 5 names `body`, `body2` and `rim_colored` there and its
      * skins name none. */
     lensColours = new Map();
+      carLamps = new Map();
+      carLightSources = [];
     for (const file of list) {
       const where = pathOf(file).replace(/\\/g, '/');
       if (!/(^|\/)extension\/[^/]+\.ini$/i.test(where)) {
@@ -418,6 +426,11 @@
       for (const [mesh, colour] of FbxKn5.lensColours(text)) {
         if (!lensColours.has(mesh)) lensColours.set(mesh, colour);
       }
+      const lighting = FbxKn5.carLighting(text);
+      for (const [mesh, lamp] of lighting.lamps) {
+        if (!carLamps.has(mesh)) carLamps.set(mesh, lamp);
+      }
+      carLightSources = carLightSources.concat(lighting.lights);
     }
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
@@ -1042,6 +1055,8 @@
       }
       if (!mesh || !mesh.triangleCount) { pieces.push(null); continue; }
       // Copy out now: the next build may grow memory and detach these views.
+      const named = String(part.model.displayName
+        || part.geometry.displayName || '');
       pieces.push({
         positions: mesh.positions.slice(),
         normals: mesh.normals.slice(),
@@ -1052,14 +1067,20 @@
         polygonCount: mesh.polygonCount,
         min: mesh.min,
         max: mesh.max,
-        name: part.model.displayName || part.geometry.displayName || 'part',
+        name: named || 'part',
         materialNames: part.materials.map((material) => material.displayName),
         /* And the colour of the lens this part is, where the car's lighting
          * config says it is one. It belongs to the part and not to the
          * material: a Renault 5's `glass_fog` mesh wears the material its
          * `glass_platelight` mesh wears, and the two are given different
-         * colours. */
-        lens: lensColours.get(String(part.model.displayName || '').toLowerCase()) || null,
+         * colours.
+         *
+         * Looked up under the name the part is shown under, which is the
+         * model's where there is one and the geometry's where there is not.
+         * Under the model's alone, a mesh whose name is on its geometry is a
+         * mesh the config can never name. */
+        lens: lensColours.get(named.toLowerCase()) || null,
+
       });
       FbxWasm.release(heapMark);
     }
@@ -1357,6 +1378,40 @@
   }
 
   /**
+   * Offer the car's own lights, where it brought a config that says what they
+   * are.
+   *
+   * The switch is hidden for everything that did not, which is every format
+   * but a `.kn5` with an `extension` folder beside it and most of those. It
+   * starts off: a car photographed in a showroom has its lamps dark, and
+   * turning them on is a thing to ask for rather than to be given.
+   *
+   * One switch rather than a dashboard. A file says whether each lamp follows
+   * the headlights, the brakes, the indicators or a door, and what this
+   * offers is the car with its lights on — all of them at once.
+   */
+  function offerLights() {
+    /* Put each lamp on the part that wears it here rather than where the
+     * geometry is built: a scene assembled part by part and a single geometry
+     * opened on its own arrive at the part table by different roads, and this
+     * is where the two meet. The lens is filled in the same pass for the same
+     * reason — down the second road it was never being looked up at all. */
+    let found = 0;
+    for (const part of partTable || []) {
+      const named = String(part.name || '').toLowerCase();
+      part.lamp = carLamps.get(named) || null;
+      if (part.lamp) found += 1;
+      if (!part.lens) part.lens = lensColours.get(named) || null;
+    }
+    const has = found > 0 || carLightSources.length > 0;
+    viewer.setParts(partTable);
+    dom.lightsLabel.hidden = !has;
+    if (!has) dom.lightsToggle.checked = false;
+    viewer.setLightSources(carLightSources);
+    viewer.setLightsOn(has && dom.lightsToggle.checked);
+    return found;
+  }
+  /**
    * Draw the scene the segments now describe.
    *
    * The palette is not rebuilt and the textures are not decoded again — an
@@ -1383,6 +1438,7 @@
     viewer.setMesh(built.mesh, { keepCamera: true });
     partTable = built.table || [];
     viewer.setParts(partTable);
+    offerLights();
     // The parts are numbered afresh, so a selection that has fallen off the
     // end of the list is no selection at all.
     setSelectedPart(selectedPart < partTable.length ? selectedPart : -1);
@@ -4424,6 +4480,7 @@
       viewer.setMesh(built.mesh, { keepCamera });
       partTable = built.table || [];
       viewer.setParts(partTable);
+      offerLights();
       setSelectedPart(-1);
       // Only a scene of several parts has anything to pull apart.
       dom.explodeSlider.disabled = partTable.length < 2;
@@ -4635,6 +4692,7 @@
       viewer.setMesh(mesh, { keepCamera });
       partTable = built.table;
       viewer.setParts(partTable);
+      offerLights();
       setSelectedPart(-1);
       dom.explodeSlider.disabled = true;
       dom.explodeSlider.value = '0';
@@ -4825,6 +4883,8 @@
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
     dom.groundToggle.addEventListener('change',
       () => viewer.setShowGround(dom.groundToggle.checked));
+    dom.lightsToggle.addEventListener('change',
+      () => viewer.setLightsOn(dom.lightsToggle.checked));
     dom.textureToggle.addEventListener('change',
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());

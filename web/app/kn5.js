@@ -173,6 +173,126 @@ const FbxKn5 = (function () {
   const LAMP_SECTION = /^\s*\[(REFRACTING_HEADLIGHT[^\]]*)\]/;
   const LAMP_KEY = /^[ \t]*(SURFACE|GLASS_COLOR|EXTRA_GLASS_COLORIZATION)[ \t]*=([^;\n]*)/i;
 
+  /* The two kinds of section a car's lighting is written in: the meshes that
+   * light up, and the lights themselves. */
+  const GLOW_SECTION = /^[ \t]*\[(EMISSIVE[^\]]*)\]/i;
+  const LIGHT_SECTION = /^[ \t]*\[(LIGHT_EXTRA[^\]]*)\]/i;
+  const LIGHT_KEY = /^[ \t]*([A-Z_0-9]+)[ \t]*=([^;\n]*)/i;
+
+  /**
+   * One `COLOR = r, g, b, level` out of a lighting config.
+   *
+   * The triple is a hue and the fourth number is how bright: a lamp is written
+   * `220, 33, 33, 1` by one author and `5, 5, 5, 2` by another, and neither is
+   * a colour in the nought-to-one the rest of this works in. Of the 2023 such
+   * triples across the cars to hand, 80% have a channel above one, their
+   * median largest channel is 10 and their ninetieth is 150 — so the triple
+   * says what colour and says nothing about how much.
+   *
+   * Divided by its own largest channel it becomes that hue with its brightest
+   * channel at one, and the level then means what it says. A level of nought
+   * is a lamp that is off, which is a thing these files write.
+   */
+  function lampColour(value) {
+    const numbers = String(value).split(',').map((one) => Number(one.trim()));
+    if (numbers.length < 3 || numbers.slice(0, 3).some((c) => !Number.isFinite(c))) return null;
+    const rgb = numbers.slice(0, 3).map((c) => Math.max(0, c));
+    const peak = Math.max(...rgb);
+    if (!peak) return [0, 0, 0];
+    const level = numbers.length > 3 && Number.isFinite(numbers[3])
+      ? Math.max(0, numbers[3]) : 1;
+    return rgb.map((c) => (c / peak) * level);
+  }
+
+  /** A `POSITION = x, y, z`, in the car's own space. */
+  function lampVector(value) {
+    const numbers = String(value).split(',').map((one) => Number(one.trim()));
+    if (numbers.length < 3 || numbers.slice(0, 3).some((c) => !Number.isFinite(c))) return null;
+    return numbers.slice(0, 3);
+  }
+
+  /**
+   * What a car's lighting config says lights up, and what lights it.
+   *
+   * Two things, read in one walk because they are written in one file.
+   *
+   * `[EMISSIVE_*]` names meshes and says what colour each goes when the lights
+   * are on, and often what colour it sits at when they are off — a tail lamp
+   * that is a dull red unlit and a bright one lit. 56 of the 135 cars to hand
+   * carry them, 1544 sections between them, and they are the whole of what
+   * makes a car's lamps read as lamps rather than as red plastic.
+   *
+   * `[LIGHT_EXTRA_*]` is a lamp as a light rather than as a surface: where it
+   * is, which way it points, how far it reaches and how tight its cone. 20
+   * cars carry those, 100 between them.
+   *
+   * Nothing here reads what each is bound to. A file says whether a lamp
+   * follows the headlights, the brakes, the indicators or a door, and this
+   * has one switch rather than a dashboard — so what it offers is the car
+   * with its lights on, all of them at once.
+   */
+  function carLighting(text) {
+    const lamps = new Map();
+    const lights = [];
+    let kind = '';
+    let meshes = [];
+    let on = null;
+    let off = null;
+    let light = null;
+    const close = () => {
+      if (kind === 'glow' && (on || off)) {
+        for (const name of meshes) {
+          const at = name.toLowerCase();
+          /* A section stating only one of the two colours has one colour, and
+           * the lamp is that colour whichever way the switch is: a tail lamp
+           * written with an `OFF_COLOR` alone is a lamp that sits red. */
+          if (!lamps.has(at)) lamps.set(at, { on: on || off, off: off || [0, 0, 0] });
+        }
+      }
+      if (kind === 'light' && light && light.position && light.colour) {
+        lights.push(light);
+      }
+      kind = ''; meshes = []; on = null; off = null; light = null;
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+      if (line.trimStart().startsWith('[')) {
+        close();
+        if (GLOW_SECTION.test(line)) kind = 'glow';
+        else if (LIGHT_SECTION.test(line)) {
+          kind = 'light';
+          light = { position: null, direction: null, colour: null,
+            range: 6, spot: 0, sharpness: 0.5 };
+        }
+        continue;
+      }
+      if (!kind) continue;
+      const setting = LIGHT_KEY.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      if (kind === 'glow') {
+        if (key === 'NAME') meshes = value.split(',').map((n) => n.trim()).filter(Boolean);
+        else if (key === 'COLOR') on = lampColour(value);
+        else if (key === 'OFF_COLOR') off = lampColour(value);
+        continue;
+      }
+      if (key === 'POSITION') light.position = lampVector(value);
+      else if (key === 'DIRECTION') light.direction = lampVector(value);
+      else if (key === 'COLOR') light.colour = lampColour(value);
+      else if (key === 'RANGE') {
+        const range = Number(value);
+        if (Number.isFinite(range) && range > 0) light.range = range;
+      } else if (key === 'SPOT') {
+        const spot = Number(value);
+        if (Number.isFinite(spot)) light.spot = Math.min(Math.max(spot, 0), 180);
+      } else if (key === 'SPOT_SHARPNESS') {
+        const sharp = Number(value);
+        if (Number.isFinite(sharp)) light.sharpness = Math.min(Math.max(sharp, 0), 1);
+      }
+    }
+    close();
+    return { lamps, lights };
+  }
   /**
    * What colour each lamp lens is, out of a car's own lighting config.
    *
@@ -987,7 +1107,7 @@ const FbxKn5 = (function () {
     };
   }
 
-  return { looksLikeKn5, lensColours, parse, placementOf, NODE_CLASSES };
+  return { looksLikeKn5, lensColours, carLighting, parse, placementOf, NODE_CLASSES };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxKn5;

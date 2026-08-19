@@ -720,6 +720,67 @@ def test_a_mesh_used_twice_is_written_once(tmp_path):
 # ------------------------------------------ the paint beside a car
 
 
+def _kn5js(expression: str):
+    """Evaluate an expression against the page's own ``kn5.js``, under Node."""
+    script = (
+        f"const K=require({str(WEB / 'app' / 'kn5.js')!r});"
+        f"console.log(JSON.stringify({expression}));"
+    )
+    result = _run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@needs_node
+def test_what_a_cars_lighting_config_says_lights_up():
+    """`[EMISSIVE_*]` names meshes and says what colour each goes with the
+    lights on, and often what it sits at with them off. 56 of the 135 cars to
+    hand carry them, 1544 sections between them.
+
+    The colour is a hue and a level rather than a colour: `220, 33, 33, 1` and
+    `5, 5, 5, 2` are both written, and neither is in the nought-to-one the
+    rest of this works in. Of the 2023 such triples across those cars, 80%
+    have a channel above one and their median largest channel is 10 — so the
+    triple says which colour and the fourth number says how much.
+    """
+    config = """\
+[EMISSIVE_...]
+NAME=tail_l, tail_r
+COLOR=255, 40, 40, 2
+OFF_COLOR=255, 40, 40, 0.1
+LAG=0.8
+[EMISSIVE_LIGHT_...]
+NAME=plate
+OFF_COLOR=5, 5, 5, 1
+[LIGHT_EXTRA_...]
+COLOR=50,40,30,5
+POSITION=0.05, 1.26, -0.23
+DIRECTION=0, -1, 0
+RANGE=1.5
+SPOT=100
+SPOT_SHARPNESS=0.2
+"""
+    read = _kn5js(f"(()=>{{const o=K.carLighting({config!r});"
+                  "return {lamps:[...o.lamps], lights:o.lights};})()")
+    lamps = dict(read["lamps"])
+    # The triple divided by its own largest channel, times the level beside it.
+    assert lamps["tail_l"]["on"] == pytest.approx([2, 40 / 255 * 2, 40 / 255 * 2])
+    assert lamps["tail_l"]["off"] == pytest.approx([0.1, 40 / 255 * 0.1, 40 / 255 * 0.1])
+    assert lamps["tail_r"] == lamps["tail_l"], "a section names as many meshes as it likes"
+    # A section stating one colour has one colour, whichever way the switch is.
+    assert lamps["plate"]["on"] == pytest.approx([1, 1, 1])
+    assert lamps["plate"]["off"] == pytest.approx([1, 1, 1])
+
+    assert len(read["lights"]) == 1
+    light = read["lights"][0]
+    assert light["position"] == pytest.approx([0.05, 1.26, -0.23])
+    assert light["colour"] == pytest.approx([5, 4, 3])
+    assert light["range"] == 1.5 and light["spot"] == 100
+    assert light["sharpness"] == pytest.approx(0.2)
+
+    empty = _kn5js("(()=>{const o=K.carLighting('nothing here');"
+                   "return {lamps:[...o.lamps], lights:o.lights};})()")
+    assert empty == {"lamps": [], "lights": []}
 def _skins(expression: str):
     """Evaluate an expression against the page's own ``skins.js``, under Node."""
     script = (
@@ -1232,6 +1293,66 @@ def test_the_fresnel_a_material_states_is_the_one_it_is_drawn_with(built, tmp_pa
     assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
     assert "all checks passed" in result.stdout
 
+
+@needs_clang
+@needs_node
+def test_a_car_lights_its_own_lamps(built, tmp_path):
+    """A car's lighting config names meshes and says what colour each goes
+    when the lights are on. 56 of the 135 cars to hand carry those sections,
+    1544 between them, and they are the whole of what makes a lamp read as a
+    lamp rather than as red plastic.
+
+    The switch is offered only where a car brought a config saying what its
+    lights are, and starts off: a showroom photograph has the lamps dark.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    # A dark housing lit dimly, so what the middle of the viewport shows is
+    # the lamp rather than the plastic around it.
+    grey = fb.dds_bgra(4, 4, bytes([40, 40, 40, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    material = fb.kn5_material("plastic", "ksPerPixel",
+                               properties=(fb.kn5_property("fresnelC", 0.05)
+                                           + fb.kn5_property("ksAmbient", 0.1)
+                                           + fb.kn5_property("ksDiffuse", 0.1)),
+                               property_count=3,
+                               slots=(("txDiffuse", 0, "grey.dds"),))
+    # The one mesh is the lamp, so what the config says about it is what the
+    # middle of the viewport shows.
+    model = fb.build_kn5(6, textures=[("grey.dds", grey)], materials=[material],
+                         tree=fb.kn5_dummy("car", identity,
+                                           fb.kn5_mesh("tail", vertices, indices), 1))
+    folders = []
+    for name, config in (
+        ("lamp", "[EMISSIVE_...]" + chr(10) + "NAME=tail" + chr(10)
+         # A hue and a level, which is how these are written: the triple is
+         # divided by its own largest channel and the fourth says how much.
+         + "COLOR=255, 40, 40, 3" + chr(10)
+         + "OFF_COLOR=255, 40, 40, 0.15" + chr(10)),
+        ("plain", None),
+    ):
+        car = tmp_path / name
+        car.mkdir()
+        (car / f"{name}.kn5").write_bytes(model)
+        if config:
+            (car / "extension").mkdir()
+            (car / "extension" / "ext_config.ini").write_text(config, encoding="utf-8")
+        folders.append(str(car))
+
+    result = _run(["node", str(WEB / "test" / "lights.js"), *folders],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
 
 @needs_clang
 @needs_node

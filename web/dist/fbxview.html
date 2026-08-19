@@ -665,6 +665,10 @@ ul.record-tree .count { color: var(--muted); }
       <label class="check"><input id="ground-toggle" type="checkbox" checked>
         ground</label>
       <label class="check"><input id="spin-toggle" type="checkbox"> spin</label>
+      <!-- The car's own lamps, where it brought a lighting config saying what
+           they are. Hidden for everything that did not. -->
+      <label class="check" id="lights-label" hidden><input id="lights-toggle"
+        type="checkbox"> lights</label>
       <button id="reset-view" type="button">Reset view</button>
       <!-- Which spelling the export is written in. A .glb is one file and is
            what most things want; a .gltf beside a .bin is the same document
@@ -6140,6 +6144,126 @@ const FbxKn5 = (function () {
   const LAMP_SECTION = /^\s*\[(REFRACTING_HEADLIGHT[^\]]*)\]/;
   const LAMP_KEY = /^[ \t]*(SURFACE|GLASS_COLOR|EXTRA_GLASS_COLORIZATION)[ \t]*=([^;\n]*)/i;
 
+  /* The two kinds of section a car's lighting is written in: the meshes that
+   * light up, and the lights themselves. */
+  const GLOW_SECTION = /^[ \t]*\[(EMISSIVE[^\]]*)\]/i;
+  const LIGHT_SECTION = /^[ \t]*\[(LIGHT_EXTRA[^\]]*)\]/i;
+  const LIGHT_KEY = /^[ \t]*([A-Z_0-9]+)[ \t]*=([^;\n]*)/i;
+
+  /**
+   * One `COLOR = r, g, b, level` out of a lighting config.
+   *
+   * The triple is a hue and the fourth number is how bright: a lamp is written
+   * `220, 33, 33, 1` by one author and `5, 5, 5, 2` by another, and neither is
+   * a colour in the nought-to-one the rest of this works in. Of the 2023 such
+   * triples across the cars to hand, 80% have a channel above one, their
+   * median largest channel is 10 and their ninetieth is 150 — so the triple
+   * says what colour and says nothing about how much.
+   *
+   * Divided by its own largest channel it becomes that hue with its brightest
+   * channel at one, and the level then means what it says. A level of nought
+   * is a lamp that is off, which is a thing these files write.
+   */
+  function lampColour(value) {
+    const numbers = String(value).split(',').map((one) => Number(one.trim()));
+    if (numbers.length < 3 || numbers.slice(0, 3).some((c) => !Number.isFinite(c))) return null;
+    const rgb = numbers.slice(0, 3).map((c) => Math.max(0, c));
+    const peak = Math.max(...rgb);
+    if (!peak) return [0, 0, 0];
+    const level = numbers.length > 3 && Number.isFinite(numbers[3])
+      ? Math.max(0, numbers[3]) : 1;
+    return rgb.map((c) => (c / peak) * level);
+  }
+
+  /** A `POSITION = x, y, z`, in the car's own space. */
+  function lampVector(value) {
+    const numbers = String(value).split(',').map((one) => Number(one.trim()));
+    if (numbers.length < 3 || numbers.slice(0, 3).some((c) => !Number.isFinite(c))) return null;
+    return numbers.slice(0, 3);
+  }
+
+  /**
+   * What a car's lighting config says lights up, and what lights it.
+   *
+   * Two things, read in one walk because they are written in one file.
+   *
+   * `[EMISSIVE_*]` names meshes and says what colour each goes when the lights
+   * are on, and often what colour it sits at when they are off — a tail lamp
+   * that is a dull red unlit and a bright one lit. 56 of the 135 cars to hand
+   * carry them, 1544 sections between them, and they are the whole of what
+   * makes a car's lamps read as lamps rather than as red plastic.
+   *
+   * `[LIGHT_EXTRA_*]` is a lamp as a light rather than as a surface: where it
+   * is, which way it points, how far it reaches and how tight its cone. 20
+   * cars carry those, 100 between them.
+   *
+   * Nothing here reads what each is bound to. A file says whether a lamp
+   * follows the headlights, the brakes, the indicators or a door, and this
+   * has one switch rather than a dashboard — so what it offers is the car
+   * with its lights on, all of them at once.
+   */
+  function carLighting(text) {
+    const lamps = new Map();
+    const lights = [];
+    let kind = '';
+    let meshes = [];
+    let on = null;
+    let off = null;
+    let light = null;
+    const close = () => {
+      if (kind === 'glow' && (on || off)) {
+        for (const name of meshes) {
+          const at = name.toLowerCase();
+          /* A section stating only one of the two colours has one colour, and
+           * the lamp is that colour whichever way the switch is: a tail lamp
+           * written with an `OFF_COLOR` alone is a lamp that sits red. */
+          if (!lamps.has(at)) lamps.set(at, { on: on || off, off: off || [0, 0, 0] });
+        }
+      }
+      if (kind === 'light' && light && light.position && light.colour) {
+        lights.push(light);
+      }
+      kind = ''; meshes = []; on = null; off = null; light = null;
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+      if (line.trimStart().startsWith('[')) {
+        close();
+        if (GLOW_SECTION.test(line)) kind = 'glow';
+        else if (LIGHT_SECTION.test(line)) {
+          kind = 'light';
+          light = { position: null, direction: null, colour: null,
+            range: 6, spot: 0, sharpness: 0.5 };
+        }
+        continue;
+      }
+      if (!kind) continue;
+      const setting = LIGHT_KEY.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      if (kind === 'glow') {
+        if (key === 'NAME') meshes = value.split(',').map((n) => n.trim()).filter(Boolean);
+        else if (key === 'COLOR') on = lampColour(value);
+        else if (key === 'OFF_COLOR') off = lampColour(value);
+        continue;
+      }
+      if (key === 'POSITION') light.position = lampVector(value);
+      else if (key === 'DIRECTION') light.direction = lampVector(value);
+      else if (key === 'COLOR') light.colour = lampColour(value);
+      else if (key === 'RANGE') {
+        const range = Number(value);
+        if (Number.isFinite(range) && range > 0) light.range = range;
+      } else if (key === 'SPOT') {
+        const spot = Number(value);
+        if (Number.isFinite(spot)) light.spot = Math.min(Math.max(spot, 0), 180);
+      } else if (key === 'SPOT_SHARPNESS') {
+        const sharp = Number(value);
+        if (Number.isFinite(sharp)) light.sharpness = Math.min(Math.max(sharp, 0), 1);
+      }
+    }
+    close();
+    return { lamps, lights };
+  }
   /**
    * What colour each lamp lens is, out of a car's own lighting config.
    *
@@ -6954,7 +7078,7 @@ const FbxKn5 = (function () {
     };
   }
 
-  return { looksLikeKn5, lensColours, parse, placementOf, NODE_CLASSES };
+  return { looksLikeKn5, lensColours, carLighting, parse, placementOf, NODE_CLASSES };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxKn5;
@@ -12394,6 +12518,10 @@ const FbxViewer = (function () {
    * is what a material that states no exponent gets — and it is the ceiling
    * on a stated one as well, since the number is there to say a surface
    * reflects across more of itself than a fifth power does, never less. */
+  /* How many of a car's own lamps the viewer will carry as lights. The
+   * busiest of the 135 cars to hand states sixteen. */
+  const MAX_LIGHTS = 24;
+
   const PALETTE_ROWS = 8;
   const SCHLICK_POWER = 5;
 
@@ -12741,6 +12869,10 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uBump;
   uniform highp sampler2DArray uDetail;
   uniform highp sampler2DArray uGlow;
+  uniform highp sampler2D uLights;   // three texels a light: see setLightSources
+  uniform int uLightCount;
+  uniform int uLightsOn;
+  uniform mat4 uModel;               // the same one the vertex stage uses
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -13131,6 +13263,46 @@ ${SHADOW_LOOKUP}
       direct = beneath * SUN_COLOUR * nol * shadow;
     }
 
+    /* And the car's own lamps, as lights rather than as surfaces.
+     *
+     * [LIGHT_EXTRA_*] is a lamp written as where it is, which way it points,
+     * how far it reaches and how tight its cone. 20 of the cars to hand carry
+     * them — a cabin light over the seats, a boot light, the pool a headlamp
+     * throws — and the positions are the model's own, so they go through the
+     * same matrix the model does and follow it when an axis is flipped.
+     *
+     * Falls off as the inverse square, faded to nothing at the range the file
+     * states so a lamp lights its own corner of the car rather than all of
+     * it. No shadows: the map this draws with is the sun's, and a light in the
+     * cabin would need its own. */
+    for (int i = 0; i < uLightCount; i++) {
+      vec4 place = texelFetch(uLights, ivec2(i, 0), 0);
+      vec4 tint = texelFetch(uLights, ivec2(i, 1), 0);
+      vec4 aim = texelFetch(uLights, ivec2(i, 2), 0);
+      vec3 at = (uModel * vec4(place.xyz, 1.0)).xyz;
+      vec3 toward = at - vWorld;
+      float far = length(toward);
+      if (far > place.w) continue;
+      vec3 ld = toward / max(far, 1e-4);
+      float lambert = max(dot(n, ld), 0.0);
+      if (lambert <= 0.0) continue;
+      // Inverse square, and out at the stated range rather than trailing on.
+      float reach = 1.0 - far / place.w;
+      float fall = reach * reach / (1.0 + far * far);
+      if (tint.w > -1.0) {
+        // A cone, softened over the sharpness the file states.
+        vec3 way = normalize((uModel * vec4(aim.xyz, 0.0)).xyz);
+        float within = dot(-ld, way);
+        fall *= smoothstep(tint.w, mix(1.0, tint.w, 1.0 - aim.w * 0.9), within);
+      }
+      if (fall <= 0.0) continue;
+      vec3 lh = normalize(ld + v);
+      float lnoh = max(dot(n, lh), 0.0);
+      float lvoh = max(dot(v, lh), 0.0);
+      vec3 lspec = fresnelStated(f0, lvoh, shape.x, shape.y)
+        * (distributionGgx(lnoh, a) * visibilitySmith(nov, lambert, a) * sunSpecular);
+      direct += (diffuseColour / PI + lspec) * under * tint.rgb * lambert * fall;
+    }
     /* The environment, which is what makes a curved surface read as a surface
      * — and on car paint is the whole of what makes it read as paint.
      *
@@ -13179,6 +13351,23 @@ ${SHADOW_LOOKUP}
       if (uUseTextures == 1 && glowLayer >= 0 && glow != vec3(0.0)) {
         glow *= texture(uGlow, vec3(vUv, float(glowLayer))).rgb;
       }
+    }
+
+    /* And what this part gives off as a lamp of the car's own.
+     *
+     * A car's lighting config names meshes rather than materials: one lamp
+     * housing wears the same red plastic as the next and they are told to
+     * light up differently, so this is a part's own and sits beside its lens
+     * rather than in the palette. 56 of the 135 cars to hand carry these, and
+     * they are the whole of what makes a lamp read as a lamp rather than as
+     * red plastic.
+     *
+     * Two colours, and the switch chooses: what it is with the lights on, and
+     * what it sits at with them off — a tail lamp is a dull red unlit and a
+     * bright one lit. */
+    if (uPartCount > 0 && uMode == 0) {
+      vec4 lamp = texelFetch(uParts, ivec2(vPart, uLightsOn == 1 ? 2 : 3), 0);
+      glow += max(lamp.rgb, vec3(0.0));
     }
     // A marked material glows a little, so it reads even where it is in shadow.
     vec3 lit = direct + ambient + glow
@@ -13390,6 +13579,9 @@ ${SHADOW_LOOKUP}
         bump: gl.getUniformLocation(program, 'uBump'),
         detail: gl.getUniformLocation(program, 'uDetail'),
         glow: gl.getUniformLocation(program, 'uGlow'),
+        lights: gl.getUniformLocation(program, 'uLights'),
+        lightCount: gl.getUniformLocation(program, 'uLightCount'),
+        lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -13555,6 +13747,15 @@ ${SHADOW_LOOKUP}
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, null);
 
+      // And one texel per light, three rows of them: see setLightSources.
+      this.lightTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+
       this.textureArray = gl.createTexture();
       this.textureLayers = 0;
       this.finishArray = gl.createTexture();
@@ -13565,6 +13766,9 @@ ${SHADOW_LOOKUP}
       this.detailLayers = 0;
       this.glowArray = gl.createTexture();
       this.glowLayers = 0;
+      this.lightSources = [];
+      this.lightCount = 0;
+      this.lightsOn = false;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -13592,13 +13796,67 @@ ${SHADOW_LOOKUP}
      * The scene's parts: what each is called, where its middle is, and how big
      * it is. The centres drive the explode; the rest is what a click reports.
      */
+    /**
+     * The lamps a car carries as lights rather than as surfaces.
+     *
+     * Each is where it is, which way it points, how far it reaches and how
+     * tight its cone — three texels a light, the same way the parts are held.
+     * The positions are in the model's own space and are put through uModel
+     * in the shader, so flipping an axis or standing a Z-up car up takes the
+     * lights with it.
+     */
+    setLightSources(lights) {
+      const gl = this.gl;
+      this.lightSources = Array.isArray(lights) ? lights.slice(0, MAX_LIGHTS) : [];
+      this.lightCount = this.lightSources.length;
+      this.dirty = true;
+      if (!this.lightCount) return;
+      const data = new Float32Array(this.lightCount * 12);
+      this.lightSources.forEach((light, i) => {
+        const at = i * 4;
+        const position = light.position || [0, 0, 0];
+        data[at] = position[0];
+        data[at + 1] = position[1];
+        data[at + 2] = position[2];
+        data[at + 3] = Math.max(light.range || 1, 1e-3);
+        const colour = light.colour || [1, 1, 1];
+        const to = (this.lightCount + i) * 4;
+        data[to] = Math.max(0, colour[0]);
+        data[to + 1] = Math.max(0, colour[1]);
+        data[to + 2] = Math.max(0, colour[2]);
+        /* A cone as the cosine of its half-angle, which is what the shader
+         * compares against. A spot of 180 or none at all is a lamp that
+         * shines every way, and -1 is every direction at once. */
+        const spot = light.spot > 0 && light.spot < 180
+          ? Math.cos((light.spot / 2) * Math.PI / 180) : -1;
+        data[to + 3] = spot;
+        const way = light.direction || [0, -1, 0];
+        const length = Math.hypot(way[0], way[1], way[2]) || 1;
+        const on = (this.lightCount * 2 + i) * 4;
+        data[on] = way[0] / length;
+        data[on + 1] = way[1] / length;
+        data[on + 2] = way[2] / length;
+        data[on + 3] = Math.min(Math.max(light.sharpness, 0), 1) || 0.5;
+      });
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.lightCount, 3, 0,
+        gl.RGBA, gl.FLOAT, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /** Whether the car's lights are on. */
+    setLightsOn(on) {
+      this.lightsOn = on !== false;
+      this.dirty = true;
+    }
     setParts(parts) {
       const gl = this.gl;
       this.parts = Array.isArray(parts) ? parts : [];
       this.partCount = this.parts.length;
       this.selectedPart = -1;
       if (!this.partCount) { this.dirty = true; return; }
-      /* Two rows: where each part's middle is, and what colour of lens it is.
+      /* Four rows: where each part's middle is, what colour of lens it is, and
+       * the two colours it gives off as a lamp — lit and unlit.
        *
        * The second is a part's own and not its material's — a car's glass is
        * one grey picture however many lamps wear it, and what makes a Renault
@@ -13606,7 +13864,7 @@ ${SHADOW_LOOKUP}
        * the car's lighting config. Its `glass_fog` mesh wears the material its
        * `glass_platelight` mesh wears, and the two are given different
        * colours, so there is nowhere else for it to go. */
-      const data = new Float32Array(this.partCount * 8);
+      const data = new Float32Array(this.partCount * 16);
       this.parts.forEach((part, i) => {
         const centre = part.centre || [0, 0, 0];
         data[i * 4] = centre[0];
@@ -13619,9 +13877,22 @@ ${SHADOW_LOOKUP}
         data[at + 1] = lens ? lens[1] : 1;
         data[at + 2] = lens ? lens[2] : 1;
         data[at + 3] = lens ? 1 : 0;
+        /* And what this part gives off as a lamp, lit and unlit. A car's
+         * lighting config names meshes rather than materials — one lamp
+         * housing wears the same red plastic as the next and they are told to
+         * light up differently — so this belongs beside the lens and not in
+         * the palette. */
+        const lamp = part.lamp || null;
+        const litAt = (this.partCount * 2 + i) * 4;
+        const darkAt = (this.partCount * 3 + i) * 4;
+        for (let k = 0; k < 3; k++) {
+          data[litAt + k] = lamp && lamp.on ? Math.max(0, lamp.on[k] || 0) : 0;
+          data[darkAt + k] = lamp && lamp.off ? Math.max(0, lamp.off[k] || 0) : 0;
+        }
+        data[litAt + 3] = lamp ? 1 : 0;
       });
       gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 2, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 4, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this._updateRadius();
@@ -14508,6 +14779,11 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE7);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.glowArray);
       gl.uniform1i(this.uniforms.glow, 7);
+      gl.activeTexture(gl.TEXTURE8);
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.uniform1i(this.uniforms.lights, 8);
+      gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
+      gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
@@ -14596,6 +14872,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     restoreAll: $('restore-all'),
     spinToggle: $('spin-toggle'),
     groundToggle: $('ground-toggle'),
+    lightsToggle: $('lights-toggle'),
+    lightsLabel: $('lights-label'),
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     exportGltf: $('export-gltf'),
@@ -14656,6 +14934,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
   let lensColours = new Map();
+  /** What the same config says lights up when the car's lights are on, and
+   *  the lamps it carries as lights rather than as surfaces. */
+  let carLamps = new Map();
+  let carLightSources = [];
   /** Material libraries the user supplied, keyed by lowercased basename. */
   const suppliedMaterials = new Map();
   /* What a BeamNG car keeps beside its model: `main.materials.json` and the
@@ -14956,6 +15238,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
      * skin — a Renault 5 names `body`, `body2` and `rim_colored` there and its
      * skins name none. */
     lensColours = new Map();
+      carLamps = new Map();
+      carLightSources = [];
     for (const file of list) {
       const where = pathOf(file).replace(/\\/g, '/');
       if (!/(^|\/)extension\/[^/]+\.ini$/i.test(where)) {
@@ -14981,6 +15265,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       for (const [mesh, colour] of FbxKn5.lensColours(text)) {
         if (!lensColours.has(mesh)) lensColours.set(mesh, colour);
       }
+      const lighting = FbxKn5.carLighting(text);
+      for (const [mesh, lamp] of lighting.lamps) {
+        if (!carLamps.has(mesh)) carLamps.set(mesh, lamp);
+      }
+      carLightSources = carLightSources.concat(lighting.lights);
     }
     for (const library of libraries) {
       suppliedMaterials.set(library.name.toLowerCase(), await library.text());
@@ -15605,6 +15894,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       }
       if (!mesh || !mesh.triangleCount) { pieces.push(null); continue; }
       // Copy out now: the next build may grow memory and detach these views.
+      const named = String(part.model.displayName
+        || part.geometry.displayName || '');
       pieces.push({
         positions: mesh.positions.slice(),
         normals: mesh.normals.slice(),
@@ -15615,14 +15906,20 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         polygonCount: mesh.polygonCount,
         min: mesh.min,
         max: mesh.max,
-        name: part.model.displayName || part.geometry.displayName || 'part',
+        name: named || 'part',
         materialNames: part.materials.map((material) => material.displayName),
         /* And the colour of the lens this part is, where the car's lighting
          * config says it is one. It belongs to the part and not to the
          * material: a Renault 5's `glass_fog` mesh wears the material its
          * `glass_platelight` mesh wears, and the two are given different
-         * colours. */
-        lens: lensColours.get(String(part.model.displayName || '').toLowerCase()) || null,
+         * colours.
+         *
+         * Looked up under the name the part is shown under, which is the
+         * model's where there is one and the geometry's where there is not.
+         * Under the model's alone, a mesh whose name is on its geometry is a
+         * mesh the config can never name. */
+        lens: lensColours.get(named.toLowerCase()) || null,
+
       });
       FbxWasm.release(heapMark);
     }
@@ -15920,6 +16217,40 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
   /**
+   * Offer the car's own lights, where it brought a config that says what they
+   * are.
+   *
+   * The switch is hidden for everything that did not, which is every format
+   * but a `.kn5` with an `extension` folder beside it and most of those. It
+   * starts off: a car photographed in a showroom has its lamps dark, and
+   * turning them on is a thing to ask for rather than to be given.
+   *
+   * One switch rather than a dashboard. A file says whether each lamp follows
+   * the headlights, the brakes, the indicators or a door, and what this
+   * offers is the car with its lights on — all of them at once.
+   */
+  function offerLights() {
+    /* Put each lamp on the part that wears it here rather than where the
+     * geometry is built: a scene assembled part by part and a single geometry
+     * opened on its own arrive at the part table by different roads, and this
+     * is where the two meet. The lens is filled in the same pass for the same
+     * reason — down the second road it was never being looked up at all. */
+    let found = 0;
+    for (const part of partTable || []) {
+      const named = String(part.name || '').toLowerCase();
+      part.lamp = carLamps.get(named) || null;
+      if (part.lamp) found += 1;
+      if (!part.lens) part.lens = lensColours.get(named) || null;
+    }
+    const has = found > 0 || carLightSources.length > 0;
+    viewer.setParts(partTable);
+    dom.lightsLabel.hidden = !has;
+    if (!has) dom.lightsToggle.checked = false;
+    viewer.setLightSources(carLightSources);
+    viewer.setLightsOn(has && dom.lightsToggle.checked);
+    return found;
+  }
+  /**
    * Draw the scene the segments now describe.
    *
    * The palette is not rebuilt and the textures are not decoded again — an
@@ -15946,6 +16277,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     viewer.setMesh(built.mesh, { keepCamera: true });
     partTable = built.table || [];
     viewer.setParts(partTable);
+    offerLights();
     // The parts are numbered afresh, so a selection that has fallen off the
     // end of the list is no selection at all.
     setSelectedPart(selectedPart < partTable.length ? selectedPart : -1);
@@ -18987,6 +19319,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       viewer.setMesh(built.mesh, { keepCamera });
       partTable = built.table || [];
       viewer.setParts(partTable);
+      offerLights();
       setSelectedPart(-1);
       // Only a scene of several parts has anything to pull apart.
       dom.explodeSlider.disabled = partTable.length < 2;
@@ -19198,6 +19531,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       viewer.setMesh(mesh, { keepCamera });
       partTable = built.table;
       viewer.setParts(partTable);
+      offerLights();
       setSelectedPart(-1);
       dom.explodeSlider.disabled = true;
       dom.explodeSlider.value = '0';
@@ -19388,6 +19722,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     dom.spinToggle.addEventListener('change', () => viewer.setAutoRotate(dom.spinToggle.checked));
     dom.groundToggle.addEventListener('change',
       () => viewer.setShowGround(dom.groundToggle.checked));
+    dom.lightsToggle.addEventListener('change',
+      () => viewer.setLightsOn(dom.lightsToggle.checked));
     dom.textureToggle.addEventListener('change',
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());

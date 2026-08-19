@@ -39,6 +39,10 @@ const FbxViewer = (function () {
    * is what a material that states no exponent gets — and it is the ceiling
    * on a stated one as well, since the number is there to say a surface
    * reflects across more of itself than a fifth power does, never less. */
+  /* How many of a car's own lamps the viewer will carry as lights. The
+   * busiest of the 135 cars to hand states sixteen. */
+  const MAX_LIGHTS = 24;
+
   const PALETTE_ROWS = 8;
   const SCHLICK_POWER = 5;
 
@@ -386,6 +390,10 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uBump;
   uniform highp sampler2DArray uDetail;
   uniform highp sampler2DArray uGlow;
+  uniform highp sampler2D uLights;   // three texels a light: see setLightSources
+  uniform int uLightCount;
+  uniform int uLightsOn;
+  uniform mat4 uModel;               // the same one the vertex stage uses
   uniform int uUseTextures;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
@@ -776,6 +784,46 @@ ${SHADOW_LOOKUP}
       direct = beneath * SUN_COLOUR * nol * shadow;
     }
 
+    /* And the car's own lamps, as lights rather than as surfaces.
+     *
+     * [LIGHT_EXTRA_*] is a lamp written as where it is, which way it points,
+     * how far it reaches and how tight its cone. 20 of the cars to hand carry
+     * them — a cabin light over the seats, a boot light, the pool a headlamp
+     * throws — and the positions are the model's own, so they go through the
+     * same matrix the model does and follow it when an axis is flipped.
+     *
+     * Falls off as the inverse square, faded to nothing at the range the file
+     * states so a lamp lights its own corner of the car rather than all of
+     * it. No shadows: the map this draws with is the sun's, and a light in the
+     * cabin would need its own. */
+    for (int i = 0; i < uLightCount; i++) {
+      vec4 place = texelFetch(uLights, ivec2(i, 0), 0);
+      vec4 tint = texelFetch(uLights, ivec2(i, 1), 0);
+      vec4 aim = texelFetch(uLights, ivec2(i, 2), 0);
+      vec3 at = (uModel * vec4(place.xyz, 1.0)).xyz;
+      vec3 toward = at - vWorld;
+      float far = length(toward);
+      if (far > place.w) continue;
+      vec3 ld = toward / max(far, 1e-4);
+      float lambert = max(dot(n, ld), 0.0);
+      if (lambert <= 0.0) continue;
+      // Inverse square, and out at the stated range rather than trailing on.
+      float reach = 1.0 - far / place.w;
+      float fall = reach * reach / (1.0 + far * far);
+      if (tint.w > -1.0) {
+        // A cone, softened over the sharpness the file states.
+        vec3 way = normalize((uModel * vec4(aim.xyz, 0.0)).xyz);
+        float within = dot(-ld, way);
+        fall *= smoothstep(tint.w, mix(1.0, tint.w, 1.0 - aim.w * 0.9), within);
+      }
+      if (fall <= 0.0) continue;
+      vec3 lh = normalize(ld + v);
+      float lnoh = max(dot(n, lh), 0.0);
+      float lvoh = max(dot(v, lh), 0.0);
+      vec3 lspec = fresnelStated(f0, lvoh, shape.x, shape.y)
+        * (distributionGgx(lnoh, a) * visibilitySmith(nov, lambert, a) * sunSpecular);
+      direct += (diffuseColour / PI + lspec) * under * tint.rgb * lambert * fall;
+    }
     /* The environment, which is what makes a curved surface read as a surface
      * — and on car paint is the whole of what makes it read as paint.
      *
@@ -824,6 +872,23 @@ ${SHADOW_LOOKUP}
       if (uUseTextures == 1 && glowLayer >= 0 && glow != vec3(0.0)) {
         glow *= texture(uGlow, vec3(vUv, float(glowLayer))).rgb;
       }
+    }
+
+    /* And what this part gives off as a lamp of the car's own.
+     *
+     * A car's lighting config names meshes rather than materials: one lamp
+     * housing wears the same red plastic as the next and they are told to
+     * light up differently, so this is a part's own and sits beside its lens
+     * rather than in the palette. 56 of the 135 cars to hand carry these, and
+     * they are the whole of what makes a lamp read as a lamp rather than as
+     * red plastic.
+     *
+     * Two colours, and the switch chooses: what it is with the lights on, and
+     * what it sits at with them off — a tail lamp is a dull red unlit and a
+     * bright one lit. */
+    if (uPartCount > 0 && uMode == 0) {
+      vec4 lamp = texelFetch(uParts, ivec2(vPart, uLightsOn == 1 ? 2 : 3), 0);
+      glow += max(lamp.rgb, vec3(0.0));
     }
     // A marked material glows a little, so it reads even where it is in shadow.
     vec3 lit = direct + ambient + glow
@@ -1035,6 +1100,9 @@ ${SHADOW_LOOKUP}
         bump: gl.getUniformLocation(program, 'uBump'),
         detail: gl.getUniformLocation(program, 'uDetail'),
         glow: gl.getUniformLocation(program, 'uGlow'),
+        lights: gl.getUniformLocation(program, 'uLights'),
+        lightCount: gl.getUniformLocation(program, 'uLightCount'),
+        lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
@@ -1200,6 +1268,15 @@ ${SHADOW_LOOKUP}
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, null);
 
+      // And one texel per light, three rows of them: see setLightSources.
+      this.lightTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+
       this.textureArray = gl.createTexture();
       this.textureLayers = 0;
       this.finishArray = gl.createTexture();
@@ -1210,6 +1287,9 @@ ${SHADOW_LOOKUP}
       this.detailLayers = 0;
       this.glowArray = gl.createTexture();
       this.glowLayers = 0;
+      this.lightSources = [];
+      this.lightCount = 0;
+      this.lightsOn = false;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -1237,13 +1317,67 @@ ${SHADOW_LOOKUP}
      * The scene's parts: what each is called, where its middle is, and how big
      * it is. The centres drive the explode; the rest is what a click reports.
      */
+    /**
+     * The lamps a car carries as lights rather than as surfaces.
+     *
+     * Each is where it is, which way it points, how far it reaches and how
+     * tight its cone — three texels a light, the same way the parts are held.
+     * The positions are in the model's own space and are put through uModel
+     * in the shader, so flipping an axis or standing a Z-up car up takes the
+     * lights with it.
+     */
+    setLightSources(lights) {
+      const gl = this.gl;
+      this.lightSources = Array.isArray(lights) ? lights.slice(0, MAX_LIGHTS) : [];
+      this.lightCount = this.lightSources.length;
+      this.dirty = true;
+      if (!this.lightCount) return;
+      const data = new Float32Array(this.lightCount * 12);
+      this.lightSources.forEach((light, i) => {
+        const at = i * 4;
+        const position = light.position || [0, 0, 0];
+        data[at] = position[0];
+        data[at + 1] = position[1];
+        data[at + 2] = position[2];
+        data[at + 3] = Math.max(light.range || 1, 1e-3);
+        const colour = light.colour || [1, 1, 1];
+        const to = (this.lightCount + i) * 4;
+        data[to] = Math.max(0, colour[0]);
+        data[to + 1] = Math.max(0, colour[1]);
+        data[to + 2] = Math.max(0, colour[2]);
+        /* A cone as the cosine of its half-angle, which is what the shader
+         * compares against. A spot of 180 or none at all is a lamp that
+         * shines every way, and -1 is every direction at once. */
+        const spot = light.spot > 0 && light.spot < 180
+          ? Math.cos((light.spot / 2) * Math.PI / 180) : -1;
+        data[to + 3] = spot;
+        const way = light.direction || [0, -1, 0];
+        const length = Math.hypot(way[0], way[1], way[2]) || 1;
+        const on = (this.lightCount * 2 + i) * 4;
+        data[on] = way[0] / length;
+        data[on + 1] = way[1] / length;
+        data[on + 2] = way[2] / length;
+        data[on + 3] = Math.min(Math.max(light.sharpness, 0), 1) || 0.5;
+      });
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.lightCount, 3, 0,
+        gl.RGBA, gl.FLOAT, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /** Whether the car's lights are on. */
+    setLightsOn(on) {
+      this.lightsOn = on !== false;
+      this.dirty = true;
+    }
     setParts(parts) {
       const gl = this.gl;
       this.parts = Array.isArray(parts) ? parts : [];
       this.partCount = this.parts.length;
       this.selectedPart = -1;
       if (!this.partCount) { this.dirty = true; return; }
-      /* Two rows: where each part's middle is, and what colour of lens it is.
+      /* Four rows: where each part's middle is, what colour of lens it is, and
+       * the two colours it gives off as a lamp — lit and unlit.
        *
        * The second is a part's own and not its material's — a car's glass is
        * one grey picture however many lamps wear it, and what makes a Renault
@@ -1251,7 +1385,7 @@ ${SHADOW_LOOKUP}
        * the car's lighting config. Its `glass_fog` mesh wears the material its
        * `glass_platelight` mesh wears, and the two are given different
        * colours, so there is nowhere else for it to go. */
-      const data = new Float32Array(this.partCount * 8);
+      const data = new Float32Array(this.partCount * 16);
       this.parts.forEach((part, i) => {
         const centre = part.centre || [0, 0, 0];
         data[i * 4] = centre[0];
@@ -1264,9 +1398,22 @@ ${SHADOW_LOOKUP}
         data[at + 1] = lens ? lens[1] : 1;
         data[at + 2] = lens ? lens[2] : 1;
         data[at + 3] = lens ? 1 : 0;
+        /* And what this part gives off as a lamp, lit and unlit. A car's
+         * lighting config names meshes rather than materials — one lamp
+         * housing wears the same red plastic as the next and they are told to
+         * light up differently — so this belongs beside the lens and not in
+         * the palette. */
+        const lamp = part.lamp || null;
+        const litAt = (this.partCount * 2 + i) * 4;
+        const darkAt = (this.partCount * 3 + i) * 4;
+        for (let k = 0; k < 3; k++) {
+          data[litAt + k] = lamp && lamp.on ? Math.max(0, lamp.on[k] || 0) : 0;
+          data[darkAt + k] = lamp && lamp.off ? Math.max(0, lamp.off[k] || 0) : 0;
+        }
+        data[litAt + 3] = lamp ? 1 : 0;
       });
       gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 2, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 4, 0,
         gl.RGBA, gl.FLOAT, data);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this._updateRadius();
@@ -2153,6 +2300,11 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE7);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.glowArray);
       gl.uniform1i(this.uniforms.glow, 7);
+      gl.activeTexture(gl.TEXTURE8);
+      gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
+      gl.uniform1i(this.uniforms.lights, 8);
+      gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
+      gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
