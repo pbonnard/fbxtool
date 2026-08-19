@@ -269,16 +269,16 @@ async function main() {
       const lit = (entry) => [0, 1, 2].map((k) =>
         entry.colour[k] * (1 - entry.metallic) + entry.colour[k] * entry.metallic);
       if ([0, 1, 2].some((k) => Math.abs(lit(m)[k] - lit(was)[k]) > 6e-3)) return true;
-      // A dielectric's reflectance rides on KHR_materials_specular, which is
-      // the only place glTF has to put it — and the export can only ever lower
-      // it. Above 4% the surface renders as a mirror and cancels its own
-      // albedo in indirect light, so a colour written to it does nothing at
-      // all; the whole factor is scaled down to its brightest channel, which
-      // keeps the hue and caps the reflectance.
+      /* A dielectric's reflectance comes back as it went.
+       *
+       * `KHR_materials_specular` is still held at the 4% a dielectric has —
+       * above that the surface renders as a mirror and cancels its own albedo
+       * in indirect light, so a colour written to it does nothing, and that
+       * is what everything downstream of this reads. But the number the file
+       * actually stated is written beside it under `extras` and read back
+       * here, so the trip through a glTF no longer costs it. */
       if (was.metallic >= 0.5) return false;
-      const peak = Math.max(was.specular[0], was.specular[1], was.specular[2]);
-      const capped = peak > 0.04 ? 0.04 / peak : 1;
-      return [0, 1, 2].some((k) => Math.abs(m.specular[k] - was.specular[k] * capped) > 4e-3);
+      return [0, 1, 2].some((k) => Math.abs(m.specular[k] - was.specular[k]) > 4e-3);
     });
     check('each with its name, its colour and its transparency', wrong.length === 0,
       wrong.slice(0, 3).map((m) => m.name).join(', ') || 'all match');

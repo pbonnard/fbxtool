@@ -489,6 +489,38 @@ const FbxGltfIn = (function () {
       if (material.alphaCutoff !== undefined) {
         props.push(p70('AlphaCutoff', 'Number', D(material.alphaCutoff)));
       }
+      /* And whatever the writer put under `extras`, which is where a material
+       * richer than glTF describes keeps the rest of itself.
+       *
+       * This tool writes it there and reads it back here, so a car goes out
+       * and comes in as the same surface rather than as a PBR approximation
+       * of one. `stated` is what its own file said, under the names it said
+       * them with, and everything derived from those is derived again by the
+       * same code that read them the first time — so nothing has to be
+       * carried twice or kept in step.
+       */
+      const extras = material.extras || {};
+      if (typeof extras.shader === 'string' && extras.shader) {
+        props.push(p70('ShaderName', 'KString', S(extras.shader)));
+      }
+      /* The reflectance the file stated, over the one `KHR_materials_specular`
+       * carries. That extension is held at the 4% a dielectric has, which is
+       * what the pipelines want and not what the material said. */
+      if (Array.isArray(extras.reflectance) && extras.reflectance.length === 3
+        && extras.reflectance.every((c) => typeof c === 'number')) {
+        for (const entry of props) {
+          if (entry.props[0].value !== 'SpecularColor') continue;
+          for (let k = 0; k < 3; k++) entry.props[4 + k] = D(extras.reflectance[k]);
+        }
+      }
+      for (const [key, value] of Object.entries(extras.stated || {})) {
+        if (typeof value === 'number') props.push(p70(key, 'Number', D(value)));
+        else if (typeof value === 'boolean') props.push(p70(key, 'Bool', I(value ? 1 : 0)));
+        else if (Array.isArray(value) && value.length === 3
+          && value.every((c) => typeof c === 'number')) {
+          props.push(p70(key, 'Color', ...value.map(D)));
+        }
+      }
       objects.push(node('Material',
         [L(id), S(`${material.name || `material${index}`}${CLASS_SEP}Material`), S('')], [
           node('Version', [I(102)]),
@@ -506,6 +538,9 @@ const FbxGltfIn = (function () {
         [material.occlusionTexture, 'AmbientOcclusion'],
         [material.emissiveTexture, 'EmissiveColor'],
         [pbr.metallicRoughnessTexture, 'MetallicRoughness'],
+        // The grain's own relief, which glTF has no slot of its own for and
+        // which the writer names from `extras`.
+        [(material.extras || {}).detailNormalTexture, 'detailNormal'],
       ];
       for (const [entry, property] of maps) {
         emitTexture(entry, property, id);

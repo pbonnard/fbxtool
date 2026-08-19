@@ -55,11 +55,14 @@ async function main() {
   await page.goto(`file://${PAGE}`);
   await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 20000 });
 
-  const before = await page.evaluate(() => window.fbxtool.loadCount);
-  await page.setInputFiles('#file-input', [model]);
-  await page.waitForFunction((seen) => window.fbxtool.loadCount > seen, before,
-    { timeout: 120000 });
-  await page.waitForTimeout(800);
+  const open = async (target, file) => {
+    const seen = await target.evaluate(() => window.fbxtool.loadCount);
+    await target.setInputFiles('#file-input', [file]);
+    await target.waitForFunction((was) => window.fbxtool.loadCount > was, seen,
+      { timeout: 120000 });
+    await target.waitForTimeout(800);
+  };
+  await open(page, model);
 
   await page.selectOption('#export-format', 'glb');
   await page.click('#export-gltf');
@@ -94,6 +97,14 @@ async function main() {
     extras.reflectance && near(extras.reflectance[0], 0.07, 0.001),
     JSON.stringify(extras.reflectance));
 
+  /* And the extension itself is still held at the 4% a dielectric has, which
+   * is what every reader but this one goes by. Carrying the stated number was
+   * never an argument for raising that. */
+  const spec = (material.extensions || {}).KHR_materials_specular;
+  check('while the extension stays inside what a dielectric reflects',
+    !spec || spec.specularColorFactor.every((c) => c <= 1.0001),
+    spec ? JSON.stringify(spec.specularColorFactor) : 'not written, being above the cap');
+
   check('and the shape of what it returns',
     near(extras.fresnelExp, 3.5, 0.01) && near(extras.fresnelCeiling, 0.6, 0.01),
     `exp ${extras.fresnelExp}, ceiling ${extras.fresnelCeiling}`);
@@ -126,6 +137,51 @@ async function main() {
     Array.isArray(stated.ksEmissive) && stated.ksEmissive[0] === 10,
     JSON.stringify(stated.ksEmissive));
 
+  /* And out and back again, in both spellings.
+   *
+   * The point of carrying all of it is that a car written out and opened
+   * again is the car that went in. glTF keeps the extra in `extras` and FBX
+   * under the names the properties arrived with — different corners, the same
+   * surface — so the reading has to come back the same either way.
+   */
+  const KEEP = ['colour', 'specular', 'roughness', 'metallic', 'emissive', 'opacity',
+    'alphaMode', 'alphaCutoff', 'specularWeight', 'sunRoughness', 'additive',
+    'fresnelExp', 'fresnelCeiling', 'detailTiling', 'detailNormalBlend',
+    'tintTexture', 'shader'];
+  const readBack = () => page.evaluate((keys) => {
+    const entry = window.fbxtool.palette[0];
+    const out = {};
+    for (const key of keys) {
+      const value = entry[key];
+      out[key] = Array.isArray(value) ? value.map((v) => Math.round(v * 1e4) / 1e4)
+        : (typeof value === 'number' ? Math.round(value * 1e4) / 1e4 : value);
+    }
+    return out;
+  }, KEEP);
+
+  // Already open, and re-selecting the file that is open fires nothing.
+  const original = await readBack();
+  for (const format of ['glb', 'fbx']) {
+    written.length = 0;
+    await page.selectOption('#export-format', format);
+    await page.click('#export-gltf');
+    const waited = Date.now() + 120000;
+    while (!written.length && Date.now() < waited) await page.waitForTimeout(150);
+    if (!written.length) {
+      check(`a .${format} was written`, false, 'nothing arrived');
+      continue;
+    }
+    await open(page, written[0]);
+    const back = await readBack();
+    const moved = KEEP.filter((key) =>
+      JSON.stringify(original[key]) !== JSON.stringify(back[key]));
+    check(`every value survives the trip through a .${format}`, moved.length === 0,
+      moved.length ? moved.map((k) =>
+        `${k} ${JSON.stringify(original[k])} -> ${JSON.stringify(back[k])}`).join('; ')
+        : `${KEEP.length} of them`);
+    // Back to the model itself for the next spelling.
+    await open(page, model);
+  }
   check('no page errors', errors.length === 0, errors.join(' | ') || 'clean');
 
   await browser.close();
