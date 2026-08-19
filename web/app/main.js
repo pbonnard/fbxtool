@@ -3947,6 +3947,16 @@
    * one at 0.28. So each is taken as neutral at its own average, and only what
    * differs from that shows. The colour a car was authored stays where it was,
    * and the grain and the cast of the picture arrive on top of it.
+   *
+   * `null` for a picture that is one colour from corner to corner, which is
+   * not a grain at all: nothing about it differs from its own average, so
+   * there is nothing for it to say. A third of the detail maps in the 67 cars
+   * to hand are that — `NULL.dds`, `PURE_RED.dds`, a numbered `2.dds` — the
+   * slot filled in and never authored. Taken as a grain, the greys among them
+   * come out as the nothing they are, and the 55 that are a flat saturated
+   * colour repaint whatever wears them: a Jaguar Mk2 whose paint names a
+   * sixteen-pixel square of pure red draws red under every skin it has,
+   * liveries and previews notwithstanding.
    */
   function detailScale(image, edge = 32) {
     try {
@@ -3963,11 +3973,20 @@
        * read, a grain at 0.24 comes out five times too dark once its own
        * average is divided back out, and a white Mercedes draws graphite. */
       let total = 0;
+      let flat = true;
       for (let i = 0; i < pixels.length; i += 4) {
         total += (FbxPalette.fromSrgb(pixels[i] / 255)
           + FbxPalette.fromSrgb(pixels[i + 1] / 255)
           + FbxPalette.fromSrgb(pixels[i + 2] / 255)) / 3;
+        /* Held against the first texel exactly rather than within a
+         * tolerance. Scaling a picture that is one colour leaves it that
+         * colour, so a flat file answers this whatever size it was; a grain
+         * fine enough to average away over 32 pixels still lands a texel or
+         * two off, and stays a grain. */
+        if (flat && (pixels[i] !== pixels[0] || pixels[i + 1] !== pixels[1]
+          || pixels[i + 2] !== pixels[2])) flat = false;
       }
+      if (flat) return null;
       const mean = total / (pixels.length / 4);
       // A map that reads as nothing at all is left alone rather than dividing
       // by it: an alpha of zero comes back black through a canvas.
@@ -4025,8 +4044,16 @@
       const layer = material.bumpLayer;
       material.bumpIsNormalMap = layer >= 0 ? kinds[layer] : false;
       material.bumpStrength = material.bumpIsNormalMap ? 1 : BUMP_RELIEF;
-      material.detailScale = material.detailLayer >= 0
-        ? scales[material.detailLayer] : 1;
+      const scale = material.detailLayer >= 0 ? scales[material.detailLayer] : 1;
+      /* A picture that turned out to be no grain is dropped rather than
+       * multiplied in. The tiling goes with it, since that is what the export
+       * asks before baking a grain into a picture — left set, a car would
+       * leave carrying the flat colour the viewer had just refused to draw. */
+      if (scale === null) {
+        material.detailLayer = -1;
+        material.detailTiling = 0;
+      }
+      material.detailScale = scale === null ? 1 : scale;
     }
     return {
       images: base.images,

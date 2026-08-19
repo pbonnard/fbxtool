@@ -1003,7 +1003,17 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
     # And one dark enough that taking it as neutral asks for forty-seven times
     # the light back, where the viewer allows eight. An Audi S8's paint asks
     # for ten, so the ceiling is a real one and both sides must hold to it.
-    deep = fb.dds_bgra(4, 4, bytes([40, 40, 40, 255]) * 16)
+    # Dark and darker rather than one flat dark: a grain has to differ from
+    # its own average somewhere to be a grain at all, and this one is here to
+    # ask about the ceiling rather than about that.
+    deep = fb.dds_bgra(4, 4,
+                       (bytes([35, 35, 35, 255]) * 8) + (bytes([45, 45, 45, 255]) * 8))
+    # And the same flat grain in a colour, which is the slot filled in and
+    # never authored: 55 of the 581 detail maps in the 67 cars to hand are one
+    # of these, under names like `PURE_RED.dds` and `NULL.dds`. Its average is
+    # one number in grey and three in colour, so neutralised by the one it
+    # comes back three times its own red and paints whatever wears it.
+    dummy = fb.dds_bgra(4, 4, bytes([0, 0, 255, 255]) * 16)
     identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
     vertices, indices = fb.kn5_cube(1.0)
@@ -1016,6 +1026,8 @@ def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
          [("grey.dds", grey), ("flat.dds", flat)]),
         ("deep", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "deep.dds")),
          [("grey.dds", grey), ("deep.dds", deep)]),
+        ("dummy", (("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "dummy.dds")),
+         [("grey.dds", grey), ("dummy.dds", dummy)]),
     ):
         material = fb.kn5_material(
             "panel", "ksPerPixelMultiMap",
