@@ -609,6 +609,7 @@
     await viewer.setBumpTextures(textures.bump);
     await viewer.setDetailTextures(textures.detail);
     await viewer.setGlowTextures(textures.glow);
+    await viewer.setNormalDetailTextures(textures.detailNormal);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
       && textures.finish.length === 0 && textures.bump.length === 0
@@ -3665,6 +3666,11 @@
       detailTiling: props.useDetail === 0 ? 0
         : (typeof props.detailUVMultiplier === 'number'
           ? props.detailUVMultiplier : 1),
+      /* How much of the slope of that grain is taken. A game states it
+       * beside the map, and it is the difference between leather and a
+       * photograph of leather on something flat. */
+      detailNormalBlend: typeof props.detailNormalBlend === 'number'
+        ? props.detailNormalBlend : 1,
       // How much of the sun's highlight the surface takes, where it says.
       specularWeight: look.specularWeight,
       /* And the shape of what it returns of the world: how fast the
@@ -4183,6 +4189,12 @@
     const glow = await resolveLayer(palette,
       (m) => (wanted(m, 'emissive') && m.emissive && m.emissive.some((v) => v > 0)
         && m.textures ? m.textures.emissive : null), 'emissiveLayer');
+    /* And the grain's own relief, which is tiled by the same number and so is
+     * worth nothing without it. Every one of the 575 materials to hand that
+     * binds one binds the grain as well. */
+    const fine = await resolveLayer(palette,
+      (m) => (wanted(m, 'detail') && m.detailTiling && m.textures
+        ? m.textures.detailNormal : null), 'detailNormalLayer');
     // Which kind each layer turned out to be, and how hard to take it. A
     // normal map states its own slopes and is taken as written; a height has
     // to be turned into one, and the strength is what says how deep it reads.
@@ -4209,13 +4221,15 @@
       // A map that was named and did not arrive is worth saying so about,
       // whichever of the three it was.
       missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing,
-        ...grain.missing, ...glow.missing])],
+        ...grain.missing, ...glow.missing, ...fine.missing])],
       unreadable: [...new Set([...base.unreadable, ...finish.unreadable,
-        ...relief.unreadable, ...grain.unreadable, ...glow.unreadable])],
+        ...relief.unreadable, ...grain.unreadable, ...glow.unreadable,
+        ...fine.unreadable])],
       finish: finish.images,
       bump: relief.images,
       detail: grain.images,
       glow: glow.images,
+      detailNormal: fine.images,
     };
   }
 
@@ -4502,6 +4516,7 @@
       await viewer.setBumpTextures(textures.bump);
       await viewer.setDetailTextures(textures.detail);
       await viewer.setGlowTextures(textures.glow);
+      await viewer.setNormalDetailTextures(textures.detailNormal);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0
@@ -4716,6 +4731,7 @@
       await viewer.setBumpTextures(textures.bump);
       await viewer.setDetailTextures(textures.detail);
       await viewer.setGlowTextures(textures.glow);
+      await viewer.setNormalDetailTextures(textures.detailNormal);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0

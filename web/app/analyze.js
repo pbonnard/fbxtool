@@ -274,6 +274,9 @@ const FbxAnalyze = (function () {
     ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
     ['detail', /^(txdetail|detail|detailmap|detailtexture)$/i],
+    // The shape that goes with that grain. A game spells it one way and
+    // keeps it in a slot of its own; nothing else writes one at all.
+    ['detailNormal', /^(txnormaldetail|detailnormal|detailnormalmap)$/i],
   ];
 
   /**

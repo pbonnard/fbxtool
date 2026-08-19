@@ -1189,6 +1189,67 @@ def test_what_a_surface_gives_off_on_its_own(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_the_shape_that_goes_with_a_grain(built, tmp_path):
+    """A grain is two maps: what colour the surface is at that scale and what
+    shape it is. Every one of the 575 materials across the 67 cars to hand
+    that binds `txNormalDetail` binds `txDetail` as well, and only three of
+    them are the same file — so the shape is its own picture, of the leather
+    rather than of the panel.
+
+    53 of those 575 blend it at nothing, which has to come back
+    indistinguishable from carrying none at all.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([180, 180, 180, 255]) * 16)
+    # A grain that varies, so it is a grain rather than a flat colour and is
+    # not dropped before the relief that goes with it can be tiled by it.
+    speck = fb.dds_bgra(4, 4, (bytes([120, 120, 120, 255]) * 8)
+                        + (bytes([150, 150, 150, 255]) * 8))
+    # A relief pointing one way across the whole of itself, so what it does is
+    # the surface turning rather than a texture appearing. BGRA in, so this is
+    # r=210, g=128, b=255: tilted along the surface's own x.
+    tilt = fb.dds_bgra(4, 4, bytes([255, 128, 210, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    files = []
+    for name, relief, blend in (("plain", False, 1.0), ("tilted", True, 1.0),
+                                ("off", True, 0.0)):
+        slots = [("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "speck.dds")]
+        textures = [("grey.dds", grey), ("speck.dds", speck)]
+        properties = (fb.kn5_property("fresnelC", 0.05)
+                      + fb.kn5_property("useDetail", 1.0)
+                      + fb.kn5_property("detailUVMultiplier", 3.0)
+                      + fb.kn5_property("detailNormalBlend", blend))
+        if relief:
+            slots.append(("txNormalDetail", 4, "tilt.dds"))
+            textures.append(("tilt.dds", tilt))
+        material = fb.kn5_material("panel", "ksPerPixelMultiMap_NMDetail",
+                                   properties=properties, property_count=4,
+                                   slots=tuple(slots))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=textures, materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "relief.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
 def test_the_grain_a_surface_is_tiled_over_with(built, tmp_path):
     """A car's interior is one atlas of flat panels with the leather, the
     carpet and the carbon laid over them, tiled sixty or a hundred times

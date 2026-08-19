@@ -43,7 +43,7 @@ const FbxViewer = (function () {
    * busiest of the 135 cars to hand states sixteen. */
   const MAX_LIGHTS = 24;
 
-  const PALETTE_ROWS = 8;
+  const PALETTE_ROWS = 9;
   const SCHLICK_POWER = 5;
 
   /* The three-quarter view a model opens on. */
@@ -390,6 +390,7 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uBump;
   uniform highp sampler2DArray uDetail;
   uniform highp sampler2DArray uGlow;
+  uniform highp sampler2DArray uNormalDetail;
   uniform highp sampler2D uLights;   // three texels a light: see setLightSources
   uniform int uLightCount;
   uniform int uLightsOn;
@@ -519,9 +520,13 @@ ${SHADOW_LOOKUP}
     if (uPaletteSize > 0 && uUseTextures == 1) {
       vec4 relief = texelFetch(uPalette, ivec2(slot, 3), 0);
       int bumpLayer = int(relief.r + 0.5) - 1;
+      // Flat until something shapes it, so a surface carrying only the grain's
+      // relief and no map of its own still gets one.
+      vec3 tangentNormal = vec3(0.0, 0.0, 1.0);
+      bool shaped = false;
       if (bumpLayer >= 0) {
         vec3 uvw = vec3(vUv, float(bumpLayer));
-        vec3 tangentNormal;
+        shaped = true;
         if (relief.b > 0.5) {
           tangentNormal = texture(uBump, uvw).xyz * 2.0 - 1.0;
           tangentNormal.xy *= relief.g;
@@ -535,10 +540,31 @@ ${SHADOW_LOOKUP}
           float up = textureOffset(uBump, uvw, ivec2(0, 1)).r;
           tangentNormal = vec3((left - right) * relief.g, (down - up) * relief.g, 1.0);
         }
-        if (dot(tangentNormal, tangentNormal) > 1e-8) {
-          mat3 frame = surfaceFrame(normal, vViewPosition, vUv);
-          normal = normalize(frame * normalize(tangentNormal));
-        }
+      }
+      /* And the relief that goes with the grain, tiled the same number of
+       * times across the surface.
+       *
+       * A grain is two maps: what colour the surface is at that scale and what
+       * shape it is. Every one of the 575 materials to hand that binds the
+       * second binds the first as well, and three of them are the same file —
+       * so it is a picture of the leather rather than of the panel, and
+       * without it the leather is a photograph of leather on something flat.
+       *
+       * The two slopes add, which is the cheapest of the ways of putting two
+       * tangent normals together and the one that keeps the coarse shape: the
+       * panel still turns the way it turned and the grain rides on it. */
+      vec4 grain = texelFetch(uPalette, ivec2(slot, 5), 0);
+      vec4 fine = texelFetch(uPalette, ivec2(slot, 8), 0);
+      int fineLayer = int(fine.r + 0.5) - 1;
+      if (fineLayer >= 0 && fine.g > 0.0) {
+        vec3 fineNormal = texture(uNormalDetail,
+          vec3(vUv * max(grain.g, 1e-4), float(fineLayer))).xyz * 2.0 - 1.0;
+        tangentNormal = vec3(tangentNormal.xy + fineNormal.xy * fine.g, tangentNormal.z);
+        shaped = true;
+      }
+      if (shaped && dot(tangentNormal, tangentNormal) > 1e-8) {
+        mat3 frame = surfaceFrame(normal, vViewPosition, vUv);
+        normal = normalize(frame * normalize(tangentNormal));
       }
     }
 
@@ -1119,6 +1145,7 @@ ${SHADOW_LOOKUP}
         bump: gl.getUniformLocation(program, 'uBump'),
         detail: gl.getUniformLocation(program, 'uDetail'),
         glow: gl.getUniformLocation(program, 'uGlow'),
+        normalDetail: gl.getUniformLocation(program, 'uNormalDetail'),
         lights: gl.getUniformLocation(program, 'uLights'),
         lightCount: gl.getUniformLocation(program, 'uLightCount'),
         lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
@@ -1306,6 +1333,8 @@ ${SHADOW_LOOKUP}
       this.detailLayers = 0;
       this.glowArray = gl.createTexture();
       this.glowLayers = 0;
+      this.normalDetailArray = gl.createTexture();
+      this.normalDetailLayers = 0;
       this.lightSources = [];
       this.lightCount = 0;
       this.lightsOn = false;
@@ -1564,6 +1593,15 @@ ${SHADOW_LOOKUP}
          * nothing takes all of it. */
         data[(width * 5 + i) * 4 + 3] = typeof material.specularWeight === 'number'
           ? Math.min(1, Math.max(0, material.specularWeight)) : 1;
+        /* The shape that goes with that grain: which layer, and how much of
+         * its slope is taken. Held inside the unit range — the files write
+         * -4 and 1000 among the 575 that state one, and neither is a share of
+         * anything — with a median of 1, which is the whole of it. */
+        const fineLayer = Number.isInteger(material.detailNormalLayer)
+          ? material.detailNormalLayer : -1;
+        data[(width * 8 + i) * 4] = Math.max(0, fineLayer + 1);
+        data[(width * 8 + i) * 4 + 1] = typeof material.detailNormalBlend === 'number'
+          ? Math.min(1, Math.max(0, material.detailNormalBlend)) : 1;
         /* And the shape of the Fresnel this surface returns the world with.
          *
          * A file that says nothing gets the plain Schlick — a fifth power,
@@ -1686,6 +1724,19 @@ ${SHADOW_LOOKUP}
       this.glowLayers = images.length;
       return this._uploadArray(this.glowArray, images, this.gl.SRGB8_ALPHA8, edge);
     }
+
+    /**
+     * The shape that goes with a grain, tiled the same number of times.
+     *
+     * Not sRGB: a normal map is three numbers about which way a surface faces
+     * rather than a picture of it, and decoded through a display curve every
+     * one of them comes out wrong.
+     */
+    async setNormalDetailTextures(images, edge = 1024) {
+      this.normalDetailLayers = images.length;
+      return this._uploadArray(this.normalDetailArray, images, this.gl.RGBA8, edge);
+    }
+
     async _uploadArray(target, images, internalFormat, edge = 1024) {
       const gl = this.gl;
       if (!images.length) { this.dirty = true; return; }
@@ -2329,6 +2380,9 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE8);
       gl.bindTexture(gl.TEXTURE_2D, this.lightTexture);
       gl.uniform1i(this.uniforms.lights, 8);
+      gl.activeTexture(gl.TEXTURE9);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.normalDetailArray);
+      gl.uniform1i(this.uniforms.normalDetail, 9);
       gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
       gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
@@ -2337,7 +2391,8 @@ ${SHADOW_LOOKUP}
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
         ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0
-          || this.detailLayers > 0 || this.glowLayers > 0)
+          || this.detailLayers > 0 || this.glowLayers > 0
+          || this.normalDetailLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
       gl.uniform1i(this.uniforms.highlight,
