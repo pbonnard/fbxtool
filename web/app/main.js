@@ -83,6 +83,9 @@
   /** What the car's own extension config calls its paint, for skins that
    *  do not say — read from beside the car rather than from inside the game. */
   let carPaintNames = [];
+  /** And how bright it says each of them is drawn, under whatever the skin
+   *  that is on says about the same material. */
+  let carPaintBrightness = new Map();
   //: Mesh name -> the colour of the lens it is, out of the car's lighting
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
@@ -377,6 +380,7 @@
       suppliedSkins.clear();
       suppliedDressing.clear();
       carPaintNames = [];
+      carPaintBrightness = new Map();
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
     for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
@@ -393,6 +397,7 @@
       const text = await file.text();
       if (/(^|\/)extension\/ext_config\.ini$/i.test(where)) {
         carPaintNames = FbxSkins.paintMaterials(text);
+        carPaintBrightness = FbxSkins.paintBrightness(text, '');
       }
       /* And what colour each lamp lens is. A car's lighting lives in
        * whichever files its author split it across — this one pulls in a
@@ -2002,8 +2007,13 @@
          * colour it is, not how bright. Taken as a replacement, painting a
          * car white makes it brighter than the car it was painted on. */
         const weight = entry.unpainted.colour;
+        /* And at the brightness the file states for it, which is part of the
+         * colour rather than a finish on top of it. A Jaguar C-X75's Silver
+         * states `#FFFFFF` and 0.66, and the two together are what silver is;
+         * the white alone is a different car. */
+        const scale = typeof paint.scale === 'number' ? paint.scale : 1;
         const colour = FbxPalette.fromHex(paint.hex)
-          .map((c, at) => c * (weight[at] === undefined ? 1 : weight[at]));
+          .map((c, at) => c * scale * (weight[at] === undefined ? 1 : weight[at]));
         file.colour = colour.slice();
         file.base = colour.slice();
         /* And it tints the texture rather than replacing it.
@@ -4123,7 +4133,8 @@
     for (const skin of suppliedSkins.values()) {
       read.push(await FbxSkins.read(skin, { worn }));
     }
-    FbxSkins.settle(read, { pictures, fallback: carPaintNames });
+    FbxSkins.settle(read, { pictures, fallback: carPaintNames,
+      brightness: carPaintBrightness });
     /* And, for the ones still stating no colour, the chip they carry a picture
      * of — which is the only thing left saying what colour they are. Settled
      * first, since whether it is worth reading depends on which material the

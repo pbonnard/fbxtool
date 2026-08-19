@@ -6988,6 +6988,13 @@ const FbxSkins = (function () {
     return null;
   }
 
+  /* The three shapes every one of these config readers wants: a section
+   * heading, a `key = value` line with any trailing comment dropped, and the
+   * line ending an ini file may be written with either of. */
+  const HEADING = /^\s*\[([^\]]*)\]/;
+  const SETTING = /^[ \t]*([A-Za-z_]+)[ \t]*=([^;]*)/;
+  const NEWLINE = /\r?\n/;
+
   /**
    * Which materials a config calls the car's paint, in the order it says them.
    *
@@ -7009,8 +7016,8 @@ const FbxSkins = (function () {
         if (trimmed && !out.includes(trimmed)) out.push(trimmed);
       }
     };
-    for (const line of String(text || '').split(/\r?\n/)) {
-      const heading = /^\s*\[([^\]]*)\]/.exec(line);
+    for (const line of String(text || '').split(NEWLINE)) {
+      const heading = HEADING.exec(line);
       if (heading) { section = heading[1]; continue; }
       const setting = /^[ \t]*(CarPaintMaterial|Materials)[ \t]*=([^;]*)/i.exec(line);
       if (!setting) continue;
@@ -7104,6 +7111,90 @@ const FbxSkins = (function () {
     return !!colour && (colour.enabled || !unset(colour.hex));
   }
 
+  /* How far a stated brightness is followed down.
+   *
+   * `BrightnessAdjustment` is half of a pair: it darkens the coat because the
+   * shader is about to add a great deal of specular back on top, and the
+   * settings that do the adding — `AmbientSpecular`, `SpecularBase`,
+   * `ClearCoatThickness` — sit in the same section. Taken alone it is only
+   * the darkening, which is right while it is a compensation and wrong once
+   * it is the whole description: a C-X75's rims state 0.05 beside a clear
+   * coat of 3, meaning the surface has no colour of its own and is all
+   * highlight. This viewer does not put that highlight back, so following the
+   * 0.05 down turns bright silver wheels black.
+   *
+   * A quarter is where the two readings part. Of the 229 settings across the
+   * cars to hand, 33 are under it — and 19 of those 33 are sections naming
+   * their own materials, the rims and trim and carbon, against 27 of the 196
+   * above. So what is under the floor is mostly not the car's paint at all.
+   */
+  const BRIGHTNESS_FLOOR = 0.25;
+  /**
+   * How much of its stated colour a paint is actually drawn at.
+   *
+   * `BrightnessAdjustment` sits in the same `[Material_CarPaint_*]` section
+   * the rest of the paint is written in, and it is not a tweak: a Jaguar
+   * C-X75's Silver states `#FFFFFF` in its `cm_skin.json` and 0.66 here, and
+   * the two together are silver. Read without it the car is white — which is
+   * a colour a paint shop has, and not the one on the preview beside the skin.
+   *
+   * The comment those settings carry, over and over, is "compensates for
+   * ambient specular": a car's paint is drawn with a great deal of the room
+   * added on top of it, so the coat underneath is stated darker than the
+   * colour it is meant to come out as. Nothing is tinted — the whole of the
+   * colour is scaled.
+   *
+   * 37 of the 135 cars to hand state one on a paint: 229 settings, 140 of
+   * them in a skin rather than beside the car, and a median of 0.60. So it is
+   * most of a colour, most of the time it is written at all.
+   *
+   * A section naming no `Materials` is about the paint the file names in
+   * `CarPaintMaterial`, which is why that is gathered first; one that names
+   * some is about those. A section naming the skins it is for is only for
+   * those, the same as a colour is.
+   */
+  function paintBrightness(text, name) {
+    const lines = String(text || '').split(NEWLINE);
+    // What a section that names no materials of its own is about.
+    const fallback = [];
+    for (const line of lines) {
+      const found = SETTING.exec(line);
+      if (found && found[1].toLowerCase() === 'carpaintmaterial') {
+        for (const one of found[2].split(',')) {
+          const trimmed = one.trim();
+          if (trimmed) fallback.push(trimmed);
+        }
+      }
+    }
+    const out = new Map();
+    let section = '';
+    let mine = true;
+    let materials = fallback;
+    for (const line of lines) {
+      const mark = HEADING.exec(line);
+      if (mark) { section = mark[1]; mine = true; materials = fallback; continue; }
+      if (!/^material_carpaint/i.test(section)) continue;
+      const found = SETTING.exec(line);
+      if (!found) continue;
+      const key = found[1].toLowerCase();
+      const value = found[2].trim();
+      if (key === 'skins') {
+        mine = value.split(',').some((one) => one.trim().toLowerCase()
+          === String(name).toLowerCase());
+      } else if (key === 'materials') {
+        materials = value.split(',').map((one) => one.trim()).filter(Boolean);
+      } else if (key === 'brightnessadjustment' && mine) {
+        const scale = Number(value);
+        // A blank or a word is not a number, and a surface stated darker than
+        // the floor is one whose colour the file put in its highlight rather
+        // than its coat — see `BRIGHTNESS_FLOOR`.
+        if (!Number.isFinite(scale) || scale < BRIGHTNESS_FLOOR) continue;
+        for (const material of materials) out.set(material.toLowerCase(), scale);
+      }
+    }
+    return out;
+  }
+
   /**
    * The colours a skin's own `ext_config.ini` states, for the ones with no
    * `cm_skin.json` to state them in.
@@ -7121,8 +7212,8 @@ const FbxSkins = (function () {
     const out = [];
     let section = '';
     let mine = true;
-    for (const line of String(text || '').split(/\r?\n/)) {
-      const heading = /^\s*\[([^\]]*)\]/.exec(line);
+    for (const line of String(text || '').split(NEWLINE)) {
+      const heading = HEADING.exec(line);
       if (heading) { section = heading[1]; mine = true; continue; }
       if (!/^material_carpaint/i.test(section)) continue;
       const setting = /^[ \t]*([A-Za-z]+)[ \t]*=([^;]*)/.exec(line);
@@ -7240,6 +7331,10 @@ const FbxSkins = (function () {
       replaces: [...skin.images.keys()].filter((n) => worn.has(n)).length,
       named: config ? paintMaterials(config) : [],
       colours,
+      /* And how much of that colour each material is actually drawn at,
+       * which is stated in the same section and is the difference between a
+       * white car and a silver one. */
+      brightness: config ? paintBrightness(config, skin.name) : new Map(),
       /* And the picture of the paint, which nearly all of them carry. Whether
        * it is worth reading is settled later, once the car has said which of
        * its materials the paint is: handed back rather than opened here, since
@@ -7260,7 +7355,8 @@ const FbxSkins = (function () {
   function fromChip(skin, hex, pictures) {
     if (!hex || !skin.wantsChip) return skin;
     skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
-    skin.paints = pair(skin.settled || [], skin.colours, new Set(pictures.keys()));
+    skin.paints = pair(skin.settled || [], skin.colours,
+      new Set(pictures.keys()), skin.brightness);
     return skin;
   }
 
@@ -7271,14 +7367,21 @@ const FbxSkins = (function () {
    * a Clio V6 names `wccarbody` and `aleron` — its body and its spoiler — and
    * states the one colour for both. Several are paired by order, which is the
    * only thing the two lists share.
+   *
+   * *brightness* is how much of that colour each material is drawn at, out of
+   * the config beside it — see `paintBrightness`. A material the file says
+   * nothing about is drawn at the whole of what it states.
    */
-  function pair(named, colours, materials) {
+  function pair(named, colours, materials, brightness) {
     const out = [];
+    const scales = brightness || new Map();
     for (let at = 0; at < named.length; at++) {
       const colour = colours.length === 1 ? colours[0] : colours[at];
       if (!stated(colour)) continue;
       if (!materials.has(named[at].toLowerCase())) continue;
-      out.push({ material: named[at], hex: colour.hex });
+      const scale = scales.get(named[at].toLowerCase());
+      out.push({ material: named[at], hex: colour.hex,
+        scale: typeof scale === 'number' ? scale : 1 });
     }
     return out;
   }
@@ -7298,7 +7401,7 @@ const FbxSkins = (function () {
    * that names nothing the car has is answered this way, and only from names
    * its own siblings used.
    */
-  function settle(skins, { pictures, fallback }) {
+  function settle(skins, { pictures, fallback, brightness }) {
     //: Material name -> the picture it wears, both lowercased.
     const materials = new Set(pictures.keys());
     const known = [];
@@ -7312,7 +7415,13 @@ const FbxSkins = (function () {
       if (!named.length) named = (fallback || []).filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = known;
       skin.settled = named;
-      skin.paints = pair(named, skin.colours, materials);
+      /* A skin's own reading of how bright its paint is, over the car's.
+       * Both are the same setting in the same shape of section — one written
+       * beside the model for every skin, one written for this skin — and a
+       * skin that states it means it for itself. */
+      skin.brightness = new Map([...(brightness || new Map()),
+        ...(skin.brightness || new Map())]);
+      skin.paints = pair(named, skin.colours, materials, skin.brightness);
       /* And whether the picture of the paint is worth reading, which is for
        * the skins that came out of all that with nothing on the car.
        *
@@ -7343,7 +7452,7 @@ const FbxSkins = (function () {
   }
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
-    paintColours, configColours, chipColour, fromChip };
+    paintColours, configColours, chipColour, fromChip, paintBrightness };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;
@@ -14387,6 +14496,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   /** What the car's own extension config calls its paint, for skins that
    *  do not say — read from beside the car rather than from inside the game. */
   let carPaintNames = [];
+  /** And how bright it says each of them is drawn, under whatever the skin
+   *  that is on says about the same material. */
+  let carPaintBrightness = new Map();
   //: Mesh name -> the colour of the lens it is, out of the car's lighting
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
@@ -14681,6 +14793,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       suppliedSkins.clear();
       suppliedDressing.clear();
       carPaintNames = [];
+      carPaintBrightness = new Map();
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
     for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
@@ -14697,6 +14810,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const text = await file.text();
       if (/(^|\/)extension\/ext_config\.ini$/i.test(where)) {
         carPaintNames = FbxSkins.paintMaterials(text);
+        carPaintBrightness = FbxSkins.paintBrightness(text, '');
       }
       /* And what colour each lamp lens is. A car's lighting lives in
        * whichever files its author split it across — this one pulls in a
@@ -16306,8 +16420,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
          * colour it is, not how bright. Taken as a replacement, painting a
          * car white makes it brighter than the car it was painted on. */
         const weight = entry.unpainted.colour;
+        /* And at the brightness the file states for it, which is part of the
+         * colour rather than a finish on top of it. A Jaguar C-X75's Silver
+         * states `#FFFFFF` and 0.66, and the two together are what silver is;
+         * the white alone is a different car. */
+        const scale = typeof paint.scale === 'number' ? paint.scale : 1;
         const colour = FbxPalette.fromHex(paint.hex)
-          .map((c, at) => c * (weight[at] === undefined ? 1 : weight[at]));
+          .map((c, at) => c * scale * (weight[at] === undefined ? 1 : weight[at]));
         file.colour = colour.slice();
         file.base = colour.slice();
         /* And it tints the texture rather than replacing it.
@@ -18427,7 +18546,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     for (const skin of suppliedSkins.values()) {
       read.push(await FbxSkins.read(skin, { worn }));
     }
-    FbxSkins.settle(read, { pictures, fallback: carPaintNames });
+    FbxSkins.settle(read, { pictures, fallback: carPaintNames,
+      brightness: carPaintBrightness });
     /* And, for the ones still stating no colour, the chip they carry a picture
      * of — which is the only thing left saying what colour they are. Settled
      * first, since whether it is worth reading depends on which material the

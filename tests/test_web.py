@@ -763,6 +763,57 @@ CarPaintMaterial=booody_aooo
 
 
 @needs_node
+def test_how_bright_a_skin_says_its_paint_is_drawn():
+    """`BrightnessAdjustment` is written in the same section as the rest of
+    the paint, and without it a Jaguar C-X75's Silver is the `#FFFFFF` its
+    `cm_skin.json` states rather than the silver its preview shows.
+
+    A section naming no materials is about whatever `CarPaintMaterial` names;
+    one that names some is about those. 37 of the 135 cars to hand state one
+    on a paint, 140 of the 229 settings in a skin rather than beside the car.
+    """
+    config = """\
+[INCLUDE: common/materials_carpaint.ini]
+CarPaintMaterial = Paint
+DisableDev = 1
+
+[Material_CarPaint_Metallic]
+FresnelMax = 0.4
+BrightnessAdjustment = 0.66 ; compensates for ambient specular
+
+[Material_CarPaint_Metallic]
+Materials = Rim_colour, Trim
+BrightnessAdjustment = 0.55
+
+[Material_CarPaint_Solid]
+Skins = SomeoneElse
+Materials = Paint
+BrightnessAdjustment = 0.4
+
+[Material_Plastic_v2]
+Materials = Paint
+BrightnessAdjustment = 0.07
+"""
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'Silver')]")) == {
+        "paint": 0.66, "rim_colour": 0.55, "trim": 0.55,
+    }, "the unnamed section is the paint, a named one is what it names"
+    # And a block written for another skin is that skin's, not this one's.
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'SomeoneElse')]"))["paint"] == 0.4
+
+    # A surface stated darker than the floor is one the file has turned into
+    # its own highlight — a C-X75's rims are 0.05 beside a clear coat of 3 —
+    # and this viewer does not put that highlight back, so following it down
+    # would draw bright silver wheels black.
+    mirror = """\
+[Material_CarPaint_Metallic]
+Materials = Rim_colour
+BrightnessAdjustment = 0.05
+ClearCoatThickness = 3
+"""
+    assert dict(_skins(f"[...S.paintBrightness({mirror!r}, 'Silver')]")) == {}
+    assert dict(_skins("[...S.paintBrightness('nothing here', 'Silver')]")) == {}
+
+@needs_node
 def test_what_content_manager_says_the_paint_is():
     meta = ('{"carPaint":{"color":"#FF1A2025","enabled":true,"gloss":0.178,'
             '"reflection":0.767},"carpet":{"enabled":true}}')
@@ -802,9 +853,9 @@ def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
         "Object.assign(s, { images: new Map() })), "
         f"{{pictures: new Map([['booody_aooo', 'skin_00.dds']]), fallback: []}})")
     assert [(s["name"], s["paints"]) for s in settled] == [
-        ("knows", [{"material": "booody_aooo", "hex": "#111111"}]),
-        ("copied", [{"material": "booody_aooo", "hex": "#222222"}]),
-        ("silent", [{"material": "booody_aooo", "hex": "#333333"}]),
+        ("knows", [{"material": "booody_aooo", "hex": "#111111", "scale": 1}]),
+        ("copied", [{"material": "booody_aooo", "hex": "#222222", "scale": 1}]),
+        ("silent", [{"material": "booody_aooo", "hex": "#333333", "scale": 1}]),
         ("colourless", []),
     ]
 
@@ -901,7 +952,8 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
 
     stated = settled([{"key": "carPaint", "hex": "#0c0c0c", "enabled": True}], [])
     assert stated["wantsChip"] is False, "a colour it stated needs no picture"
-    assert stated["paints"] == [{"material": "carpaint", "hex": "#0c0c0c"}]
+    assert stated["paints"] == [
+        {"material": "carpaint", "hex": "#0c0c0c", "scale": 1}]
 
     # One that switched its colour off and left the white it opens with stated
     # none, which is where a chip comes in: an Audi's Sakhir Orange says
@@ -927,7 +979,8 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     # and the car is red.
     anyway = settled([{"key": "carPaint", "hex": "#7f0000", "enabled": False}], [])
     assert anyway["wantsChip"] is False
-    assert anyway["paints"] == [{"material": "carpaint", "hex": "#7f0000"}]
+    assert anyway["paints"] == [
+        {"material": "carpaint", "hex": "#7f0000", "scale": 1}]
 
     # And a slot the car pairs with nothing does not answer for the body: an
     # Audi RS4's Nardo Grey states two colours, both of them its wheels, and
@@ -947,7 +1000,7 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
 
     # And where it is wanted, the colour lands on the material the car settled.
     assert settled([], ["badge.dds"], chip="#941a0a")["paints"] == [
-        {"material": "carpaint", "hex": "#941a0a"}]
+        {"material": "carpaint", "hex": "#941a0a", "scale": 1}]
     assert settled([], ["body.dds"], chip="#941a0a")["paints"] == [],         "and a chip nobody wanted is not put on anyway"
 
 
