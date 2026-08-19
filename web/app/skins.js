@@ -192,6 +192,59 @@ const FbxSkins = (function () {
    * above. So what is under the floor is mostly not the car's paint at all.
    */
   const BRIGHTNESS_FLOOR = 0.25;
+  /* The settings in one of those sections that this viewer has somewhere to
+   * put. Everything else in them — the flakes, the clear coat, the cubemap
+   * blur — describes a shader that is not this one. */
+  const FINISH_KEYS = {
+    reflectance: 'reflectance',
+    smoothness: 'smoothness',
+    metalness: 'metalness',
+  };
+  /**
+   * Walk the `[Material_*]` sections of a config, handing each setting to
+   * *visit* along with the materials that section is about.
+   *
+   * Three things are the same in every one of these files and are done here
+   * once. A section names the materials it is for in `Materials`, and one
+   * that names none is about whatever the file calls its paint in
+   * `CarPaintMaterial` — which is gathered first, since it is written above
+   * the sections that rely on it. A section naming `Skins` is only for those
+   * skins; one folder's config can carry a block written for another. And a
+   * trailing comment is not part of a value.
+   */
+  function eachMaterialSection(text, name, visit) {
+    const lines = String(text || '').split(NEWLINE);
+    const fallback = [];
+    for (const line of lines) {
+      const found = SETTING.exec(line);
+      if (found && found[1].toLowerCase() === 'carpaintmaterial') {
+        for (const one of found[2].split(',')) {
+          const trimmed = one.trim();
+          if (trimmed) fallback.push(trimmed);
+        }
+      }
+    }
+    let section = '';
+    let mine = true;
+    let materials = fallback;
+    for (const line of lines) {
+      const mark = HEADING.exec(line);
+      if (mark) { section = mark[1]; mine = true; materials = fallback; continue; }
+      if (!/^material_/i.test(section)) continue;
+      const found = SETTING.exec(line);
+      if (!found) continue;
+      const key = found[1].toLowerCase();
+      const value = found[2].trim();
+      if (key === 'skins') {
+        mine = value.split(',').some((one) => one.trim().toLowerCase()
+          === String(name).toLowerCase());
+      } else if (key === 'materials') {
+        materials = value.split(',').map((one) => one.trim()).filter(Boolean);
+      } else if (mine) {
+        visit(key, value, materials, section);
+      }
+    }
+  }
   /**
    * How much of its stated colour a paint is actually drawn at.
    *
@@ -217,44 +270,53 @@ const FbxSkins = (function () {
    * those, the same as a colour is.
    */
   function paintBrightness(text, name) {
-    const lines = String(text || '').split(NEWLINE);
-    // What a section that names no materials of its own is about.
-    const fallback = [];
-    for (const line of lines) {
-      const found = SETTING.exec(line);
-      if (found && found[1].toLowerCase() === 'carpaintmaterial') {
-        for (const one of found[2].split(',')) {
-          const trimmed = one.trim();
-          if (trimmed) fallback.push(trimmed);
-        }
-      }
-    }
     const out = new Map();
-    let section = '';
-    let mine = true;
-    let materials = fallback;
-    for (const line of lines) {
-      const mark = HEADING.exec(line);
-      if (mark) { section = mark[1]; mine = true; materials = fallback; continue; }
-      if (!/^material_carpaint/i.test(section)) continue;
-      const found = SETTING.exec(line);
-      if (!found) continue;
-      const key = found[1].toLowerCase();
-      const value = found[2].trim();
-      if (key === 'skins') {
-        mine = value.split(',').some((one) => one.trim().toLowerCase()
-          === String(name).toLowerCase());
-      } else if (key === 'materials') {
-        materials = value.split(',').map((one) => one.trim()).filter(Boolean);
-      } else if (key === 'brightnessadjustment' && mine) {
-        const scale = Number(value);
-        // A blank or a word is not a number, and a surface stated darker than
-        // the floor is one whose colour the file put in its highlight rather
-        // than its coat — see `BRIGHTNESS_FLOOR`.
-        if (!Number.isFinite(scale) || scale < BRIGHTNESS_FLOOR) continue;
-        for (const material of materials) out.set(material.toLowerCase(), scale);
-      }
-    }
+    eachMaterialSection(text, name, (key, value, materials, section) => {
+      if (key !== 'brightnessadjustment') return;
+      if (!/^material_carpaint/i.test(section)) return;
+      const scale = Number(value);
+      // A blank or a word is not a number, and a surface stated darker than
+      // the floor is one whose colour the file put in its highlight rather
+      // than its coat — see `BRIGHTNESS_FLOOR`.
+      if (!Number.isFinite(scale) || scale < BRIGHTNESS_FLOOR) return;
+      for (const material of materials) out.set(material.toLowerCase(), scale);
+    });
+    return out;
+  }
+
+  /**
+   * What a car's config says its surfaces are made of.
+   *
+   * `Reflectance`, `Smoothness` and `Metalness` are the three numbers this
+   * viewer already has a slot for, and on a Custom Shaders Patch car they are
+   * where the material actually lives. The `ks*` values inside the `.kn5` are
+   * the pre-patch version of the same surface, left behind when the author
+   * moved the description out to `[Material_Metal]` and `[Material_Glass]`
+   * and the rest — so a car read from the model alone is read as the car it
+   * used to be, and its chrome comes back as plastic.
+   *
+   * 1121 `[Material_*]` blocks sit beside the 135 cars to hand, and 423 state
+   * a smoothness, 375 a reflectance, 194 a metalness.
+   *
+   * Held inside the unit range, which is what all three mean and not always
+   * what they say: the highest smoothness written is 3, the highest
+   * reflectance 2. The game does its own thing with the overshoot and there
+   * is nothing here for it to mean.
+   */
+  function materialFinish(text, name) {
+    const out = new Map();
+    const put = (material, key, value) => {
+      const at = material.toLowerCase();
+      if (!out.has(at)) out.set(at, {});
+      out.get(at)[key] = Math.min(1, Math.max(0, value));
+    };
+    eachMaterialSection(text, name, (key, value, materials) => {
+      const wanted = FINISH_KEYS[key];
+      if (!wanted) return;
+      const number = Number(value);
+      if (!Number.isFinite(number)) return;
+      for (const material of materials) put(material, wanted, number);
+    });
     return out;
   }
 
@@ -398,6 +460,9 @@ const FbxSkins = (function () {
        * which is stated in the same section and is the difference between a
        * white car and a silver one. */
       brightness: config ? paintBrightness(config, skin.name) : new Map(),
+      /* And what this skin says its surfaces are made of, over whatever the
+       * car says about the same ones. */
+      finish: config ? materialFinish(config, skin.name) : new Map(),
       /* And the picture of the paint, which nearly all of them carry. Whether
        * it is worth reading is settled later, once the car has said which of
        * its materials the paint is: handed back rather than opened here, since
@@ -515,7 +580,8 @@ const FbxSkins = (function () {
   }
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
-    paintColours, configColours, chipColour, fromChip, paintBrightness };
+    paintColours, configColours, chipColour, fromChip, paintBrightness,
+    materialFinish };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;

@@ -1235,6 +1235,67 @@ def test_the_fresnel_a_material_states_is_the_one_it_is_drawn_with(built, tmp_pa
 
 @needs_clang
 @needs_node
+def test_what_a_cars_config_says_its_surfaces_are_made_of(built, tmp_path):
+    """`Reflectance`, `Smoothness` and `Metalness` sit in the `[Material_*]`
+    blocks beside the model, and on a Custom Shaders Patch car they are where
+    the material lives — the `ks*` values still inside the `.kn5` describe the
+    same surface as it was before the author moved the description out.
+
+    1121 of those blocks sit beside the 135 cars to hand: 423 state a
+    smoothness, 375 a reflectance, 194 a metalness. Read from the model alone
+    a car is read as the car it used to be, and the chrome it was given comes
+    back as plastic.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([200, 200, 200, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    material = fb.kn5_material(
+        "panel", "ksPerPixel",
+        properties=(fb.kn5_property("fresnelC", 0.05)
+                    + fb.kn5_property("fresnelMaxLevel", 0.6)
+                    + fb.kn5_property("ksSpecularEXP", 20.0)),
+        property_count=3, slots=(("txDiffuse", 0, "grey.dds"),))
+    model = fb.build_kn5(6, textures=[("grey.dds", grey)], materials=[material],
+                         tree=fb.kn5_dummy("car", identity,
+                                           fb.kn5_mesh("cube", vertices, indices), 1))
+    folders = []
+    for name, config in (
+        ("plain", None),
+        # Chrome, in the three numbers a `.kn5` has no way of saying.
+        ("polished", "[Material_Metal_v2]" + chr(10) + "Materials = panel" + chr(10)
+         + "Smoothness = 0.95" + chr(10) + "Reflectance = 0.9" + chr(10)
+         + "Metalness = 1.0" + chr(10)),
+        # And a smoothness written past anything that means something, which
+        # is a thing these files do: the highest written is 3.
+        ("matte", "[Material_Plastic_v2]" + chr(10) + "Materials = panel" + chr(10)
+         + "Smoothness = 3.0" + chr(10) + "Reflectance = 0.02" + chr(10)),
+    ):
+        car = tmp_path / name
+        car.mkdir()
+        (car / f"{name}.kn5").write_bytes(model)
+        if config:
+            (car / "extension").mkdir()
+            (car / "extension" / "ext_config.ini").write_text(config, encoding="utf-8")
+        folders.append(str(car))
+
+    result = _run(["node", str(WEB / "test" / "finish.js"), *folders],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
 def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
     """A `.kn5` holds the car unpainted: everything under `skins/<name>/`
     beside it replaces the texture of that name, and the skin's own two
