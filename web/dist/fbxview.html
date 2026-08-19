@@ -12196,14 +12196,58 @@ const FbxViewer = (function () {
   const QUARTER_TURN = Math.PI / 2;
 
   /* Shared by the model and background shaders: one studio environment, in
-   * linear radiance. A bright horizon band is what paint and chrome pick up. */
+   * linear radiance.
+   *
+   * A dark room with one broad panel over it, which is the showroom a car is
+   * photographed in — and the one this tool is most often pointed at, since
+   * every `.kn5` here ships its own pictures of it. Those previews say what
+   * it is more exactly than a description could: the backdrop reads 0,0,0 to
+   * the byte, and a Jaguar's chrome bumper — a mirror, so a picture of the
+   * room — is black across the whole of itself but for one white streak along
+   * its top edge.
+   *
+   * So the walls are nearly out and the panel is bright, which is a wider
+   * range than a horizon band and the reason a car reads as paint here at
+   * all: what makes a panel look wet is a dark surround with something bright
+   * in it to catch, and an even grey wash gives it nothing to reflect. The
+   * ceiling is lit rather than black, since a showroom's fill has to come
+   * from somewhere and in those previews a shaded flank sits three-quarters
+   * as bright as a lit one rather than in the dark. */
   const ENVIRONMENT = `
-  const vec3 ENV_ZENITH  = vec3(0.090, 0.110, 0.150);
-  const vec3 ENV_HORIZON = vec3(0.380, 0.400, 0.440);
-  const vec3 ENV_GROUND  = vec3(0.012, 0.013, 0.016);
-  const vec3 ENV_SOFTBOX = vec3(0.900, 0.910, 0.950);
-  const vec3 SUN_COLOUR  = vec3(2.600, 2.520, 2.360);
-  const vec3 SUN_DIR     = normalize(vec3(0.35, 0.85, 0.40));
+  const vec3 ENV_ZENITH  = vec3(0.150, 0.158, 0.176);
+  const vec3 ENV_HORIZON = vec3(0.400, 0.414, 0.446);
+  const vec3 ENV_GROUND  = vec3(0.010, 0.010, 0.013);
+  const vec3 ENV_SOFTBOX = vec3(1.500, 1.515, 1.570);
+  const vec3 SUN_COLOUR  = vec3(1.750, 1.700, 1.605);
+  const vec3 SUN_DIR     = normalize(vec3(0.42, 0.74, 0.50));
+
+  /* What the camera sees where the model is not, which in a showroom is not
+   * the room lighting it.
+   *
+   * The panels are all around the car and the camera shoots from a hole in a
+   * black wall, so the one direction with nothing bright in it is the one
+   * being looked along. Nothing here can tell that direction from any other —
+   * the environment is a function of height alone — so the backdrop is given
+   * its own colour instead of being read out of the room. It is nearly out,
+   * which is what the previews say: theirs is 0,0,0 to the byte, everywhere.
+   */
+  /* What comes back up off the set around the car.
+   *
+   * A showroom floor is dark to look at and the car standing on it is still
+   * lit underneath, because a photographic set puts bounce at floor level
+   * where the camera is not pointing. So this is what a surface facing
+   * downwards gathers, and it is deliberately not what a mirror facing
+   * downwards sees: a chrome bumper in those previews is black across its
+   * whole underside, and a diffuse panel over the same floor is not.
+   */
+  const vec3 ENV_BOUNCE = vec3(0.210, 0.216, 0.230);
+
+  const vec3 BACKDROP_TOP  = vec3(0.00035, 0.00040, 0.00055);
+  const vec3 BACKDROP_BASE = vec3(0.00220, 0.00235, 0.00280);
+
+  vec3 backdropColour(vec3 dir) {
+    return mix(BACKDROP_BASE, BACKDROP_TOP, smoothstep(-0.15, 0.55, dir.y));
+  }
 
   /** Radiance arriving from direction dir, sun excluded. */
   vec3 environmentColour(vec3 dir) {
@@ -12212,7 +12256,7 @@ const FbxViewer = (function () {
     // panel, tight enough to read as a horizon rather than a grey wash.
     vec3 base = t >= 0.0
       ? mix(ENV_HORIZON, ENV_ZENITH, smoothstep(0.0, 0.16, t))
-      : mix(ENV_HORIZON, ENV_GROUND, smoothstep(0.0, 0.12, -t));
+      : mix(ENV_HORIZON, ENV_GROUND, smoothstep(0.0, 0.45, -t));
     // An overhead softbox, so bonnets and roofs have something to reflect.
     return base + ENV_SOFTBOX * smoothstep(0.62, 0.99, t);
   }
@@ -12220,7 +12264,7 @@ const FbxViewer = (function () {
   /** Cosine-weighted average of that environment about a normal. */
   vec3 environmentIrradiance(vec3 n) {
     vec3 sky = mix(ENV_HORIZON, ENV_ZENITH, 0.55) + ENV_SOFTBOX * 0.06;
-    vec3 ground = mix(ENV_HORIZON, ENV_GROUND, 0.7);
+    vec3 ground = mix(ENV_BOUNCE, ENV_GROUND, 0.35);
     return mix(ground, sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
   }
 
@@ -12329,7 +12373,12 @@ ${SHADOW_LOOKUP}
     // Lit by the sky above it, darkened where the model blocks the sun.
     float shadow = sunlight(vWorld, 0.0);
     vec3 sky = mix(ENV_HORIZON, ENV_ZENITH, 0.55) + ENV_SOFTBOX * 0.06;
-    vec3 albedo = vec3(0.06);
+    /* A showroom floor is dark and the car is the lit thing on it. Measured
+     * off the previews the cars ship: theirs sits at 17,19,21 against a
+     * backdrop of nothing, which is a floor there to catch a shadow rather
+     * than to be looked at. Dark enough to read as that and no darker, since
+     * the contact shadow has to have something to darken. */
+    vec3 albedo = vec3(0.013);
     vec3 lit = albedo * (sky + SUN_COLOUR * max(SUN_DIR.y, 0.0) * shadow * 0.45);
 
     // A pool of floor around the model rather than a room: solid under it,
@@ -12358,8 +12407,8 @@ ${ENVIRONMENT}
   void main() {
     vec4 atNear = uInvProjection * vec4(vClip, 1.0, 1.0);
     vec3 dir = normalize(uViewToWorld * normalize(atNear.xyz / atNear.w));
-    // Darkened: the backdrop should not compete with the model it lights.
-    fragColour = vec4(encodeSrgb(toneMap(environmentColour(dir) * 0.2)), 1.0);
+    // Its own, not the room's: see backdropColour above.
+    fragColour = vec4(encodeSrgb(toneMap(backdropColour(dir))), 1.0);
   }`;
   const VERTEX_SHADER = `#version 300 es
   precision highp float;
