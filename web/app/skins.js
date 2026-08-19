@@ -592,7 +592,11 @@ const FbxSkins = (function () {
    */
   function fromChip(skin, hex, pictures) {
     if (!hex || !skin.wantsChip) return skin;
-    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
+    /* Marked as read off a picture, which is what settles how it is undone:
+     * a chip is a picture of a swatch and so a display colour, where a paint
+     * stated in a config is the game's own multiplier. */
+    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null,
+      reflection: null, picture: true }];
     skin.paints = pair(skin.settled || [], skin.colours,
       new Set(pictures.keys()), skin.brightness);
     return skin;
@@ -619,7 +623,8 @@ const FbxSkins = (function () {
       if (!materials.has(named[at].toLowerCase())) continue;
       const scale = scales.get(named[at].toLowerCase());
       out.push({ material: named[at], hex: colour.hex,
-        scale: typeof scale === 'number' ? scale : 1 });
+        scale: typeof scale === 'number' ? scale : 1,
+        picture: colour.picture === true });
     }
     return out;
   }

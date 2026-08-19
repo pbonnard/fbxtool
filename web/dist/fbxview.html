@@ -7704,7 +7704,11 @@ const FbxSkins = (function () {
    */
   function fromChip(skin, hex, pictures) {
     if (!hex || !skin.wantsChip) return skin;
-    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null, reflection: null }];
+    /* Marked as read off a picture, which is what settles how it is undone:
+     * a chip is a picture of a swatch and so a display colour, where a paint
+     * stated in a config is the game's own multiplier. */
+    skin.colours = [{ key: 'livery', hex, enabled: true, gloss: null,
+      reflection: null, picture: true }];
     skin.paints = pair(skin.settled || [], skin.colours,
       new Set(pictures.keys()), skin.brightness);
     return skin;
@@ -7731,7 +7735,8 @@ const FbxSkins = (function () {
       if (!materials.has(named[at].toLowerCase())) continue;
       const scale = scales.get(named[at].toLowerCase());
       out.push({ material: named[at], hex: colour.hex,
-        scale: typeof scale === 'number' ? scale : 1 });
+        scale: typeof scale === 'number' ? scale : 1,
+        picture: colour.picture === true });
     }
     return out;
   }
@@ -10276,6 +10281,31 @@ const FbxPalette = (function () {
     return [0, 1, 2].map((i) => fromSrgb(parseInt(full.slice(i * 2, i * 2 + 2), 16) / 255));
   }
 
+  /**
+   * A colour a game states, as the number it is rather than as a shade.
+   *
+   * `fromHex` is for a colour somebody picked: a swatch in a colour picker is
+   * a display colour and is undone through the sRGB curve to get at the
+   * light. A paint stated in a `cm_skin.json` is not that — it is the
+   * multiplier the game's own shader uses, and running it through the curve
+   * takes a dark paint to a third of what it should be.
+   *
+   * Measured off two cars' previews, four stated greys apiece out of the one
+   * showroom, with the black car giving the floor and the white the scale. A
+   * 550 Maranello's `#A0A0A0` behaves as 0.73 and its `#525254` as 0.39;
+   * read straight those are 0.63 and 0.32, and read through the curve 0.35
+   * and 0.08. The straight reading is out by a constant the showroom's own
+   * exposure covers; the curve is out by four times on the dark one and
+   * cannot be a constant anything.
+   *
+   * A colour read off a picture is the other kind and keeps `fromHex`: a
+   * livery chip is a picture of a swatch, and a picture is a display colour.
+   */
+  function fromStatedHex(hex) {
+    const text = String(hex).replace('#', '');
+    const full = text.length === 3 ? [...text].map((c) => c + c).join('') : text;
+    return [0, 1, 2].map((i) => parseInt(full.slice(i * 2, i * 2 + 2), 16) / 255);
+  }
   /* ------------------------------------------------------------ presets */
 
   /* Starting points for the usual surfaces. Colours are linear. */
@@ -10677,7 +10707,7 @@ const FbxPalette = (function () {
   }
 
   return {
-    toSrgb, fromSrgb, toHex, fromHex,
+    toSrgb, fromSrgb, toHex, fromHex, fromStatedHex,
     PRESETS, preset, groups, apply, settingsFor,
     load, save, serialise, parse, render, keyOf, maps,
   };
@@ -17273,7 +17303,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
          * states `#FFFFFF` and 0.66, and the two together are what silver is;
          * the white alone is a different car. */
         const scale = typeof paint.scale === 'number' ? paint.scale : 1;
-        const colour = FbxPalette.fromHex(paint.hex)
+        /* And undone the way the thing it came from is written. A paint a
+         * config states is the game's own multiplier and is the number it
+         * says; a colour read off a livery chip is a picture of a swatch and
+         * is a display colour. Read the first through the sRGB curve and a
+         * Mercedes GL63's carmine — `#5E0000` — arrives at a third of itself
+         * and the car comes out a dusty mauve. */
+        const stated = paint.picture
+          ? FbxPalette.fromHex(paint.hex) : FbxPalette.fromStatedHex(paint.hex);
+        const colour = stated
           .map((c, at) => c * scale * (weight[at] === undefined ? 1 : weight[at]));
         file.colour = colour.slice();
         file.base = colour.slice();

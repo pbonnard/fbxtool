@@ -39,6 +39,31 @@ const FbxPalette = (function () {
     return [0, 1, 2].map((i) => fromSrgb(parseInt(full.slice(i * 2, i * 2 + 2), 16) / 255));
   }
 
+  /**
+   * A colour a game states, as the number it is rather than as a shade.
+   *
+   * `fromHex` is for a colour somebody picked: a swatch in a colour picker is
+   * a display colour and is undone through the sRGB curve to get at the
+   * light. A paint stated in a `cm_skin.json` is not that — it is the
+   * multiplier the game's own shader uses, and running it through the curve
+   * takes a dark paint to a third of what it should be.
+   *
+   * Measured off two cars' previews, four stated greys apiece out of the one
+   * showroom, with the black car giving the floor and the white the scale. A
+   * 550 Maranello's `#A0A0A0` behaves as 0.73 and its `#525254` as 0.39;
+   * read straight those are 0.63 and 0.32, and read through the curve 0.35
+   * and 0.08. The straight reading is out by a constant the showroom's own
+   * exposure covers; the curve is out by four times on the dark one and
+   * cannot be a constant anything.
+   *
+   * A colour read off a picture is the other kind and keeps `fromHex`: a
+   * livery chip is a picture of a swatch, and a picture is a display colour.
+   */
+  function fromStatedHex(hex) {
+    const text = String(hex).replace('#', '');
+    const full = text.length === 3 ? [...text].map((c) => c + c).join('') : text;
+    return [0, 1, 2].map((i) => parseInt(full.slice(i * 2, i * 2 + 2), 16) / 255);
+  }
   /* ------------------------------------------------------------ presets */
 
   /* Starting points for the usual surfaces. Colours are linear. */
@@ -440,7 +465,7 @@ const FbxPalette = (function () {
   }
 
   return {
-    toSrgb, fromSrgb, toHex, fromHex,
+    toSrgb, fromSrgb, toHex, fromHex, fromStatedHex,
     PRESETS, preset, groups, apply, settingsFor,
     load, save, serialise, parse, render, keyOf, maps,
   };

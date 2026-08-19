@@ -170,8 +170,15 @@ async function main() {
 
   console.log('\nwearing the skin that names its paint');
   const red = await wear(page, 'Red');
+  /* Red, and the map still under it.
+   *
+   * Twice its own green rather than three times: a paint a config states is
+   * the game's own multiplier and goes on as the number it says, so the `20`
+   * of `#DD2010` is an eighth of the light and not the fiftieth the sRGB
+   * curve would make of it. A stated colour is less saturated in the light
+   * than it looks in a picker, which is the whole of what that reading is. */
   check('painted, and the map still under it',
-    red[0] > red[1] * 3 && red[0] > red[2] * 3, `rgb(${red})`);
+    red[0] > red[1] * 2 && red[0] > red[2] * 2, `rgb(${red})`);
   check('and darker than the bare car, since a tint multiplies',
     red[1] < bare[1], `rgb(${red}) against rgb(${bare})`);
 
@@ -179,13 +186,17 @@ async function main() {
   await wear(page, 'Pair');
   const first = await colourOf(page, 'carpaint');
   const second = await colourOf(page, 'trim');
-  check('the first colour went on the first material named', first === '#2010dd', first);
-  check('and the second on the second, paired by order', second === '#10dd20', second);
+  /* The colours the skin states, shown as the light they are rather than as
+   * the swatch they were written as: `#2010dd` taken straight is a brighter,
+   * bluer thing than the same six characters read through the sRGB curve, and
+   * this is what it looks like once it is light. */
+  check('the first colour went on the first material named', first === '#6347ef', first);
+  check('and the second on the second, paired by order', second === '#47ef63', second);
 
   console.log('\nwearing the one whose config names a material this car has not got');
   const stranger = await wear(page, 'Stranger');
   check('the car answers with its own paint',
-    stranger[0] > stranger[1] * 3, `rgb(${stranger})`);
+    stranger[0] > stranger[1] * 2, `rgb(${stranger})`);
 
   console.log('\nand the one that states no colour at all');
   const unpainted = await wear(page, 'Bare');

@@ -933,6 +933,41 @@ def test_what_content_manager_says_the_paint_is():
 
 
 @needs_node
+def test_a_stated_paint_is_the_number_it_says_not_a_shade():
+    """A colour somebody picked is a display colour and is undone through the
+    sRGB curve to get at the light. A paint stated in a `cm_skin.json` is not
+    that: it is the multiplier the game's own shader uses.
+
+    Measured off two cars' previews, four stated greys apiece out of the one
+    showroom, with the black car giving the floor and the white the scale. A
+    550 Maranello's `#A0A0A0` behaves as 0.73 of white and its `#525254` as
+    0.39. Read straight those are 0.63 and 0.32 — out by a constant the
+    showroom's own exposure covers. Read through the curve they are 0.35 and
+    0.08, which is out by four times on the dark one and cannot be a constant
+    anything.
+
+    A Mercedes GL63's carmine is `#5E0000`, and read through the curve it
+    arrives at a third of itself and the car comes out a dusty mauve.
+    """
+    stated = _skins("(()=>{const P=require(%r);return {"
+                    "picked: P.fromHex('#525254'), said: P.fromStatedHex('#525254'),"
+                    "white: P.fromStatedHex('#FFFFFF')};})()"
+                    % str(WEB / "app" / "palette.js"))
+    assert stated["said"][0] == pytest.approx(0x52 / 255, abs=1e-6)
+    assert stated["picked"][0] == pytest.approx(0.084, abs=0.002)
+    assert stated["white"] == [1, 1, 1], "and white is white either way round"
+
+    # Where it lands: the paint a skin states goes on as the number it says,
+    # and the colour read off a livery chip — a picture of a swatch, and so a
+    # display colour — keeps the curve.
+    paints = _skins(
+        "(()=>{const skins=[{name:'a',named:['body'],colours:"
+        "[{key:'carPaint',hex:'#5e0000',enabled:true}],images:new Map()}];"
+        "S.settle(skins,{pictures:new Map([['body','body.dds']]),fallback:[]});"
+        "return skins[0].paints;})()")
+    assert paints[0]["picture"] is False, "a stated paint is not read off a picture"
+
+@needs_node
 def test_which_material_a_carpaint_section_is_about():
     """`CarPaintMaterial` is spelt two ways and means two things. 165 of the
     219 across the 135 cars to hand sit above the material sections and name
@@ -1077,9 +1112,12 @@ def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
         "Object.assign(s, { images: new Map() })), "
         f"{{pictures: new Map([['booody_aooo', 'skin_00.dds']]), fallback: []}})")
     assert [(s["name"], s["paints"]) for s in settled] == [
-        ("knows", [{"material": "booody_aooo", "hex": "#111111", "scale": 1}]),
-        ("copied", [{"material": "booody_aooo", "hex": "#222222", "scale": 1}]),
-        ("silent", [{"material": "booody_aooo", "hex": "#333333", "scale": 1}]),
+        ("knows", [{"material": "booody_aooo", "hex": "#111111", "scale": 1,
+                    "picture": False}]),
+        ("copied", [{"material": "booody_aooo", "hex": "#222222", "scale": 1,
+                     "picture": False}]),
+        ("silent", [{"material": "booody_aooo", "hex": "#333333", "scale": 1,
+                     "picture": False}]),
         ("colourless", []),
     ]
 
@@ -1177,7 +1215,7 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     stated = settled([{"key": "carPaint", "hex": "#0c0c0c", "enabled": True}], [])
     assert stated["wantsChip"] is False, "a colour it stated needs no picture"
     assert stated["paints"] == [
-        {"material": "carpaint", "hex": "#0c0c0c", "scale": 1}]
+        {"material": "carpaint", "hex": "#0c0c0c", "scale": 1, "picture": False}]
 
     # One that switched its colour off and left the white it opens with stated
     # none, which is where a chip comes in: an Audi's Sakhir Orange says
@@ -1204,7 +1242,7 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
     anyway = settled([{"key": "carPaint", "hex": "#7f0000", "enabled": False}], [])
     assert anyway["wantsChip"] is False
     assert anyway["paints"] == [
-        {"material": "carpaint", "hex": "#7f0000", "scale": 1}]
+        {"material": "carpaint", "hex": "#7f0000", "scale": 1, "picture": False}]
 
     # And a slot the car pairs with nothing does not answer for the body: an
     # Audi RS4's Nardo Grey states two colours, both of them its wheels, and
@@ -1224,7 +1262,8 @@ def test_a_chip_is_only_read_where_nothing_else_says_the_colour():
 
     # And where it is wanted, the colour lands on the material the car settled.
     assert settled([], ["badge.dds"], chip="#941a0a")["paints"] == [
-        {"material": "carpaint", "hex": "#941a0a", "scale": 1}]
+        # Read off the livery chip, which is a picture of a swatch.
+        {"material": "carpaint", "hex": "#941a0a", "scale": 1, "picture": True}]
     assert settled([], ["body.dds"], chip="#941a0a")["paints"] == [],         "and a chip nobody wanted is not put on anyway"
 
 

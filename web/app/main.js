@@ -2129,7 +2129,15 @@
          * states `#FFFFFF` and 0.66, and the two together are what silver is;
          * the white alone is a different car. */
         const scale = typeof paint.scale === 'number' ? paint.scale : 1;
-        const colour = FbxPalette.fromHex(paint.hex)
+        /* And undone the way the thing it came from is written. A paint a
+         * config states is the game's own multiplier and is the number it
+         * says; a colour read off a livery chip is a picture of a swatch and
+         * is a display colour. Read the first through the sRGB curve and a
+         * Mercedes GL63's carmine — `#5E0000` — arrives at a third of itself
+         * and the car comes out a dusty mauve. */
+        const stated = paint.picture
+          ? FbxPalette.fromHex(paint.hex) : FbxPalette.fromStatedHex(paint.hex);
+        const colour = stated
           .map((c, at) => c * scale * (weight[at] === undefined ? 1 : weight[at]));
         file.colour = colour.slice();
         file.base = colour.slice();
