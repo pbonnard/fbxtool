@@ -221,8 +221,23 @@ const FbxSkins = (function () {
    */
   function eachMaterialSection(text, name, visit) {
     const lines = String(text || '').split(NEWLINE);
+    /* What a section naming no materials of its own is about.
+     *
+     * Only where it is written outside the material sections. `CarPaintMaterial`
+     * is spelt both ways: 165 of the 219 across the cars to hand sit above them
+     * and name the car's paint once for the file, and 54 sit inside one and
+     * name that section's own — a 550 Maranello writes four such sections, for
+     * its body, its rims and its exhaust, each naming itself. Read as a
+     * file-wide default those four all name every one of the others, and the
+     * last section's word lands on the body: the rims' brightness of 0.5 came
+     * out on the paint and a rosso corsa arrived half dark.
+     */
     const fallback = [];
+    let heading = '';
     for (const line of lines) {
+      const mark = HEADING.exec(line);
+      if (mark) { heading = mark[1]; continue; }
+      if (/^material_carpaint/i.test(heading)) continue;
       const found = SETTING.exec(line);
       if (found && found[1].toLowerCase() === 'carpaintmaterial') {
         for (const one of found[2].split(',')) {
@@ -245,7 +260,8 @@ const FbxSkins = (function () {
       if (key === 'skins') {
         mine = value.split(',').some((one) => one.trim().toLowerCase()
           === String(name).toLowerCase());
-      } else if (key === 'materials') {
+      } else if (key === 'materials'
+        || (key === 'carpaintmaterial' && /^material_carpaint/i.test(section))) {
         materials = value.split(',').map((one) => one.trim()).filter(Boolean);
       } else if (mine) {
         visit(key, value, materials, section);
@@ -624,6 +640,12 @@ const FbxSkins = (function () {
    * its own siblings used.
    */
   function settle(skins, { pictures, fallback, brightness }) {
+    /* The car's own word, read for each skin rather than once for the car: a
+     * config states some of its settings per skin — a 550 Maranello writes
+     * its body once for its reds and once for its silvers — so a single
+     * reading of it is the reading for no skin at all. */
+    const carSays = typeof brightness === 'function'
+      ? brightness : () => brightness || new Map();
     //: Material name -> the picture it wears, both lowercased.
     const materials = new Set(pictures.keys());
     const known = [];
@@ -641,7 +663,7 @@ const FbxSkins = (function () {
        * Both are the same setting in the same shape of section — one written
        * beside the model for every skin, one written for this skin — and a
        * skin that states it means it for itself. */
-      skin.brightness = new Map([...(brightness || new Map()),
+      skin.brightness = new Map([...carSays(skin.name),
         ...(skin.brightness || new Map())]);
       skin.paints = pair(named, skin.colours, materials, skin.brightness);
       /* And whether the picture of the paint is worth reading, which is for

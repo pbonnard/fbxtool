@@ -85,16 +85,12 @@
   /** What the car's own extension config calls its paint, for skins that
    *  do not say — read from beside the car rather than from inside the game. */
   let carPaintNames = [];
-  /** And how bright it says each of them is drawn, under whatever the skin
-   *  that is on says about the same material. */
-  let carPaintBrightness = new Map();
-  /** And what its `[Material_*]` blocks say each surface is made of, which on
-   *  a Custom Shaders Patch car is where the material actually lives. */
-  let carMaterialFinish = new Map();
-  /** The meshes the car's own config takes away, and the material numbers it
-   *  restates. A skin adds its own to the first of those. */
-  let carHidden = new Set();
+  /** What its `[SHADER_REPLACEMENT_*]` sections restate about its materials,
+   *  which is put in place as the model is read. */
   let carShaders = new Map();
+  /** And every ini beside the car, kept as it was read. Some of what they say
+   *  is stated per skin, so it cannot be settled once for the whole car. */
+  let carConfigs = [];
   //: Mesh name -> the colour of the lens it is, out of the car's lighting
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
@@ -393,10 +389,8 @@
       suppliedSkins.clear();
       suppliedDressing.clear();
       carPaintNames = [];
-      carPaintBrightness = new Map();
-      carMaterialFinish = new Map();
-      carHidden = new Set();
       carShaders = new Map();
+      carConfigs = [];
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
     for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
@@ -413,17 +407,8 @@
         continue;
       }
       const text = await file.text();
-      /* Every ini beside the car, not only `ext_config.ini`: an author splits
-       * the description across as many files as suits them and includes them
-       * from the one, so the folder is read rather than the includes
-       * followed. A later file's word on a material stands over an earlier
-       * one's, which is the order they would have been included in. */
-      for (const [material, said] of FbxSkins.materialFinish(text, '')) {
-        carMaterialFinish.set(material, { ...(carMaterialFinish.get(material) || {}), ...said });
-      }
       if (/(^|\/)extension\/ext_config\.ini$/i.test(where)) {
         carPaintNames = FbxSkins.paintMaterials(text);
-        carPaintBrightness = FbxSkins.paintBrightness(text, '');
       }
       /* And what colour each lamp lens is. A car's lighting lives in
        * whichever files its author split it across — this one pulls in a
@@ -432,9 +417,15 @@
       for (const [mesh, colour] of FbxKn5.lensColours(text)) {
         if (!lensColours.has(mesh)) lensColours.set(mesh, colour);
       }
-      const replaced = FbxSkins.carReplacements(text, '');
-      for (const name of replaced.hidden) carHidden.add(name);
-      for (const [material, said] of replaced.shaders) carShaders.set(material, said);
+      /* Every ini beside the car, kept whole: an author splits the
+       * description across as many files as suits them and includes them from
+       * the one, so the folder is read rather than the includes followed. It
+       * is kept rather than folded down because some of what these say is
+       * stated per skin, and the answer changes with the skin that is on. */
+      carConfigs.push(text);
+      for (const [material, said] of FbxSkins.carReplacements(text, '').shaders) {
+        carShaders.set(material, said);
+      }
       const lighting = FbxKn5.carLighting(text);
       for (const [mesh, lamp] of lighting.lamps) {
         if (!carLamps.has(mesh)) carLamps.set(mesh, lamp);
@@ -1391,6 +1382,33 @@
   }
 
   /**
+   * What every ini beside the car comes to, read the same way and folded
+   * together in the order they were found.
+   *
+   * A later file's word on a material stands over an earlier one's, which is
+   * the order they would have been included in — and *read* rather than kept,
+   * because some of what these say is stated per skin and the answer changes
+   * with the skin that is on.
+   */
+  function merged(read) {
+    const out = new Map();
+    for (const text of carConfigs) {
+      for (const [key, value] of read(text)) {
+        const held = out.get(key);
+        out.set(key, held && typeof held === 'object' && !Array.isArray(held)
+          && typeof value === 'object' ? { ...held, ...value } : value);
+      }
+    }
+    return out;
+  }
+
+  /** The same, for the readers that answer with a set rather than a map. */
+  function mergedSet(read) {
+    const out = new Set();
+    for (const text of carConfigs) for (const one of read(text)) out.add(one);
+    return out;
+  }
+  /**
    * Settle what the car's own config says about each of its parts: which are
    * lamps, which are lenses, and which the car takes away — and offer the
    * switch for the first of those where it brought a config that says so.
@@ -1410,7 +1428,9 @@
      * opened on its own arrive at the part table by different roads, and this
      * is where the two meet. The lens is filled in the same pass for the same
      * reason — down the second road it was never being looked up at all. */
-    const gone = new Set([...carHidden,
+    const gone = new Set([
+      ...mergedSet((text) => FbxSkins.carReplacements(
+        text, wearing ? wearing.name : '').hidden),
       ...((wearing && wearing.hidden) || new Set())]);
     //: The picture each material wears, for the hides that name one.
     const pictureOf = new Map((currentPalette || []).map((entry) => [
@@ -2153,6 +2173,10 @@
    */
   function finishFromConfig(palette) {
     const skin = (wearing && wearing.finish) || new Map();
+    // The car's own, read for whichever skin is on: a config states some of
+    // what it says per skin, so once for the car is once for no skin at all.
+    const said0 = merged((text) => FbxSkins.materialFinish(
+      text, wearing ? wearing.name : ''));
     for (const entry of palette) {
       const file = entry.fromFile;
       if (!file) continue;
@@ -2161,7 +2185,7 @@
           specular: file.specular.slice() };
       }
       const named = String(file.name || '').toLowerCase();
-      const said = { ...(carMaterialFinish.get(named) || {}), ...(skin.get(named) || {}) };
+      const said = { ...(said0.get(named) || {}), ...(skin.get(named) || {}) };
       file.roughness = typeof said.smoothness === 'number'
         ? Math.min(1, Math.max(0.05, 1 - said.smoothness)) : entry.unfinished.roughness;
       if (typeof said.reflectance !== 'number' && typeof said.metalness !== 'number') {
@@ -4307,7 +4331,7 @@
       read.push(await FbxSkins.read(skin, { worn }));
     }
     FbxSkins.settle(read, { pictures, fallback: carPaintNames,
-      brightness: carPaintBrightness });
+      brightness: (skin) => merged((text) => FbxSkins.paintBrightness(text, skin)) });
     /* And, for the ones still stating no colour, the chip they carry a picture
      * of — which is the only thing left saying what colour they are. Settled
      * first, since whether it is worth reading depends on which material the

@@ -933,6 +933,73 @@ def test_what_content_manager_says_the_paint_is():
 
 
 @needs_node
+def test_which_material_a_carpaint_section_is_about():
+    """`CarPaintMaterial` is spelt two ways and means two things. 165 of the
+    219 across the 135 cars to hand sit above the material sections and name
+    the car's paint once for the whole file; 54 sit inside one and name that
+    section's own.
+
+    A 550 Maranello writes four such sections — for its body, its rims and its
+    exhaust — each naming itself. Read as a file-wide default, all four name
+    every one of the others and the last section's word lands on the body: the
+    rims' brightness of 0.5 came out on the paint, and a rosso corsa arrived
+    at half the red it states.
+    """
+    per_section = """\
+[Material_CarPaint_Solid]
+CarPaintMaterial = body
+FresnelMax = 0.5
+[Material_CarPaint_Metallic]
+CarPaintMaterial = rim
+BrightnessAdjustment = 0.5
+[Material_CarPaint_Metallic]
+CarPaintMaterial = exhaust1
+BrightnessAdjustment = 0.4
+"""
+    assert dict(_skins(f"[...S.paintBrightness({per_section!r}, '')]")) == {
+        "rim": 0.5, "exhaust1": 0.4,
+    }, "a section naming its own material is about that one and no other"
+
+    # And the other spelling still means the whole file.
+    wide = """\
+[INCLUDE: common/materials_carpaint.ini]
+CarPaintMaterial = Paint
+[Material_CarPaint_Metallic]
+BrightnessAdjustment = 0.66
+"""
+    assert dict(_skins(f"[...S.paintBrightness({wide!r}, '')]")) == {"paint": 0.66}
+
+
+@needs_node
+def test_a_car_states_some_of_what_it_says_per_skin():
+    """A config beside the car gates its sections by skin — a 550 Maranello
+    writes its body once for its reds and once for its silvers — so a single
+    reading of it is the reading for no skin at all, and every gated section
+    is dropped for every skin.
+    """
+    config = """\
+[Material_CarPaint_Metallic]
+CarPaintMaterial = body
+Skins = argento, grigio
+BrightnessAdjustment = 0.9
+"""
+    # Read for the skin it names, and for one it does not.
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'argento')]")) == {"body": 0.9}
+    assert dict(_skins(f"[...S.paintBrightness({config!r}, 'rosso')]")) == {}
+
+    # And `settle` asks for it per skin rather than being handed one answer.
+    settled = _skins(
+        "(()=>{const skins=[{name:'argento',named:['body'],colours:"
+        "[{key:'carPaint',hex:'#a0a0a0',enabled:true}],images:new Map()},"
+        "{name:'rosso',named:['body'],colours:"
+        "[{key:'carPaint',hex:'#d30300',enabled:true}],images:new Map()}];"
+        "S.settle(skins,{pictures:new Map([['body','body.dds']]),fallback:[],"
+        "brightness:(name)=>new Map(name==='argento'?[['body',0.9]]:[])});"
+        "return skins.map(s=>[s.name,s.paints]);})()")
+    assert dict(settled)["argento"][0]["scale"] == 0.9
+    assert dict(settled)["rosso"][0]["scale"] == 1
+
+@needs_node
 def test_what_a_cars_config_takes_away_and_restates():
     """`[MODEL_REPLACEMENT_*]` swaps one model for another and the part of that
     this can honour is `HIDE` — 100 of the 101 such sections across the 135
