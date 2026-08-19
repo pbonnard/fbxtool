@@ -919,6 +919,30 @@ ClearCoatThickness = 3
     assert dict(_skins("[...S.paintBrightness('nothing here', 'Silver')]")) == {}
 
 @needs_node
+def test_the_materials_a_paint_shop_slot_name_reaches():
+    """A quarter of the cars here name the paint material in no file at all —
+    a Lamborghini LM002 states a colour in every one of its fourteen skins and
+    carries no `ext_config.ini` anywhere — so the last thing left to ask is
+    what the paint shop filed the colour under.
+
+    Content Manager opens `carPaint` on a car that has told it nothing, and the
+    material the car wears is that name and a number.  Only a number: the same
+    car's `carPaint_010101FF` is a side-marker trim wearing its own colour in
+    its own name, and painting that in the body colour is what this must not do.
+    """
+    car = "['carpaint02','carpaint03','carpaint_010101ff','rubbertrim_020202ff']"
+    slots = "[{key:'carPaint'}]"
+    assert _skins(f"S.slotMaterials({slots}, new Set({car}))") == [
+        "carpaint02", "carpaint03"], "the body and the extenders, not the trim"
+    # A slot naming the material outright still reaches it.
+    assert _skins(f"S.slotMaterials([{{key:'carPaint02'}}], new Set({car}))") == [
+        "carpaint02"]
+    # And one naming nothing the car has reaches nothing.
+    assert _skins(f"S.slotMaterials([{{key:'extBody1'}}], new Set({car}))") == []
+    assert _skins(f"S.slotMaterials([], new Set({car}))") == []
+
+
+@needs_node
 def test_what_content_manager_says_the_paint_is():
     meta = ('{"carPaint":{"color":"#FF1A2025","enabled":true,"gloss":0.178,'
             '"reflection":0.767},"carpet":{"enabled":true}}')
@@ -1861,7 +1885,7 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
 
     car = tmp_path / "car"
     (car / "extension").mkdir(parents=True)
-    for name in ("Red", "Stranger", "Pair", "Bare", "Chip", "Livery"):
+    for name in ("Red", "Stranger", "Shouted", "Pair", "Bare", "Chip", "Livery"):
         (car / "skins" / name).mkdir(parents=True)
     # A paint map is the panels in white, because the colour is what the game
     # multiplies through it.
@@ -1875,7 +1899,11 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
                         properties=fb.kn5_property("fresnelC", 0.05),
                         property_count=1,
                         slots=(("txDiffuse", 0, picture),))
-        for name, picture in (("carpaint", "paint.dds"), ("trim", "trim.dds"))
+        # `Trim` with a capital, which is what a real car does — a Lamborghini
+        # LM002 wears `carPaint02` while its skins say `carPaint`. Every file
+        # naming it below says `trim`, so the name a skin states and the name
+        # the model carries differ by case and by nothing else.
+        for name, picture in (("carpaint", "paint.dds"), ("Trim", "trim.dds"))
     ]
     # And one that takes almost none of the light, which is what an Audi's
     # wheels are: the same white map under it, and black on the screen.
@@ -1914,6 +1942,11 @@ def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
     for name, names_it, meta in (
         ("Red", "carpaint", '{"carPaint": {"color": "#FFDD2010"}}'),
         ("Stranger", "some_other_car", '{"carPaint": {"color": "#FFDD2010"}}'),
+        # And one spelling the material in another case than the model does.
+        # The two names meeting here come out of different files and need not
+        # agree: a config saying `trim` and a model wearing `Trim` are the same
+        # material, and matched letter for letter the car stays bare.
+        ("Shouted", "trim", '{"carPaint": {"color": "#FFDD10DD"}}'),
         # No config of its own, two colours under the names half of them use.
         ("Pair", None,
          '{"extBody1": {"color": "#FF2010DD"}, "extBody2": {"color": "#FF10DD20"}}'),

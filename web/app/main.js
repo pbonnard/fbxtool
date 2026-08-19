@@ -2104,8 +2104,12 @@
    * has not got. Neither is painted over — they still bring their pictures.
    */
   function paintFromSkin(palette) {
+    /* Keyed by the name folded down, since the two spellings meeting here
+     * come from different files and need not agree on case: a config saying
+     * `carpaint03` and a model wearing `carPaint03` are the same material,
+     * and matched letter for letter the car simply stays unpainted. */
     const paints = new Map(((wearing && wearing.paints) || [])
-      .map((paint) => [paint.material, paint]));
+      .map((paint) => [String(paint.material).toLowerCase(), paint]));
     for (const entry of palette) {
       const file = entry.fromFile;
       if (!file) continue;
@@ -2115,7 +2119,7 @@
         entry.unpainted = { colour: file.colour.slice(), base: file.base.slice(),
           tint: entry.tintTexture === true };
       }
-      const paint = paints.get(file.name);
+      const paint = paints.get(String(file.name).toLowerCase());
       if (paint) {
         /* The paint goes on over what the material already was, rather than
          * in place of it. A car's body states how much of the light it takes

@@ -932,6 +932,80 @@ def test_a_skin_that_states_no_colour_anywhere_brings_only_its_pictures(tmp_path
     assert doc.extra["skins"][0] == {"name": "Acid_Yellow", "replaces": 1, "paints": []}
 
 
+def test_a_car_that_names_its_paint_nowhere_is_read_by_its_paint_shop_slots(tmp_path):
+    """A quarter of them say which material the paint is in no file at all.
+
+    A Lamborghini LM002's fourteen skins are the shape of it: every one states
+    its colour in `cm_skin.json`, and neither they nor the car carry an
+    `ext_config.ini`.  Read for names alone the folder is silent and fourteen
+    good colours go nowhere, which is what its skins did.
+
+    What is left is the name the paint shop filed the colour under.  Content
+    Manager opens `carPaint` on a car that has told it nothing, and the
+    material the car wears is that name and a number: `carPaint02` over the
+    doors and hood, `carPaint03` over the wheel-arch extenders, and the one
+    stated colour belongs on both.
+
+    Only a number, though.  The same car's `carPaint_010101FF` is a side-marker
+    trim wearing its own colour in its own name, and painting that in the body
+    colour is the one thing this must not do.
+    """
+    def paint(name: str) -> bytes:
+        return fb.kn5_material(name, "ksPerPixelMultiMap",
+                               slots=(("txDiffuse", 0, "paint.dds"),))
+
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        6,
+        textures=[("paint.dds", fb.dds_bc1())],
+        materials=[paint("carPaint02"), paint("carPaint03"),
+                   paint("carPaint_010101FF"), paint("rubbertrim_020202FF")],
+        tree=fb.kn5_dummy("car", IDENTITY,
+                          fb.kn5_mesh("body", TRIANGLE, [0, 1, 2], material=0), 1)))
+    skins = tmp_path / "skins"
+    (skins / "02_rosso").mkdir(parents=True)
+    (skins / "02_rosso" / "cm_skin.json").write_text(
+        '{"carPaint": {"color": "#FFA5080D", "enabled": false}}', encoding="utf-8")
+
+    doc = read_fbx(str(path))
+    paints = doc.extra["skins"][0]["paints"]
+    # The body and the extenders, both, off the one colour the skin states.
+    assert paints == [{"material": "carpaint02", "colour": "#a5080d"},
+                      {"material": "carpaint03", "colour": "#a5080d"}]
+    # And not the trim that wears its own colour in its own name.
+    assert all("010101" not in p["material"] for p in paints)
+
+
+def test_a_paint_shop_slot_is_the_last_thing_asked_about_a_material(tmp_path):
+    """Weakest of the four, and only where the other three said nothing.
+
+    A slot name is what Content Manager opened at rather than anything the car
+    said about itself, so a car that does name its paint keeps that name even
+    where a slot would have reached further.
+    """
+    def paint(name: str) -> bytes:
+        return fb.kn5_material(name, "ksPerPixelMultiMap",
+                               slots=(("txDiffuse", 0, "paint.dds"),))
+
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        6,
+        textures=[("paint.dds", fb.dds_bc1())],
+        materials=[paint("carPaint02"), paint("carPaint03")],
+        tree=fb.kn5_dummy("car", IDENTITY,
+                          fb.kn5_mesh("body", TRIANGLE, [0, 1, 2], material=0), 1)))
+    skins = tmp_path / "skins"
+    (skins / "Named").mkdir(parents=True)
+    (skins / "Named" / "ext_config.ini").write_text(
+        "CarPaintMaterial = carPaint03" + chr(10), encoding="utf-8")
+    (skins / "Named" / "cm_skin.json").write_text(
+        '{"carPaint": {"color": "#FFA5080D"}}', encoding="utf-8")
+
+    doc = read_fbx(str(path))
+    assert doc.extra["skins"][0]["paints"] == [
+        {"material": "carPaint03", "colour": "#a5080d"}], "the config still wins"
+
+
 def test_a_car_with_nothing_beside_it_says_nothing_about_skins(tmp_path):
     path = tmp_path / "car.kn5"
     path.write_bytes(small_car())

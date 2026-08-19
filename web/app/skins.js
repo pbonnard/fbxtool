@@ -603,6 +603,43 @@ const FbxSkins = (function () {
   }
 
   /**
+   * The materials a paint shop's own slot names reach, for a car naming none.
+   *
+   * Three quarters of the cars here say which material the paint is, in a
+   * config beside the skin or beside the car. The rest say it nowhere, and a
+   * Lamborghini LM002's fourteen skins are the shape of it: every one states
+   * its colour in `cm_skin.json` and not one of them, nor the car, carries an
+   * `ext_config.ini` at all. Read for names alone the folder is silent and
+   * fourteen good colours go nowhere.
+   *
+   * What is left is the name the paint shop filed the colour under. Content
+   * Manager opens `carPaint` on a car that has told it nothing, and the
+   * material the car actually wears is that name and a number: this one has
+   * `carPaint02` over its doors and hood and `carPaint03` over its four
+   * wheel-arch extenders, and the one stated colour belongs on both.
+   *
+   * Only a number, though. The same car has `carPaint_010101FF`, which is a
+   * side-marker trim wearing its own colour in its own name — the author's
+   * convention, and five materials here follow it. A slot name reaching that
+   * would paint a black trim in body colour, so the tail has to be digits and
+   * nothing else.
+   */
+  function slotMaterials(colours, materials) {
+    const out = [];
+    for (const colour of colours || []) {
+      const slot = String(colour.key || '').toLowerCase();
+      if (!slot) continue;
+      for (const material of [...materials].sort()) {
+        if (!material.startsWith(slot)) continue;
+        const tail = material.slice(slot.length).replace(/^[_\-. ]+/, '');
+        if (tail && !/^[0-9]+$/.test(tail)) continue;
+        if (!out.includes(material)) out.push(material);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Which of the car's materials wear which of a skin's colours.
    *
    * One colour is the car's, however many materials the paint is spread over:
@@ -663,6 +700,11 @@ const FbxSkins = (function () {
       let named = skin.named.filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = (fallback || []).filter((n) => materials.has(n.toLowerCase()));
       if (!named.length) named = known;
+      /* And for a car that named the paint in none of those three, the name
+       * the paint shop filed the colour under. Weakest of the four, and last
+       * for the same reason the chip is: a slot name is what Content Manager
+       * opened at rather than anything the car said about itself. */
+      if (!named.length) named = slotMaterials(skin.colours, materials);
       skin.settled = named;
       /* A skin's own reading of how bright its paint is, over the car's.
        * Both are the same setting in the same shape of section — one written
@@ -702,7 +744,7 @@ const FbxSkins = (function () {
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
     paintColours, configColours, chipColour, fromChip, paintBrightness,
-    materialFinish, carReplacements };
+    materialFinish, carReplacements, slotMaterials };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;
