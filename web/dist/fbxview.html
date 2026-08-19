@@ -15648,12 +15648,26 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   //: What this reads, for telling the model in a folder from what is beside it.
   const MODEL_NAMES = /\.(fbx|obj|dae|gltf|glb|blend|max|kn5)$/i;
 
-  /** The filesystem entries of a drop, taken before the transfer empties. */
+  /** The filesystem entries of a drop, taken before the transfer empties.
+   *
+   * Chromium hands a folder drop over through `webkitGetAsEntry`, which
+   * answers synchronously; Firefox has no such method and offers
+   * `getAsFileSystemHandle()` instead, which answers with a promise. Both are
+   * accepted here, and the walker below settles whichever it is given.
+   */
   function droppedEntries(transfer) {
     if (!transfer.items) return [];
-    return Array.from(transfer.items)
-      .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
-      .filter(Boolean);
+    const out = [];
+    for (const item of Array.from(transfer.items)) {
+      if (typeof item.webkitGetAsEntry === 'function') {
+        const entry = item.webkitGetAsEntry();
+        if (entry) { out.push(entry); continue; }
+      }
+      if (typeof item.getAsFileSystemHandle === 'function') {
+        out.push(item.getAsFileSystemHandle());
+      }
+    }
+    return out;
   }
 
   /* Where a dropped file was, which a `File` on its own does not know.
@@ -15674,24 +15688,37 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
 
     const walk = async (entry, depth, under) => {
       if (out.length >= DROP_LIMIT || depth > DROP_DEPTH) return;
-      if (entry.isFile) {
-        const file = await fileOf(entry);
-        if (file) {
-          droppedPaths.set(file, under ? `${under}/${file.name}` : file.name);
-          out.push(file);
+      // Firefox's handle comes back as a promise; Chromium's entry is ready.
+      if (entry && typeof entry.then === 'function') {
+        try { entry = await entry; } catch (error) { return; }
+      }
+      if (!entry) return;
+      const file = entry.isFile
+        ? await fileOf(entry)
+        : entry.kind === 'file'
+          ? await entry.getFile().catch(() => null)
+          : null;
+      if (file) {
+        droppedPaths.set(file, under ? `${under}/${file.name}` : file.name);
+        out.push(file);
+        return;
+      }
+      if (!entry.isDirectory && entry.kind !== 'directory') return;
+      const inside = under ? `${under}/${entry.name}` : entry.name;
+      if (entry.isDirectory) {
+        const reader = entry.createReader();
+        // readEntries hands back a batch at a time and an empty one at the
+        // end, so it has to be asked until it says there is no more.
+        for (;;) {
+          const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+          if (!batch.length) break;
+          for (const child of batch) await walk(child, depth + 1, inside);
+          if (out.length >= DROP_LIMIT) break;
         }
         return;
       }
-      if (!entry.isDirectory) return;
-      const reader = entry.createReader();
-      const inside = under ? `${under}/${entry.name}` : entry.name;
-      // readEntries hands back a batch at a time and an empty one at the end,
-      // so it has to be asked until it says there is no more.
-      for (;;) {
-        const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
-        if (!batch.length) break;
-        for (const child of batch) await walk(child, depth + 1, inside);
-        if (out.length >= DROP_LIMIT) break;
+      for await (const [, child] of entry.entries()) {
+        await walk(child, depth + 1, inside);
       }
     };
 
