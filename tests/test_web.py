@@ -1347,6 +1347,53 @@ def test_what_a_surface_gives_off_on_its_own(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_a_surface_drawn_from_behind_its_own_normal(built, tmp_path):
+    """A surface whose normal faces away from the eye has nowhere to go: the
+    angle is past a right angle, and clamped back to something a cosine will
+    take it becomes exactly grazing — the one place a Fresnel term goes to a
+    mirror. The surface then reflects the whole room whatever colour it is.
+
+    Which happens to a whole model at a time. A Smart Roadster out of a file
+    converter states its normals the other way round from its winding, and
+    drew all 28 of its colours as the same pale grey — its near-black tyres
+    included. With every colour on it set to black it still came back at 124
+    of 255, which is a mirror and not a car.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    # Black, so that anything on the screen is the room and not the surface.
+    dark = fb.dds_bgra(4, 4, bytes([0, 0, 0, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    material = fb.kn5_material("panel", "ksPerPixel",
+                               properties=fb.kn5_property("fresnelC", 0.04),
+                               property_count=1,
+                               slots=(("txDiffuse", 0, "dark.dds"),))
+    files = []
+    for name, inward in (("out", False), ("in", True)):
+        vertices, indices = fb.kn5_cube(1.0, inward=inward)
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[("dark.dds", dark)], materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        files.append(str(path))
+
+    result = _run(["node", str(WEB / "test" / "facing.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
 def test_the_shape_that_goes_with_a_grain(built, tmp_path):
     """A grain is two maps: what colour the surface is at that scale and what
     shape it is. Every one of the 575 materials across the 67 cars to hand

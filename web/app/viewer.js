@@ -796,6 +796,28 @@ ${SHADOW_LOOKUP}
     // with the camera; only the two directions need rotating.
     vec3 n = normalize(uViewToWorld * normal);
     vec3 v = normalize(uViewToWorld * viewDir);
+    /* Turned to face whoever is looking at it, where it was facing away.
+     *
+     * A surface drawn from behind its own normal has nowhere to go in what
+     * follows: the angle to the eye is past a right angle, and clamped back
+     * to something a cosine will take it becomes exactly grazing — which is
+     * the one place a Fresnel term goes to a mirror. So the surface reflects
+     * the whole room whatever colour it was, and a car comes out a wash of
+     * grey with its paint nowhere in it.
+     *
+     * Which happens to a whole model at a time. A converted scan states its
+     * normals the other way round from its winding and every triangle on it
+     * is drawn from behind — a Smart Roadster off one of the file converters
+     * draws every one of its 28 colours as the same pale grey, its near-black
+     * tyres included, and comes back the colours it states once its normals
+     * are turned round.
+     *
+     * Flipping is what a renderer does with a surface it draws from both
+     * sides, which this one does — it never culls a back face. And it costs
+     * nothing where the normals are right: a front-facing surface is already
+     * facing the eye, so there is nothing to turn.
+     */
+    if (dot(n, v) < 0.0) n = -n;
     vec3 r = reflect(-v, n);
     float nov = clamp(dot(n, v), 1e-4, 1.0);
     float a = max(roughness * roughness, 1e-3);

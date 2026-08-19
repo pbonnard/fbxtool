@@ -2726,16 +2726,20 @@ _KN5_CUBE_FACES = [
 ]
 
 
-def kn5_cube(size: float = 1.0):
+def kn5_cube(size: float = 1.0, *, inward: bool = False):
     """A cube as ``(vertices, indices)`` for :func:`kn5_mesh`.
 
     Normals point out from the centre, so the shading reads as a rounded box
     rather than a flat one — which is beside the point here, but a vertex the
     game's layout has no room to leave out has to hold something true.
+
+    *inward* turns them round without touching the winding, which is a whole
+    model drawn from behind its own normals. Converters produce it: a Smart
+    Roadster out of one of them states every normal the wrong way about.
     """
     vertices = []
     for corner in _KN5_CUBE_CORNERS:
-        length = math.sqrt(3.0)
+        length = math.sqrt(3.0) * (-1.0 if inward else 1.0)
         normal = tuple(v / length for v in corner)
         vertices.append((tuple(v * size for v in corner), normal, (0.5, 0.5),
                          (1.0, 0.0, 0.0)))
