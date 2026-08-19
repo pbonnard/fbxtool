@@ -587,7 +587,19 @@ const FbxKn5 = (function () {
     return textures;
   }
 
-  function readMaterials(cursor) {
+  /**
+   * The materials, with whatever the car's config restates about them put
+   * where the file's own numbers were.
+   *
+   * A `[SHADER_REPLACEMENT_*]` beside the car lists `PROP_n = name, value`,
+   * and those names are the very ones a `.kn5` states about a surface —
+   * `fresnelEXP`, `ksDiffuse`, `isAdditive`, `detailUVMultiplier`. Putting
+   * them here rather than anywhere downstream means everything that reads a
+   * material reads the restated one, without a second path for it: 102 of the
+   * 123 such sections across the cars to hand are written beside the car
+   * rather than in a skin, which is what makes here the right place.
+   */
+  function readMaterials(cursor, restated) {
     const count = cursor.i32();
     if (count < 0) throw new Error(`the material table claims ${count} entries`);
     const materials = [];
@@ -608,7 +620,21 @@ const FbxKn5 = (function () {
       for (let k = 0; k < slotCount; k++) {
         slots.push({ slot: cursor.text(), number: cursor.i32(), texture: cursor.text() });
       }
-      materials.push({ name, shader, blend, alphaTested, depthMode, props, slots });
+      const said = restated && restated.get(name.toLowerCase());
+      let shading = shader;
+      let blending = blend;
+      if (said) {
+        for (const [key, value] of said.props) {
+          props.set(key, [value, [0, 0], [0, 0, 0], [0, 0, 0, 0]]);
+        }
+        if (said.shader) shading = said.shader;
+        // A surface the config calls see-through is one, whatever the model
+        // was written with: the two are the same statement in two files.
+        if (said.transparent === true) blending = 1;
+        else if (said.transparent === false && blending === 1) blending = 0;
+      }
+      materials.push({ name, shader: shading, blend: blending, alphaTested,
+        depthMode, props, slots });
     }
     return materials;
   }
@@ -714,7 +740,7 @@ const FbxKn5 = (function () {
 
   /* ------------------------------------------------------------------ read */
 
-  function parse(bytes) {
+  function parse(bytes, options) {
     const warnings = [];
     const cursor = new Cursor(bytes);
     cursor.skip(6);
@@ -727,7 +753,7 @@ const FbxKn5 = (function () {
     }
 
     const textures = readTextures(cursor);
-    const materials = readMaterials(cursor);
+    const materials = readMaterials(cursor, options && options.shaders);
 
     const objects = [];
     const connections = [];

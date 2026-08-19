@@ -6558,7 +6558,19 @@ const FbxKn5 = (function () {
     return textures;
   }
 
-  function readMaterials(cursor) {
+  /**
+   * The materials, with whatever the car's config restates about them put
+   * where the file's own numbers were.
+   *
+   * A `[SHADER_REPLACEMENT_*]` beside the car lists `PROP_n = name, value`,
+   * and those names are the very ones a `.kn5` states about a surface —
+   * `fresnelEXP`, `ksDiffuse`, `isAdditive`, `detailUVMultiplier`. Putting
+   * them here rather than anywhere downstream means everything that reads a
+   * material reads the restated one, without a second path for it: 102 of the
+   * 123 such sections across the cars to hand are written beside the car
+   * rather than in a skin, which is what makes here the right place.
+   */
+  function readMaterials(cursor, restated) {
     const count = cursor.i32();
     if (count < 0) throw new Error(`the material table claims ${count} entries`);
     const materials = [];
@@ -6579,7 +6591,21 @@ const FbxKn5 = (function () {
       for (let k = 0; k < slotCount; k++) {
         slots.push({ slot: cursor.text(), number: cursor.i32(), texture: cursor.text() });
       }
-      materials.push({ name, shader, blend, alphaTested, depthMode, props, slots });
+      const said = restated && restated.get(name.toLowerCase());
+      let shading = shader;
+      let blending = blend;
+      if (said) {
+        for (const [key, value] of said.props) {
+          props.set(key, [value, [0, 0], [0, 0, 0], [0, 0, 0, 0]]);
+        }
+        if (said.shader) shading = said.shader;
+        // A surface the config calls see-through is one, whatever the model
+        // was written with: the two are the same statement in two files.
+        if (said.transparent === true) blending = 1;
+        else if (said.transparent === false && blending === 1) blending = 0;
+      }
+      materials.push({ name, shader: shading, blend: blending, alphaTested,
+        depthMode, props, slots });
     }
     return materials;
   }
@@ -6685,7 +6711,7 @@ const FbxKn5 = (function () {
 
   /* ------------------------------------------------------------------ read */
 
-  function parse(bytes) {
+  function parse(bytes, options) {
     const warnings = [];
     const cursor = new Cursor(bytes);
     cursor.skip(6);
@@ -6698,7 +6724,7 @@ const FbxKn5 = (function () {
     }
 
     const textures = readTextures(cursor);
-    const materials = readMaterials(cursor);
+    const materials = readMaterials(cursor, options && options.shaders);
 
     const objects = [];
     const connections = [];
@@ -7139,9 +7165,16 @@ const FbxSkins = (function () {
 
   /* The three shapes every one of these config readers wants: a section
    * heading, a `key = value` line with any trailing comment dropped, and the
-   * line ending an ini file may be written with either of. */
+   * line ending an ini file may be written with either of.
+   *
+   * A key may carry a digit: the numbered ones — PROP_0, PROP_1 — are how a
+   * shader replacement lists what it restates — and so may a full stop: a
+   * file writes PROP_... and [SHADER_REPLACEMENT_...] and lets the patch
+   * number them, which is a spelling half these configs use.
+   * keys it wants by name, so a wider key pattern finds more and mistakes
+   * nothing. */
   const HEADING = /^\s*\[([^\]]*)\]/;
-  const SETTING = /^[ \t]*([A-Za-z_]+)[ \t]*=([^;]*)/;
+  const SETTING = /^[ \t]*([A-Za-z_0-9.]+)[ \t]*=([^;]*)/;
   const NEWLINE = /\r?\n/;
 
   /**
@@ -7498,6 +7531,89 @@ const FbxSkins = (function () {
       gloss: found[0].gloss, reflection: found[0].reflection } : null;
   }
 
+  /* The two other kinds of section that describe the car rather than a skin's
+   * paint: one takes meshes away, one restates a material's numbers. */
+  const REPLACEMENT_SECTION = /^[ \t]*\[(MODEL_REPLACEMENT|SHADER_REPLACEMENT)[^\]]*\]/i;
+  const OFF = /^(0|0\.0+|false|no)$/i;
+
+  /**
+   * What a car's config takes away, and what it restates.
+   *
+   * `[MODEL_REPLACEMENT_*]` swaps one model for another, and the part of it
+   * this can honour is `HIDE`: the meshes the swap is meant to remove. 100 of
+   * the 101 such sections across the 135 cars to hand name some, and 77 of the
+   * 101 are written in a skin rather than beside the car — a number plate a
+   * livery does not want is the commonest thing in them. What is not honoured
+   * is the other half, `INSERT`: bringing a second model in, placing it and
+   * merging it is a whole car's worth of work and none of it is this.
+   *
+   * `[SHADER_REPLACEMENT_*]` restates a material. Its `PROP_n = name, value`
+   * lines are the very numbers a `.kn5` states about a surface and this
+   * already reads — `fresnelEXP`, `ksDiffuse`, `isAdditive`,
+   * `detailUVMultiplier` and the rest — so they are put where the file's own
+   * would have been and everything downstream follows.
+   *
+   * Only the sections that name `MATERIALS`. 53 of the 123 name `MESHES`
+   * instead, and a material here is shared across every mesh that wears it:
+   * one mesh's restatement applied to it would change parts the file never
+   * named.
+   */
+  function carReplacements(text, name) {
+    const hidden = new Set();
+    const shaders = new Map();
+    let kind = '';
+    let mine = true;
+    let active = true;
+    let hide = [];
+    let materials = [];
+    let props = new Map();
+    let shader = null;
+    let transparent = null;
+    const close = () => {
+      if (kind && mine && active) {
+        for (const one of hide) hidden.add(one.toLowerCase());
+        for (const one of materials) {
+          const at = one.toLowerCase();
+          const held = shaders.get(at) || { props: new Map(), shader: null, transparent: null };
+          for (const [key, value] of props) held.props.set(key, value);
+          if (shader) held.shader = shader;
+          if (transparent !== null) held.transparent = transparent;
+          shaders.set(at, held);
+        }
+      }
+      kind = ''; mine = true; active = true;
+      hide = []; materials = []; props = new Map(); shader = null; transparent = null;
+    };
+    for (const line of String(text || '').split(NEWLINE)) {
+      if (line.trimStart().startsWith('[')) {
+        close();
+        const mark = REPLACEMENT_SECTION.exec(line);
+        if (mark) kind = mark[1].toUpperCase();
+        continue;
+      }
+      if (!kind) continue;
+      const setting = SETTING.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      const list = () => value.split(',').map((one) => one.trim()).filter(Boolean);
+      if (key === 'ACTIVE') active = !OFF.test(value);
+      else if (key === 'SKINS') {
+        mine = list().some((one) => one.toLowerCase() === String(name).toLowerCase());
+      } else if (key === 'HIDE' && kind === 'MODEL_REPLACEMENT') hide = list();
+      else if (key === 'MATERIALS' && kind === 'SHADER_REPLACEMENT') materials = list();
+      else if (kind !== 'SHADER_REPLACEMENT') continue;
+      else if (key === 'SHADER') shader = value;
+      else if (key === 'IS_TRANSPARENT') transparent = !OFF.test(value);
+      else if (/^PROP_/.test(key)) {
+        const [written, said] = list();
+        const number = Number(said);
+        if (written && Number.isFinite(number)) props.set(written, number);
+      }
+    }
+    close();
+    return { hidden, shaders };
+  }
   /**
    * Group supplied files into the skins they came from.
    *
@@ -7549,6 +7665,10 @@ const FbxSkins = (function () {
       /* And what this skin says its surfaces are made of, over whatever the
        * car says about the same ones. */
       finish: config ? materialFinish(config, skin.name) : new Map(),
+      /* And the meshes this skin takes away — a number plate a livery does not
+       * want, which is the commonest thing a model replacement says and is
+       * said in a skin far more often than beside the car. */
+      hidden: config ? carReplacements(config, skin.name).hidden : new Set(),
       /* And the picture of the paint, which nearly all of them carry. Whether
        * it is worth reading is settled later, once the car has said which of
        * its materials the paint is: handed back rather than opened here, since
@@ -7667,7 +7787,7 @@ const FbxSkins = (function () {
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
     paintColours, configColours, chipColour, fromChip, paintBrightness,
-    materialFinish };
+    materialFinish, carReplacements };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;
@@ -12700,6 +12820,16 @@ const FbxViewer = (function () {
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -12708,6 +12838,10 @@ const FbxViewer = (function () {
     return position + (centre - uCentre) * uExplode;
   }
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     gl_Position = uShadowMatrix * uModel * vec4(explode(aPosition, aPart), 1.0);
   }`;
 
@@ -12806,6 +12940,16 @@ ${ENVIRONMENT}
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -12815,6 +12959,10 @@ ${ENVIRONMENT}
   }
 
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vec3 position = explode(aPosition, aPart);
     vec4 viewPosition = uModelView * vec4(position, 1.0);
     vViewPosition = viewPosition.xyz;
@@ -12846,6 +12994,16 @@ ${ENVIRONMENT}
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -12855,6 +13013,10 @@ ${ENVIRONMENT}
   }
 
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vPart = int(aPart + 0.5);
     gl_Position = uProjection * uModelView * vec4(explode(aPosition, aPart), 1.0);
   }`;
@@ -13971,6 +14133,11 @@ ${SHADOW_LOOKUP}
           data[darkAt + k] = lamp && lamp.off ? Math.max(0, lamp.off[k] || 0) : 0;
         }
         data[litAt + 3] = lamp ? 1 : 0;
+        /* And whether the car's config takes this part away. A number plate a
+         * livery does not want is the commonest thing a model replacement
+         * says, and it is said per skin — so it is held here, where changing
+         * the skin can change it without the scene being built again. */
+        data[darkAt + 3] = part.hidden ? 1 : 0;
       });
       gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 4, 0,
@@ -15046,6 +15213,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   /** And what its `[Material_*]` blocks say each surface is made of, which on
    *  a Custom Shaders Patch car is where the material actually lives. */
   let carMaterialFinish = new Map();
+  /** The meshes the car's own config takes away, and the material numbers it
+   *  restates. A skin adds its own to the first of those. */
+  let carHidden = new Set();
+  let carShaders = new Map();
   //: Mesh name -> the colour of the lens it is, out of the car's lighting
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
@@ -15346,6 +15517,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       carPaintNames = [];
       carPaintBrightness = new Map();
       carMaterialFinish = new Map();
+      carHidden = new Set();
+      carShaders = new Map();
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
     for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
@@ -15381,6 +15554,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       for (const [mesh, colour] of FbxKn5.lensColours(text)) {
         if (!lensColours.has(mesh)) lensColours.set(mesh, colour);
       }
+      const replaced = FbxSkins.carReplacements(text, '');
+      for (const name of replaced.hidden) carHidden.add(name);
+      for (const [material, said] of replaced.shaders) carShaders.set(material, said);
       const lighting = FbxKn5.carLighting(text);
       for (const [mesh, lamp] of lighting.lamps) {
         if (!carLamps.has(mesh)) carLamps.set(mesh, lamp);
@@ -15691,7 +15867,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     let doc = null;
     if (FbxKn5.looksLikeKn5(buffer)) {
       // Six bytes at the head say so, and nothing else here begins "sc6969".
-      doc = FbxKn5.parse(buffer);
+      /* With whatever the car's config restates about its materials. Read
+       * from the folder before the model is opened, which is the order these
+       * arrive in anyway. */
+      doc = FbxKn5.parse(buffer, { shaders: carShaders });
     } else if (FbxMax.looksLikeMax(buffer)) {
       // A .max is a compound file, which nothing else here reads, so the
       // eight bytes of its container are enough to know it.
@@ -16334,8 +16513,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
   /**
-   * Offer the car's own lights, where it brought a config that says what they
-   * are.
+   * Settle what the car's own config says about each of its parts: which are
+   * lamps, which are lenses, and which the car takes away — and offer the
+   * switch for the first of those where it brought a config that says so.
    *
    * The switch is hidden for everything that did not, which is every format
    * but a `.kn5` with an `extension` folder beside it and most of those. It
@@ -16346,18 +16526,31 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    * the headlights, the brakes, the indicators or a door, and what this
    * offers is the car with its lights on — all of them at once.
    */
-  function offerLights() {
+  function settleParts() {
     /* Put each lamp on the part that wears it here rather than where the
      * geometry is built: a scene assembled part by part and a single geometry
      * opened on its own arrive at the part table by different roads, and this
      * is where the two meet. The lens is filled in the same pass for the same
      * reason — down the second road it was never being looked up at all. */
+    const gone = new Set([...carHidden,
+      ...((wearing && wearing.hidden) || new Set())]);
+    //: The picture each material wears, for the hides that name one.
+    const pictureOf = new Map((currentPalette || []).map((entry) => [
+      String(entry.name || '').toLowerCase(),
+      entry.texture ? baseName(entry.texture.path || entry.texture.name || '') : '']));
     let found = 0;
     for (const part of partTable || []) {
       const named = String(part.name || '').toLowerCase();
       part.lamp = carLamps.get(named) || null;
       if (part.lamp) found += 1;
       if (!part.lens) part.lens = lensColours.get(named) || null;
+      /* And whether the car takes this part away. By its own name, or by the
+       * picture it wears: a `HIDE` names meshes almost always and a texture
+       * now and then, and a plate hidden by the file it is printed on is the
+       * same plate. */
+      part.hidden = gone.has(named)
+        || (part.materials || []).some((one) => gone.has(pictureOf.get(
+          String(one).toLowerCase()) || ''));
     }
     const has = found > 0 || carLightSources.length > 0;
     viewer.setParts(partTable);
@@ -16394,7 +16587,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     viewer.setMesh(built.mesh, { keepCamera: true });
     partTable = built.table || [];
     viewer.setParts(partTable);
-    offerLights();
+    settleParts();
     // The parts are numbered afresh, so a selection that has fallen off the
     // end of the list is no selection at all.
     setSelectedPart(selectedPart < partTable.length ? selectedPart : -1);
@@ -19276,6 +19469,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     if (!currentPalette.length) return;
     setStatus(wearing ? `Putting ${wearing.name} on…` : 'Taking the skin off…');
     const textures = await refreshTextures();
+    // A skin has its own word on which parts the car wears, so the parts are
+    // settled again rather than only the pictures.
+    settleParts();
     // The paint is a palette setting rather than a texture, so it goes on with
     // the palette rather than with the images.
     paintFromSkin(currentPalette);
@@ -19454,7 +19650,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       viewer.setMesh(built.mesh, { keepCamera });
       partTable = built.table || [];
       viewer.setParts(partTable);
-      offerLights();
+      settleParts();
       setSelectedPart(-1);
       // Only a scene of several parts has anything to pull apart.
       dom.explodeSlider.disabled = partTable.length < 2;
@@ -19667,7 +19863,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       viewer.setMesh(mesh, { keepCamera });
       partTable = built.table;
       viewer.setParts(partTable);
-      offerLights();
+      settleParts();
       setSelectedPart(-1);
       dom.explodeSlider.disabled = true;
       dom.explodeSlider.value = '0';

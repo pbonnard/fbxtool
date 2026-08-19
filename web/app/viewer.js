@@ -188,6 +188,16 @@ const FbxViewer = (function () {
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -196,6 +206,10 @@ const FbxViewer = (function () {
     return position + (centre - uCentre) * uExplode;
   }
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     gl_Position = uShadowMatrix * uModel * vec4(explode(aPosition, aPart), 1.0);
   }`;
 
@@ -294,6 +308,16 @@ ${ENVIRONMENT}
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -303,6 +327,10 @@ ${ENVIRONMENT}
   }
 
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vec3 position = explode(aPosition, aPart);
     vec4 viewPosition = uModelView * vec4(position, 1.0);
     vViewPosition = viewPosition.xyz;
@@ -334,6 +362,16 @@ ${ENVIRONMENT}
   uniform float uExplode;
   uniform vec3 uCentre;
 
+  /* Whether the car's config takes this part away. Answered in the vertex
+   * stage and in every one of them, so a part the file hides is gone from the
+   * picture and from the shadow it would have dropped alike. */
+  bool takenAway(float part) {
+    if (uPartCount <= 0) return false;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return false;
+    return texelFetch(uParts, ivec2(index, 3), 0).a > 0.5;
+  }
+
   vec3 explode(vec3 position, float part) {
     if (uExplode <= 0.0 || uPartCount <= 0) return position;
     int index = int(part + 0.5);
@@ -343,6 +381,10 @@ ${ENVIRONMENT}
   }
 
   void main() {
+    // A part the car takes away is put outside the clip volume: gone from
+    // the picture, from the shadow it would have dropped and from what the
+    // mouse can land on, without the scene being built again.
+    if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vPart = int(aPart + 0.5);
     gl_Position = uProjection * uModelView * vec4(explode(aPosition, aPart), 1.0);
   }`;
@@ -1459,6 +1501,11 @@ ${SHADOW_LOOKUP}
           data[darkAt + k] = lamp && lamp.off ? Math.max(0, lamp.off[k] || 0) : 0;
         }
         data[litAt + 3] = lamp ? 1 : 0;
+        /* And whether the car's config takes this part away. A number plate a
+         * livery does not want is the commonest thing a model replacement
+         * says, and it is said per skin — so it is held here, where changing
+         * the skin can change it without the scene being built again. */
+        data[darkAt + 3] = part.hidden ? 1 : 0;
       });
       gl.bindTexture(gl.TEXTURE_2D, this.partTexture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 4, 0,

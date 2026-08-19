@@ -933,6 +933,58 @@ def test_what_content_manager_says_the_paint_is():
 
 
 @needs_node
+def test_what_a_cars_config_takes_away_and_restates():
+    """`[MODEL_REPLACEMENT_*]` swaps one model for another and the part of that
+    this can honour is `HIDE` — 100 of the 101 such sections across the 135
+    cars to hand name some, and 77 of the 101 are written in a skin rather
+    than beside the car. `[SHADER_REPLACEMENT_*]` restates a material in the
+    very numbers a `.kn5` states about a surface.
+
+    Both are written with the patch's own auto-numbering — `[SECTION_...]` and
+    `PROP_...`, a full stop where an index would be — which half these configs
+    use and which a reader wanting a plain key name never sees.
+    """
+    config = """\
+[MODEL_REPLACEMENT_...]
+ACTIVE = 1
+FILE = car.kn5
+HIDE = plate, plate_screw
+[MODEL_REPLACEMENT_...]
+SKINS = Another
+HIDE = wing
+[MODEL_REPLACEMENT_...]
+ACTIVE = 0
+HIDE = roof
+[SHADER_REPLACEMENT_...]
+MATERIALS = zahlens, jantao
+SHADER = ksWindscreen
+IS_TRANSPARENT = 1
+PROP_... = ksAmbient, 0.4
+PROP_... = ksSpecularEXP, 13
+[SHADER_REPLACEMENT_...]
+MESHES = only_a_mesh
+PROP_... = ksAmbient, 0.9
+"""
+    read = _skins(f"(()=>{{const o=S.carReplacements({config!r}, 'Silver');"
+                  "return {hidden:[...o.hidden], shaders:[...o.shaders]"
+                  ".map(([k,v])=>[k,{props:[...v.props],shader:v.shader,"
+                  "transparent:v.transparent}])};})()")
+    # A section for another skin is that skin's, and one switched off is nobody's.
+    assert sorted(read["hidden"]) == ["plate", "plate_screw"]
+
+    shaders = dict(read["shaders"])
+    assert sorted(shaders) == ["jantao", "zahlens"], (
+        "a section naming meshes rather than materials is not applied: a material"
+        " here is shared across every mesh that wears it")
+    assert dict(shaders["zahlens"]["props"]) == {"ksAmbient": 0.4, "ksSpecularEXP": 13}
+    assert shaders["zahlens"]["shader"] == "ksWindscreen"
+    assert shaders["zahlens"]["transparent"] is True
+
+    empty = _skins("(()=>{const o=S.carReplacements('nothing here','');"
+                   "return {hidden:[...o.hidden], shaders:[...o.shaders]};})()")
+    assert empty == {"hidden": [], "shaders": []}
+
+@needs_node
 def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
     """Three places say which material is the paint, in the order they are
     trusted: the skin's own config, the car's, and last what the car's
@@ -1440,6 +1492,74 @@ def test_a_surface_that_adds_what_it_returns(built, tmp_path):
         files.append(str(path))
 
     result = _run(["node", str(WEB / "test" / "additive.js"), *files],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_what_a_cars_config_takes_away_and_what_it_restates(built, tmp_path):
+    """A model replacement's `HIDE` takes meshes away — a number plate a livery
+    does not want, which is the commonest thing in them — and 77 of the 101
+    such sections across the 135 cars to hand are written in a skin rather than
+    beside the car, so it has to follow the skin.
+
+    A shader replacement restates a material in the very numbers a `.kn5`
+    states about a surface, so what it says arrives as though the model had
+    said it.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([200, 200, 200, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    # The model says a dim, nearly mirror-smooth surface.
+    material = fb.kn5_material(
+        "panel", "ksPerPixel",
+        properties=(fb.kn5_property("ksAmbient", 0.1)
+                    + fb.kn5_property("ksDiffuse", 0.1)
+                    + fb.kn5_property("ksSpecularEXP", 400.0)),
+        property_count=3, slots=(("txDiffuse", 0, "grey.dds"),))
+    model = fb.build_kn5(6, textures=[("grey.dds", grey)], materials=[material],
+                         tree=fb.kn5_dummy("car", identity,
+                                           fb.kn5_mesh("panel", vertices, indices), 1))
+    # Written the way half these configs are: the patch's own auto-numbering,
+    # a full stop where an index would be.
+    hide = ("[MODEL_REPLACEMENT_...]" + chr(10) + "ACTIVE = 1" + chr(10)
+            + "FILE = car.kn5" + chr(10) + "HIDE = panel" + chr(10))
+    # And the config says a bright, blunt one.
+    restate = ("[SHADER_REPLACEMENT_...]" + chr(10) + "MATERIALS = panel" + chr(10)
+               + "PROP_... = ksAmbient, 0.5" + chr(10)
+               + "PROP_... = ksDiffuse, 0.5" + chr(10)
+               + "PROP_... = ksSpecularEXP, 4" + chr(10))
+    folders = []
+    for name, config, skin in (("plain", None, None), ("hidden", hide, None),
+                               ("restated", restate, None), ("skinned", None, hide)):
+        car = tmp_path / name
+        car.mkdir()
+        (car / f"{name}.kn5").write_bytes(model)
+        if config:
+            (car / "extension").mkdir()
+            (car / "extension" / "ext_config.ini").write_text(config, encoding="utf-8")
+        if skin:
+            plain = car / "skins" / "Plain"
+            plain.mkdir(parents=True)
+            (plain / "ext_config.ini").write_text(skin, encoding="utf-8")
+            # A skin is only offered for the pictures it replaces, so it brings
+            # the one the car wears.
+            (plain / "grey.dds").write_bytes(grey)
+        folders.append(str(car))
+
+    result = _run(["node", str(WEB / "test" / "replace.js"), *folders],
                   env=_node_env(), timeout=300)
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"

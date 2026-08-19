@@ -53,9 +53,16 @@ const FbxSkins = (function () {
 
   /* The three shapes every one of these config readers wants: a section
    * heading, a `key = value` line with any trailing comment dropped, and the
-   * line ending an ini file may be written with either of. */
+   * line ending an ini file may be written with either of.
+   *
+   * A key may carry a digit: the numbered ones — PROP_0, PROP_1 — are how a
+   * shader replacement lists what it restates — and so may a full stop: a
+   * file writes PROP_... and [SHADER_REPLACEMENT_...] and lets the patch
+   * number them, which is a spelling half these configs use.
+   * keys it wants by name, so a wider key pattern finds more and mistakes
+   * nothing. */
   const HEADING = /^\s*\[([^\]]*)\]/;
-  const SETTING = /^[ \t]*([A-Za-z_]+)[ \t]*=([^;]*)/;
+  const SETTING = /^[ \t]*([A-Za-z_0-9.]+)[ \t]*=([^;]*)/;
   const NEWLINE = /\r?\n/;
 
   /**
@@ -412,6 +419,89 @@ const FbxSkins = (function () {
       gloss: found[0].gloss, reflection: found[0].reflection } : null;
   }
 
+  /* The two other kinds of section that describe the car rather than a skin's
+   * paint: one takes meshes away, one restates a material's numbers. */
+  const REPLACEMENT_SECTION = /^[ \t]*\[(MODEL_REPLACEMENT|SHADER_REPLACEMENT)[^\]]*\]/i;
+  const OFF = /^(0|0\.0+|false|no)$/i;
+
+  /**
+   * What a car's config takes away, and what it restates.
+   *
+   * `[MODEL_REPLACEMENT_*]` swaps one model for another, and the part of it
+   * this can honour is `HIDE`: the meshes the swap is meant to remove. 100 of
+   * the 101 such sections across the 135 cars to hand name some, and 77 of the
+   * 101 are written in a skin rather than beside the car — a number plate a
+   * livery does not want is the commonest thing in them. What is not honoured
+   * is the other half, `INSERT`: bringing a second model in, placing it and
+   * merging it is a whole car's worth of work and none of it is this.
+   *
+   * `[SHADER_REPLACEMENT_*]` restates a material. Its `PROP_n = name, value`
+   * lines are the very numbers a `.kn5` states about a surface and this
+   * already reads — `fresnelEXP`, `ksDiffuse`, `isAdditive`,
+   * `detailUVMultiplier` and the rest — so they are put where the file's own
+   * would have been and everything downstream follows.
+   *
+   * Only the sections that name `MATERIALS`. 53 of the 123 name `MESHES`
+   * instead, and a material here is shared across every mesh that wears it:
+   * one mesh's restatement applied to it would change parts the file never
+   * named.
+   */
+  function carReplacements(text, name) {
+    const hidden = new Set();
+    const shaders = new Map();
+    let kind = '';
+    let mine = true;
+    let active = true;
+    let hide = [];
+    let materials = [];
+    let props = new Map();
+    let shader = null;
+    let transparent = null;
+    const close = () => {
+      if (kind && mine && active) {
+        for (const one of hide) hidden.add(one.toLowerCase());
+        for (const one of materials) {
+          const at = one.toLowerCase();
+          const held = shaders.get(at) || { props: new Map(), shader: null, transparent: null };
+          for (const [key, value] of props) held.props.set(key, value);
+          if (shader) held.shader = shader;
+          if (transparent !== null) held.transparent = transparent;
+          shaders.set(at, held);
+        }
+      }
+      kind = ''; mine = true; active = true;
+      hide = []; materials = []; props = new Map(); shader = null; transparent = null;
+    };
+    for (const line of String(text || '').split(NEWLINE)) {
+      if (line.trimStart().startsWith('[')) {
+        close();
+        const mark = REPLACEMENT_SECTION.exec(line);
+        if (mark) kind = mark[1].toUpperCase();
+        continue;
+      }
+      if (!kind) continue;
+      const setting = SETTING.exec(line);
+      if (!setting) continue;
+      const key = setting[1].toUpperCase();
+      const value = setting[2].trim();
+      const list = () => value.split(',').map((one) => one.trim()).filter(Boolean);
+      if (key === 'ACTIVE') active = !OFF.test(value);
+      else if (key === 'SKINS') {
+        mine = list().some((one) => one.toLowerCase() === String(name).toLowerCase());
+      } else if (key === 'HIDE' && kind === 'MODEL_REPLACEMENT') hide = list();
+      else if (key === 'MATERIALS' && kind === 'SHADER_REPLACEMENT') materials = list();
+      else if (kind !== 'SHADER_REPLACEMENT') continue;
+      else if (key === 'SHADER') shader = value;
+      else if (key === 'IS_TRANSPARENT') transparent = !OFF.test(value);
+      else if (/^PROP_/.test(key)) {
+        const [written, said] = list();
+        const number = Number(said);
+        if (written && Number.isFinite(number)) props.set(written, number);
+      }
+    }
+    close();
+    return { hidden, shaders };
+  }
   /**
    * Group supplied files into the skins they came from.
    *
@@ -463,6 +553,10 @@ const FbxSkins = (function () {
       /* And what this skin says its surfaces are made of, over whatever the
        * car says about the same ones. */
       finish: config ? materialFinish(config, skin.name) : new Map(),
+      /* And the meshes this skin takes away — a number plate a livery does not
+       * want, which is the commonest thing a model replacement says and is
+       * said in a skin far more often than beside the car. */
+      hidden: config ? carReplacements(config, skin.name).hidden : new Set(),
       /* And the picture of the paint, which nearly all of them carry. Whether
        * it is worth reading is settled later, once the car has said which of
        * its materials the paint is: handed back rather than opened here, since
@@ -581,7 +675,7 @@ const FbxSkins = (function () {
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
     paintColours, configColours, chipColour, fromChip, paintBrightness,
-    materialFinish };
+    materialFinish, carReplacements };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;

@@ -91,6 +91,10 @@
   /** And what its `[Material_*]` blocks say each surface is made of, which on
    *  a Custom Shaders Patch car is where the material actually lives. */
   let carMaterialFinish = new Map();
+  /** The meshes the car's own config takes away, and the material numbers it
+   *  restates. A skin adds its own to the first of those. */
+  let carHidden = new Set();
+  let carShaders = new Map();
   //: Mesh name -> the colour of the lens it is, out of the car's lighting
   //: config. `SURFACE` there names a mesh and not a material, and on a
   //: Renault 5 the two do not line up.
@@ -391,6 +395,8 @@
       carPaintNames = [];
       carPaintBrightness = new Map();
       carMaterialFinish = new Map();
+      carHidden = new Set();
+      carShaders = new Map();
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
     for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
@@ -426,6 +432,9 @@
       for (const [mesh, colour] of FbxKn5.lensColours(text)) {
         if (!lensColours.has(mesh)) lensColours.set(mesh, colour);
       }
+      const replaced = FbxSkins.carReplacements(text, '');
+      for (const name of replaced.hidden) carHidden.add(name);
+      for (const [material, said] of replaced.shaders) carShaders.set(material, said);
       const lighting = FbxKn5.carLighting(text);
       for (const [mesh, lamp] of lighting.lamps) {
         if (!carLamps.has(mesh)) carLamps.set(mesh, lamp);
@@ -736,7 +745,10 @@
     let doc = null;
     if (FbxKn5.looksLikeKn5(buffer)) {
       // Six bytes at the head say so, and nothing else here begins "sc6969".
-      doc = FbxKn5.parse(buffer);
+      /* With whatever the car's config restates about its materials. Read
+       * from the folder before the model is opened, which is the order these
+       * arrive in anyway. */
+      doc = FbxKn5.parse(buffer, { shaders: carShaders });
     } else if (FbxMax.looksLikeMax(buffer)) {
       // A .max is a compound file, which nothing else here reads, so the
       // eight bytes of its container are enough to know it.
@@ -1379,8 +1391,9 @@
   }
 
   /**
-   * Offer the car's own lights, where it brought a config that says what they
-   * are.
+   * Settle what the car's own config says about each of its parts: which are
+   * lamps, which are lenses, and which the car takes away — and offer the
+   * switch for the first of those where it brought a config that says so.
    *
    * The switch is hidden for everything that did not, which is every format
    * but a `.kn5` with an `extension` folder beside it and most of those. It
@@ -1391,18 +1404,31 @@
    * the headlights, the brakes, the indicators or a door, and what this
    * offers is the car with its lights on — all of them at once.
    */
-  function offerLights() {
+  function settleParts() {
     /* Put each lamp on the part that wears it here rather than where the
      * geometry is built: a scene assembled part by part and a single geometry
      * opened on its own arrive at the part table by different roads, and this
      * is where the two meet. The lens is filled in the same pass for the same
      * reason — down the second road it was never being looked up at all. */
+    const gone = new Set([...carHidden,
+      ...((wearing && wearing.hidden) || new Set())]);
+    //: The picture each material wears, for the hides that name one.
+    const pictureOf = new Map((currentPalette || []).map((entry) => [
+      String(entry.name || '').toLowerCase(),
+      entry.texture ? baseName(entry.texture.path || entry.texture.name || '') : '']));
     let found = 0;
     for (const part of partTable || []) {
       const named = String(part.name || '').toLowerCase();
       part.lamp = carLamps.get(named) || null;
       if (part.lamp) found += 1;
       if (!part.lens) part.lens = lensColours.get(named) || null;
+      /* And whether the car takes this part away. By its own name, or by the
+       * picture it wears: a `HIDE` names meshes almost always and a texture
+       * now and then, and a plate hidden by the file it is printed on is the
+       * same plate. */
+      part.hidden = gone.has(named)
+        || (part.materials || []).some((one) => gone.has(pictureOf.get(
+          String(one).toLowerCase()) || ''));
     }
     const has = found > 0 || carLightSources.length > 0;
     viewer.setParts(partTable);
@@ -1439,7 +1465,7 @@
     viewer.setMesh(built.mesh, { keepCamera: true });
     partTable = built.table || [];
     viewer.setParts(partTable);
-    offerLights();
+    settleParts();
     // The parts are numbered afresh, so a selection that has fallen off the
     // end of the list is no selection at all.
     setSelectedPart(selectedPart < partTable.length ? selectedPart : -1);
@@ -4321,6 +4347,9 @@
     if (!currentPalette.length) return;
     setStatus(wearing ? `Putting ${wearing.name} on…` : 'Taking the skin off…');
     const textures = await refreshTextures();
+    // A skin has its own word on which parts the car wears, so the parts are
+    // settled again rather than only the pictures.
+    settleParts();
     // The paint is a palette setting rather than a texture, so it goes on with
     // the palette rather than with the images.
     paintFromSkin(currentPalette);
@@ -4499,7 +4528,7 @@
       viewer.setMesh(built.mesh, { keepCamera });
       partTable = built.table || [];
       viewer.setParts(partTable);
-      offerLights();
+      settleParts();
       setSelectedPart(-1);
       // Only a scene of several parts has anything to pull apart.
       dom.explodeSlider.disabled = partTable.length < 2;
@@ -4712,7 +4741,7 @@
       viewer.setMesh(mesh, { keepCamera });
       partTable = built.table;
       viewer.setParts(partTable);
-      offerLights();
+      settleParts();
       setSelectedPart(-1);
       dom.explodeSlider.disabled = true;
       dom.explodeSlider.value = '0';
