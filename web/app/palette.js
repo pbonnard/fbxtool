@@ -427,6 +427,35 @@ const FbxPalette = (function () {
           + ` title="${escape(images.map((i) => i.name).join(', '))}">`
           + `${images.length} image${images.length === 1 ? '' : 's'}`
           + `${absent ? ` · ${absent} missing` : ''}</span>` : '';
+      /* Which shader a game's material names, for the files that name one.
+       *
+       * The name itself, not what it comes to: the family is one word and
+       * would be the same word on most of a car — six of a Ferrari's first ten
+       * materials are a multi-map — while the suffixes are the whole of what
+       * tells them apart. `ksPerPixelMultiMap_damage_dirt` and
+       * `ksPerPixelMultiMap_AT_NMDetail` are the two that would have been
+       * collapsed, and they are a body and a chrome trim.
+       *
+       * On a line of its own under the name, because truncated to fit beside
+       * it these collapse into exactly the ambiguity they were put there to
+       * settle: cut to fifteen characters, a body, a chrome trim and a wheel
+       * all read `ksPerPixelMul…`. The common prefix is the part that would
+       * survive and it is the part every one of them shares.
+       *
+       * The whole name is in the tooltip too, and spelt out in the opened row
+       * with the family beside it, where saying how the surface shades is
+       * worth a word.
+       *
+       * Nothing at all for a file that states no shader, which is every file
+       * but a `.kn5` and one written back out from one. */
+      const named = group.entry && group.entry.shader;
+      const family = group.entry && group.entry.shaderFamily;
+      const shader = named
+        ? `<span class="material-shader" title="${escape(named)}">${escape(named)}</span>`
+        : '';
+      const shaderRow = named
+        ? '<div class="material-field material-shader-name"><span>Shader</span>'
+          + `<code>${escape(named)}${family ? ` · ${escape(family)}` : ''}</code></div>` : '';
       const options = PRESETS.map((p) => `<option value="${p.id}">${escape(p.label)}</option>`)
         .join('');
       // Renamed rows say what the file called it, so the report and the
@@ -438,8 +467,10 @@ const FbxPalette = (function () {
         + ` data-key="${escape(group.origin)}" data-index="${group.index}">`
         + '<summary>'
         + `<span class="swatch" style="background:${hex}"></span>`
-        + `<span class="material-name">${escape(group.name)}</span>${slots}${wears}`
+        + `<span class="material-name">${escape(group.name)}</span>`
+        + `${slots}${wears}`
         + `<span class="material-share">${percent(group.share)}</span>`
+        + shader
         + '</summary>'
         + '<div class="material-edit">'
         + '<label class="material-field material-rename"><span>Name</span>'
@@ -447,6 +478,7 @@ const FbxPalette = (function () {
         + ` data-key="${escape(group.origin)}" data-field="name"`
         + ' aria-label="Material name"></label>'
         + was
+        + shaderRow
         + '<label class="material-field"><span>Colour</span>'
         + `<input type="color" value="${hex}" data-key="${escape(group.origin)}"`
         + ' data-field="colour"></label>'

@@ -3953,6 +3953,16 @@
        * back: a game states most of a surface in parameters no format has a
        * slot for, its own shading model among them. */
       shader: typeof props.ShaderName === 'string' ? props.ShaderName : null,
+      /* And what that name comes to, which is the part worth reading at a
+       * glance: `ksPerPixelMultiMap_AT_NMDetail` and `ksPerPixelMultiMap` are
+       * the same surface with different suffixes, and a list of thirty
+       * materials wants the family rather than thirty long names.
+       *
+       * Worked out here rather than where the list is drawn, because the list
+       * is drawn by a module that is loaded on its own by the unit harness and
+       * has no shader table to ask. */
+      shaderFamily: typeof props.ShaderName === 'string' && props.ShaderName
+        ? FbxAcShaders.describe(props.ShaderName).family : null,
       stated: statedProperties(props),
       /* And the same surface as the game states it, beside the one derived
        * from it above.

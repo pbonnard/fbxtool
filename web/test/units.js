@@ -641,6 +641,26 @@ check('and names each file against its slot',
   /Base colour/.test(markup) && /tire_metallicRoughness\.png/.test(markup)
   && /not supplied/.test(markup));
 
+console.log('\npalette: the shader a game material names');
+/* A car states its shader and nothing else does. The row carries the family,
+ * since ksPerPixelMultiMap_NMDetail is twenty-seven characters and a car has
+ * thirty of them; the whole name is in the tooltip and in the opened row. */
+const shaded = FbxPalette.render(FbxPalette.groups([Object.assign(
+  entry('body', 20),
+  { shader: 'ksPerPixelMultiMap_NMDetail', shaderFamily: 'multiMap' })],
+[10]), {}, { supplied: new Set() });
+check('the row names the shader itself, suffixes and all',
+  /material-shader" title="ksPerPixelMultiMap_NMDetail">ksPerPixelMultiMap_NMDetail</.test(shaded));
+check('and the opened row says what family that comes to',
+  /<code>ksPerPixelMultiMap_NMDetail[^<]*multiMap<\/code>/.test(shaded));
+check('a file that names no shader says nothing about one',
+  !/material-shader/.test(FbxPalette.render(
+    FbxPalette.groups([entry('plain', 20)], [10]), {}, { supplied: new Set() })));
+check('and the name is escaped like everything else',
+  !/<script>/.test(FbxPalette.render(FbxPalette.groups([Object.assign(
+    entry('x', 1), { shader: '<script>bad<\/script>', shaderFamily: 'perPixel' })],
+  [1]), {}, { supplied: new Set() })));
+
 console.log('\npalette: leaving an image out');
 const leftOut = FbxPalette.maps(
   Object.assign({ droppedMaps: ['normal'] }, namedMaps), new Set());

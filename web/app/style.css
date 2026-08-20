@@ -467,6 +467,10 @@ ul.record-tree .count { color: var(--muted); }
   content: " •";
   color: var(--accent);
 }
+/* The shader wraps onto a second line, so the summary has to allow one — and
+   the 10px gap is for the chips beside each other, not for the rows, which
+   would otherwise cost a third of the list's height to say one thing more. */
+.material > summary { flex-wrap: wrap; column-gap: 10px; row-gap: 0; }
 .material-slots, .material-share {
   color: var(--muted);
   font-family: var(--mono);
@@ -536,6 +540,29 @@ ul.record-tree .count { color: var(--muted); }
   flex: none;
 }
 .material-images.absent { color: var(--warn); }
+
+/* Which shader a game's material names. The family in the row, since a list of
+   thirty materials wants one short word rather than thirty long names; the
+   whole name is in the tooltip and in the opened row. */
+.material-shader {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  /* A line of its own under the name: truncated to fit beside it, a body, a
+     chrome trim and a wheel all read `ksPerPixelMul…`, which is the ambiguity
+     the name was put there to settle. */
+  flex: 0 0 100%;
+  /* Under the name rather than under the swatch: 18px of swatch and the 10px
+     beside it. */
+  margin: -1px 0 1px 28px;
+  opacity: 0.85;
+}
+.material-shader-name code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 
 .material-maps {
   display: flex;
