@@ -277,6 +277,21 @@ const FbxAcShaders = (() => {
     return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
   }
 
+  /**
+   * How many times a picture is tiled across a surface, where the shader
+   * states it.
+   *
+   * `ksPerPixelNM_UVMult` gives the colour and the relief a multiplier each,
+   * at a median of 12.5 and 195 across the 32 materials that state them. A
+   * stated nought is a multiplier nobody set rather than one set to nothing —
+   * half of them write it for the colour — and taken literally it would
+   * collapse the whole picture into its first texel.
+   */
+  function tiling(scalar, name) {
+    const stated = scalar(name, 0);
+    return stated > 0 ? stated : 1;
+  }
+
   /** A lookup into a plain object of stated numbers, as the two above want.
    *
    * A property read back out of a record tree is a number where the file wrote
@@ -299,6 +314,7 @@ const FbxAcShaders = (() => {
     ALPHA_REF_DEFAULT,
     lightWeight,
     reflectance,
+    tiling,
     statedScalar,
     LIGHT_AMBIENT,
     LIGHT_DIFFUSE,

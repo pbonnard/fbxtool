@@ -2977,6 +2977,82 @@ def test_the_switch_between_a_games_materials_and_the_approximation(built, tmp_p
 
 @needs_clang
 @needs_node
+def test_the_games_own_per_texel_finish(built, tmp_path):
+    """201 of the 528 materials across the cars to hand bind a `txMaps`.
+
+    That is every `ksPerPixelMultiMap`, which is what a car's body wears, and
+    it is what keeps a badge, a shut line and a chrome strip from taking the
+    same highlight as the panel around them.  Stated for the whole material
+    instead, a body is one uniform gloss and the trim on it disappears.
+
+    What its channels are was settled by decoding them — `tools/maps_channels.js`
+    over the 221 that could be read — rather than by what the name suggests.
+    Red is the level, varying on 175 of them; green is a multiplier that 133 of
+    the 142 leaving it flat leave at exactly 1.  The two cars here differ only
+    in that red channel, at nought and at one.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([170, 170, 170, 255]) * 16)
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    # `ksSpecular` at the 0.1 this reader takes as the whole of the highlight,
+    # so what the map does to it is the whole of the difference.
+    properties = (fb.kn5_property("ksAmbient", 0.4) + fb.kn5_property("ksDiffuse", 0.4)
+                  + fb.kn5_property("ksSpecular", 0.1)
+                  + fb.kn5_property("ksSpecularEXP", 20.0)
+                  + fb.kn5_property("fresnelC", 0.05)
+                  + fb.kn5_property("fresnelEXP", 3.0)
+                  + fb.kn5_property("fresnelMaxLevel", 0.5))
+    made = {}
+    for name, level in (("dark", 0), ("bright", 255)):
+        # Red is the level; green left at the 1 a multiplier defaults to. The
+        # bytes are BGRA, so red is the third of each four.
+        maps = fb.dds_bgra(4, 4, bytes([0, 255, level, 255]) * 16)
+        material = fb.kn5_material(
+            "panel", "ksPerPixelMultiMap", properties=properties, property_count=7,
+            slots=(("txDiffuse", 0, "grey.dds"), ("txMaps", 1, "maps.dds")))
+        path = tmp_path / f"{name}.kn5"
+        path.write_bytes(fb.build_kn5(
+            6, textures=[("grey.dds", grey), ("maps.dds", maps)],
+            materials=[material],
+            tree=fb.kn5_dummy("car", identity,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        made[name] = path
+
+    # And a shader that states its two scales apart, which nothing else does.
+    # A chequer rather than a flat grey, since tiling a flat colour changes
+    # nothing whatever the multiplier says.
+    chequer = fb.dds_bgra(4, 4, (bytes([40, 40, 40, 255]) + bytes([220, 220, 220, 255])) * 8)
+    tiled = tmp_path / "tiled.kn5"
+    tiled.write_bytes(fb.build_kn5(
+        6, textures=[("grey.dds", chequer)],
+        materials=[fb.kn5_material(
+            "sidewall", "ksPerPixelNM_UVMult",
+            properties=(properties + fb.kn5_property("diffuseMult", 8.0)
+                        + fb.kn5_property("normalMult", 4.0)),
+            property_count=9, slots=(("txDiffuse", 0, "grey.dds"),))],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("cube", vertices, indices), 1)))
+
+    result = _run(["node", str(WEB / "test" / "acmaps.js"),
+                   str(made["dark"]), str(made["bright"]), str(tiled)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_gltf_export(built, tmp_path):
     """Export through the page and take the result apart.
 

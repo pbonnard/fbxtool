@@ -6299,6 +6299,21 @@ const FbxAcShaders = (() => {
     return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
   }
 
+  /**
+   * How many times a picture is tiled across a surface, where the shader
+   * states it.
+   *
+   * `ksPerPixelNM_UVMult` gives the colour and the relief a multiplier each,
+   * at a median of 12.5 and 195 across the 32 materials that state them. A
+   * stated nought is a multiplier nobody set rather than one set to nothing —
+   * half of them write it for the colour — and taken literally it would
+   * collapse the whole picture into its first texel.
+   */
+  function tiling(scalar, name) {
+    const stated = scalar(name, 0);
+    return stated > 0 ? stated : 1;
+  }
+
   /** A lookup into a plain object of stated numbers, as the two above want.
    *
    * A property read back out of a record tree is a number where the file wrote
@@ -6321,6 +6336,7 @@ const FbxAcShaders = (() => {
     ALPHA_REF_DEFAULT,
     lightWeight,
     reflectance,
+    tiling,
     statedScalar,
     LIGHT_AMBIENT,
     LIGHT_DIFFUSE,
@@ -13387,7 +13403,7 @@ const FbxViewer = (function () {
    * busiest of the 135 cars to hand states sixteen. */
   const MAX_LIGHTS = 24;
 
-  const PALETTE_ROWS = 10;
+  const PALETTE_ROWS = 11;
   const SCHLICK_POWER = 5;
 
   /* The three-quarter view a model opens on. */
@@ -13804,6 +13820,9 @@ ${ENVIRONMENT}
   uniform highp sampler2DArray uDetail;
   uniform highp sampler2DArray uGlow;
   uniform highp sampler2DArray uNormalDetail;
+  /* The game's own per-texel finish. Not sRGB and not a picture: its channels
+   * are numbers that weigh the highlight. */
+  uniform highp sampler2DArray uAcMaps;
   uniform highp sampler2D uLights;   // three texels a light: see setLightSources
   uniform int uLightCount;
   uniform int uLightsOn;
@@ -13935,6 +13954,19 @@ ${SHADOW_LOOKUP}
      * what lights the surface and what is drawn as its normal are the same
      * thing.
      */
+    /* How many times each of this surface's two pictures is tiled across it.
+     *
+     * One apiece for every material but the ones whose shader states them
+     * apart, so this changes nothing anywhere else. Read whichever way the
+     * switch is set would be wrong: the multipliers are the game's own reading
+     * of the surface, and the approximation has no second scale to put them
+     * on. */
+    vec2 tiling = vec2(1.0);
+    if (uShaders == 1 && uPaletteSize > 0
+      && texelFetch(uPalette, ivec2(slot, 9), 0).a > 0.5) {
+      tiling = texelFetch(uPalette, ivec2(slot, 10), 0).rg;
+    }
+
     if (uPaletteSize > 0 && uUseTextures == 1) {
       vec4 relief = texelFetch(uPalette, ivec2(slot, 3), 0);
       int bumpLayer = int(relief.r + 0.5) - 1;
@@ -13943,7 +13975,7 @@ ${SHADOW_LOOKUP}
       vec3 tangentNormal = vec3(0.0, 0.0, 1.0);
       bool shaped = false;
       if (bumpLayer >= 0) {
-        vec3 uvw = vec3(vUv, float(bumpLayer));
+        vec3 uvw = vec3(vUv * tiling.y, float(bumpLayer));
         shaped = true;
         if (relief.b > 0.5) {
           tangentNormal = texture(uBump, uvw).xyz * 2.0 - 1.0;
@@ -14082,7 +14114,7 @@ ${SHADOW_LOOKUP}
         // and viewers treat it — unless the material says the colour is a tint
         // to be multiplied through it, which is how a car's paint is stated.
         // The sampler is sRGB, so this is already linear.
-        vec4 painted = texture(uTextures, vec3(vUv, float(layer)));
+        vec4 painted = texture(uTextures, vec3(vUv * tiling.x, float(layer)));
         picture = painted.rgb;
         albedo = tinted ? painted.rgb * albedo : painted.rgb;
         /* …and its fourth channel is how much of the surface is there, for a
@@ -14262,6 +14294,44 @@ ${SHADOW_LOOKUP}
      * highlight is still chrome. */
     float sunSpecular = uPaletteSize > 0 && uMode == 0
       ? texelFetch(uPalette, ivec2(slot, 5), 0).a : 1.0;
+
+    /* And the same thing again per texel, where the game states one and the
+     * switch is on.
+     *
+     * txMaps is bound by 201 of the 528 materials across the cars to hand —
+     * every ksPerPixelMultiMap, which is what a car's body wears — and it is
+     * what keeps a badge, a shut line and a chrome strip from taking the same
+     * highlight as the panel around them. Stated for the whole material
+     * instead, a body is one uniform gloss and the trim on it disappears.
+     *
+     * Red is the level and green is a multiplier over it. That is what the
+     * pixels say rather than what the name suggests: over the 221 decoded by
+     * tools/maps_channels.js, red varies on 175 and sits at an arbitrary
+     * constant when it does not, which is a level; green is flat on 142 and
+     * 133 of those are flat at exactly 1, which is what a multiplier's default
+     * looks like and not what an unused channel looks like. Blue is red again
+     * — a correlation of 0.994, identical on 175 of 178 — because the map is
+     * authored grey, and alpha is flat on 214 at exactly 1 or exactly 0, which
+     * is what the two block formats give a channel nobody wrote.
+     *
+     * So blue and alpha are deliberately not read. Taken as glTF packs a
+     * metallic-roughness map they would be a metalness out of the red channel
+     * again, which would make chrome of every panel wearing a bright mask. */
+    if (uShaders == 1 && uUseTextures == 1 && uMode == 0 && uPaletteSize > 0) {
+      vec4 finishRow = texelFetch(uPalette, ivec2(slot, 9), 0);
+      int acMapsLayer = int(finishRow.b + 0.5) - 1;
+      if (acMapsLayer >= 0) {
+        vec2 maps = texture(uAcMaps, vec3(vUv, float(acMapsLayer))).rg;
+        sunSpecular *= maps.r;
+        /* The green multiplies the exponent the material states, and this
+         * renderer works in a roughness. The two meet through the fourth root
+         * — a roughness is (2 / (n + 2)) to the quarter — so multiplying the
+         * exponent is dividing the roughness by the same multiplier's fourth
+         * root, and a texel left at 1 comes through unchanged. */
+        roughness = clamp(roughness / max(pow(max(maps.g, 1e-3), 0.25), 1e-3),
+          0.05, 1.0);
+      }
+    }
 
     /* And the shape of what this surface returns of the world around it: how
      * fast it comes up as the surface turns away, and how far it is let get.
@@ -14619,6 +14689,7 @@ ${SHADOW_LOOKUP}
         detail: gl.getUniformLocation(program, 'uDetail'),
         glow: gl.getUniformLocation(program, 'uGlow'),
         normalDetail: gl.getUniformLocation(program, 'uNormalDetail'),
+        acMaps: gl.getUniformLocation(program, 'uAcMaps'),
         lights: gl.getUniformLocation(program, 'uLights'),
         lightCount: gl.getUniformLocation(program, 'uLightCount'),
         lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
@@ -14835,7 +14906,9 @@ ${SHADOW_LOOKUP}
       this.glowArray = gl.createTexture();
       this.glowLayers = 0;
       this.normalDetailArray = gl.createTexture();
+      this.acMapsArray = gl.createTexture();
       this.normalDetailLayers = 0;
+      this.acMapsLayers = 0;
       this.lightSources = [];
       this.lightCount = 0;
       this.lightsOn = false;
@@ -15177,7 +15250,21 @@ ${SHADOW_LOOKUP}
           ? Math.min(1, Math.max(0, ac.weight)) : 0;
         data[(width * 9 + i) * 4 + 1] = ac && typeof ac.facing === 'number'
           ? Math.min(1, Math.max(0, ac.facing)) : 0;
+        // And the game's own per-texel finish, offset by one so nought reads
+        // as "this material has none".
+        const acMapsLayer = Number.isInteger(material.acMapsLayer)
+          ? material.acMapsLayer : -1;
+        data[(width * 9 + i) * 4 + 2] = Math.max(0, acMapsLayer + 1);
         data[(width * 9 + i) * 4 + 3] = ac ? 1 : 0;
+        /* How many times each of its two pictures is tiled across it, where
+         * the shader states them apart. One is every surface that does not,
+         * which is all but the 32 materials to hand wearing `ksPerPixelNM_UVMult`
+         * — a tyre sidewall carrying lettering at one scale and a grain at
+         * another off two pictures otherwise the same size. */
+        data[(width * 10 + i) * 4] = ac && typeof ac.diffuseTiling === 'number'
+          ? Math.max(1e-4, ac.diffuseTiling) : 1;
+        data[(width * 10 + i) * 4 + 1] = ac && typeof ac.normalTiling === 'number'
+          ? Math.max(1e-4, ac.normalTiling) : 1;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -15277,6 +15364,24 @@ ${SHADOW_LOOKUP}
     async setNormalDetailTextures(images, edge = 1024) {
       this.normalDetailLayers = images.length;
       return this._uploadArray(this.normalDetailArray, images, this.gl.RGBA8, edge);
+    }
+
+    /**
+     * The game's own per-texel finish — what a `.kn5` calls `txMaps`.
+     *
+     * Not sRGB, and not a metallic-roughness map however much it looks like
+     * one. What is in it, decoded over the 221 materials across the cars to
+     * hand that bind one (`tools/maps_channels.js`): the red channel is the
+     * level, varying on 175 of them; the green is a multiplier that 133 of the
+     * 142 leaving it flat leave at exactly 1, which is what a multiplier's
+     * default looks like; the blue is the red again, at a correlation of 0.994
+     * and identical on 175 of 178, because the map is authored grey; and the
+     * alpha carries nothing, being flat on 214 and sitting at exactly 1 or
+     * exactly 0, which is what the two block formats give an unused channel.
+     */
+    async setAcMapsTextures(images, edge = 1024) {
+      this.acMapsLayers = images.length;
+      return this._uploadArray(this.acMapsArray, images, this.gl.RGBA8, edge);
     }
 
     async _uploadArray(target, images, internalFormat, edge = 1024) {
@@ -15964,6 +16069,9 @@ ${SHADOW_LOOKUP}
       gl.activeTexture(gl.TEXTURE9);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.normalDetailArray);
       gl.uniform1i(this.uniforms.normalDetail, 9);
+      gl.activeTexture(gl.TEXTURE10);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.acMapsArray);
+      gl.uniform1i(this.uniforms.acMaps, 10);
       gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
       gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
       gl.uniform1i(this.uniforms.shaders, this.acShaders ? 1 : 0);
@@ -15973,7 +16081,7 @@ ${SHADOW_LOOKUP}
       // whole of what they say off with them.
       gl.uniform1i(this.uniforms.useTextures,
         ((this.textureLayers > 0 || this.finishLayers > 0 || this.bumpLayers > 0
-          || this.detailLayers > 0 || this.glowLayers > 0
+          || this.detailLayers > 0 || this.glowLayers > 0 || this.acMapsLayers > 0
           || this.normalDetailLayers > 0)
           && this.hasUv && this.showTextures !== false) ? 1 : 0);
       gl.uniform1f(this.uniforms.opaqueLimit, OPAQUE);
@@ -16665,6 +16773,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     await viewer.setDetailTextures(textures.detail);
     await viewer.setGlowTextures(textures.glow);
     await viewer.setNormalDetailTextures(textures.detailNormal);
+    await viewer.setAcMapsTextures(textures.acMaps);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
       && textures.finish.length === 0 && textures.bump.length === 0
@@ -19869,6 +19978,19 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     return {
       weight: FbxAcShaders.lightWeight(scalar),
       facing: FbxAcShaders.reflectance(scalar),
+      /* And how many times each of its two pictures is tiled across it, where
+       * the shader is one that states them apart.
+       *
+       * `ksPerPixelNM_UVMult` gives the colour and the relief a multiplier
+       * each — 32 materials across the cars to hand, at a median of 12.5 and
+       * 195 — which is how a tyre sidewall carries lettering at one scale and
+       * a grain at another off two pictures that are otherwise the same size.
+       *
+       * A stated nought is a multiplier nobody set rather than one set to
+       * nothing: half of them write it for the colour, and taken literally it
+       * would collapse the whole picture into its first texel. */
+      diffuseTiling: FbxAcShaders.tiling(scalar, 'diffuseMult'),
+      normalTiling: FbxAcShaders.tiling(scalar, 'normalMult'),
     };
   }
 
@@ -20482,6 +20604,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     const fine = await resolveLayer(palette,
       (m) => (wanted(m, 'detail') && m.detailTiling && m.textures
         ? m.textures.detailNormal : null), 'detailNormalLayer');
+    /* And the game's own per-texel finish, which 201 of the 528 materials
+     * across the cars to hand bind — every `ksPerPixelMultiMap`, which is what
+     * a car's body wears. Resolved whichever way the switch is set: it is one
+     * array texture either way, and re-uploading it per click is the one thing
+     * the switch was built not to do. */
+    const finish2 = await resolveLayer(palette,
+      (m) => (wanted(m, 'acMaps') && m.textures ? m.textures.acMaps : null),
+      'acMapsLayer');
     // Which kind each layer turned out to be, and how hard to take it. A
     // normal map states its own slopes and is taken as written; a height has
     // to be turned into one, and the strength is what says how deep it reads.
@@ -20508,15 +20638,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       // A map that was named and did not arrive is worth saying so about,
       // whichever of the three it was.
       missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing,
-        ...grain.missing, ...glow.missing, ...fine.missing])],
+        ...grain.missing, ...glow.missing, ...fine.missing, ...finish2.missing])],
       unreadable: [...new Set([...base.unreadable, ...finish.unreadable,
         ...relief.unreadable, ...grain.unreadable, ...glow.unreadable,
-        ...fine.unreadable])],
+        ...fine.unreadable, ...finish2.unreadable])],
       finish: finish.images,
       bump: relief.images,
       detail: grain.images,
       glow: glow.images,
       detailNormal: fine.images,
+      acMaps: finish2.images,
     };
   }
 
@@ -20840,6 +20971,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       await viewer.setDetailTextures(textures.detail);
       await viewer.setGlowTextures(textures.glow);
       await viewer.setNormalDetailTextures(textures.detailNormal);
+      await viewer.setAcMapsTextures(textures.acMaps);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0
@@ -21055,6 +21187,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       await viewer.setDetailTextures(textures.detail);
       await viewer.setGlowTextures(textures.glow);
       await viewer.setNormalDetailTextures(textures.detailNormal);
+      await viewer.setAcMapsTextures(textures.acMaps);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0

@@ -33,7 +33,7 @@ module:
 
 from __future__ import annotations
 
-__all__ = ["describe", "slot_role", "light_weight", "reflectance", "FAMILIES",
+__all__ = ["describe", "slot_role", "light_weight", "reflectance", "tiling", "FAMILIES",
            "SLOT_ROLES", "RUNTIME_SLOTS", "ALPHA_REF_DEFAULT"]
 
 
@@ -301,3 +301,16 @@ def reflectance(scalar) -> float:
     facing = scalar("fresnelC", DEFAULT_FRESNEL_C)
     ceiling = scalar("fresnelMaxLevel", DEFAULT_FRESNEL_MAX)
     return min(max(min(facing, ceiling), 0.0), 1.0)
+
+
+def tiling(scalar, name: str) -> float:
+    """How many times a picture is tiled across a surface, where it says.
+
+    ``ksPerPixelNM_UVMult`` gives the colour and the relief a multiplier each,
+    at a median of 12.5 and 195 across the 32 materials that state them.  A
+    stated nought is a multiplier nobody set rather than one set to nothing —
+    half of them write it for the colour — and taken literally it would collapse
+    the whole picture into its first texel.
+    """
+    stated = scalar(name, 0.0)
+    return stated if stated > 0 else 1.0

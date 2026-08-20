@@ -158,6 +158,9 @@ everywhere.
 - On the shaders that model a car being crashed, `txNormal` is the dents rather than the panel's own relief, and is not drawn as relief.
 - **`shaders` switch** — one control settling both the view and the export, offered only for a file that states a game's material and on by default for one that does. On, the surface is what the game states: the whole of the light it takes as its albedo, the Fresnel it stated as its reflection, and no conductor anywhere. Off, it is the PBR approximation this tool derives. Remembered per file.
 - The switch turns off *this tool's inference* and nothing else: a paint, a colour set by hand and a finish the car's own config names all stand whichever way it is thrown. The glTF core stays inside what a stranger can render either way — a dielectric's reflectance is still held at 4% and an emissive past white still carries its strength in an extension — with the game's own numbers in `extras`, marked `shaderModel`.
+- **`txMaps` shaded per texel** with the switch on — its red channel weighs the highlight and its green multiplies the exponent, which is what keeps a badge, a shut line and a chrome strip from taking the same gloss as the panel around them. Its blue is deliberately not read: it is the red again (correlation 0.994, identical on 175 of 178) because the map is authored grey, and taken as glTF packs a metallic-roughness map it would make chrome of every panel wearing a bright mask.
+- What those channels are was settled by decoding them — `tools/maps_channels.js` over the 221 that could be read — rather than by what the name suggests. Red varies on 175 and sits at an arbitrary constant when it does not, which is a level; green is flat on 142 and 133 of those are flat at exactly 1, which is a multiplier's default; alpha is flat on 214 at exactly 1 or exactly 0, which is what the two block formats give a channel nobody wrote.
+- **`ksPerPixelNM_UVMult`** tiles its colour and its relief by the two multipliers it states apart — a median of 12.5 and 195 across the 32 materials that state them. A stated nought is a multiplier nobody set, not one set to nothing.
 - `ksAlphaRef` stated as nought read as the game's own 0.5: every alpha-tested material counted states nought, and nought cuts nothing out, so a grille taken at face value is a solid rectangle.
 - `txDetail` applied as a tiled grain, neutral at its own average.
 - Meshes marked invisible and nodes marked inactive are read, counted, reported and not drawn; visibility descends.
@@ -345,6 +348,7 @@ pytest                          # no dependencies beyond pytest itself
 python3 tools/make_samples.py   # regenerate the generated files in samples/
 python3 web/build.py            # rebuild web/dist/fbxview.html
 python3 tools/shader_census.py <folder of cars>   # what the game's shaders are made of
+node tools/maps_channels.js <car.kn5> [more.kn5 ...]  # what is in a txMaps, channel by channel
 ```
 
 `tools/shader_census.py` reads only each `.kn5`'s header and material table —
@@ -375,6 +379,7 @@ node web/test/flip.js samples/scene_parts.fbx        # mirroring, and its windin
 node web/test/turn.js samples/scene_parts.fbx        # facing the other way
 node web/test/skin.js <car folder> <other.kn5>       # putting a skin on a car
 node web/test/shaders.js <dir> <chrome.kn5> <paint.kn5> <plain.fbx>  # the shaders switch
+node web/test/acmaps.js <dark.kn5> <bright.kn5> <tiled.kn5>  # the per-texel finish
 node web/test/drop.js samples/pyramid.obj samples/pyramid.mtl samples/checker.png
 node web/test/edits.js samples/Shelby.fbx            # deleting and splitting
 ```

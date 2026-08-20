@@ -640,6 +640,7 @@
     await viewer.setDetailTextures(textures.detail);
     await viewer.setGlowTextures(textures.glow);
     await viewer.setNormalDetailTextures(textures.detailNormal);
+    await viewer.setAcMapsTextures(textures.acMaps);
     viewer.setPalette(currentPalette);
     dom.textureToggle.disabled = textures.images.length === 0
       && textures.finish.length === 0 && textures.bump.length === 0
@@ -3844,6 +3845,19 @@
     return {
       weight: FbxAcShaders.lightWeight(scalar),
       facing: FbxAcShaders.reflectance(scalar),
+      /* And how many times each of its two pictures is tiled across it, where
+       * the shader is one that states them apart.
+       *
+       * `ksPerPixelNM_UVMult` gives the colour and the relief a multiplier
+       * each — 32 materials across the cars to hand, at a median of 12.5 and
+       * 195 — which is how a tyre sidewall carries lettering at one scale and
+       * a grain at another off two pictures that are otherwise the same size.
+       *
+       * A stated nought is a multiplier nobody set rather than one set to
+       * nothing: half of them write it for the colour, and taken literally it
+       * would collapse the whole picture into its first texel. */
+      diffuseTiling: FbxAcShaders.tiling(scalar, 'diffuseMult'),
+      normalTiling: FbxAcShaders.tiling(scalar, 'normalMult'),
     };
   }
 
@@ -4457,6 +4471,14 @@
     const fine = await resolveLayer(palette,
       (m) => (wanted(m, 'detail') && m.detailTiling && m.textures
         ? m.textures.detailNormal : null), 'detailNormalLayer');
+    /* And the game's own per-texel finish, which 201 of the 528 materials
+     * across the cars to hand bind — every `ksPerPixelMultiMap`, which is what
+     * a car's body wears. Resolved whichever way the switch is set: it is one
+     * array texture either way, and re-uploading it per click is the one thing
+     * the switch was built not to do. */
+    const finish2 = await resolveLayer(palette,
+      (m) => (wanted(m, 'acMaps') && m.textures ? m.textures.acMaps : null),
+      'acMapsLayer');
     // Which kind each layer turned out to be, and how hard to take it. A
     // normal map states its own slopes and is taken as written; a height has
     // to be turned into one, and the strength is what says how deep it reads.
@@ -4483,15 +4505,16 @@
       // A map that was named and did not arrive is worth saying so about,
       // whichever of the three it was.
       missing: [...new Set([...base.missing, ...finish.missing, ...relief.missing,
-        ...grain.missing, ...glow.missing, ...fine.missing])],
+        ...grain.missing, ...glow.missing, ...fine.missing, ...finish2.missing])],
       unreadable: [...new Set([...base.unreadable, ...finish.unreadable,
         ...relief.unreadable, ...grain.unreadable, ...glow.unreadable,
-        ...fine.unreadable])],
+        ...fine.unreadable, ...finish2.unreadable])],
       finish: finish.images,
       bump: relief.images,
       detail: grain.images,
       glow: glow.images,
       detailNormal: fine.images,
+      acMaps: finish2.images,
     };
   }
 
@@ -4815,6 +4838,7 @@
       await viewer.setDetailTextures(textures.detail);
       await viewer.setGlowTextures(textures.glow);
       await viewer.setNormalDetailTextures(textures.detailNormal);
+      await viewer.setAcMapsTextures(textures.acMaps);
       defaultShadingMode(built.palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0
@@ -5030,6 +5054,7 @@
       await viewer.setDetailTextures(textures.detail);
       await viewer.setGlowTextures(textures.glow);
       await viewer.setNormalDetailTextures(textures.detailNormal);
+      await viewer.setAcMapsTextures(textures.acMaps);
       defaultShadingMode(palette.length > 0);
       dom.textureToggle.disabled = textures.images.length === 0
         && textures.finish.length === 0 && textures.bump.length === 0
