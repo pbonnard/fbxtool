@@ -13463,6 +13463,14 @@ const FbxViewer = (function () {
   const MAX_LIGHTS = 24;
 
   const PALETTE_ROWS = 11;
+
+  /* The line round the part picked with the mouse: how far out it reaches, in
+   * pixels of the canvas as it is shown, and what colour it is. Orange, which
+   * is the one hue nothing a car is painted competes with — and the same hue
+   * the list uses to mark a material, the two being told apart by one being a
+   * line and the other a wash. */
+  const OUTLINE_WIDTH = 2;
+  const OUTLINE_COLOUR = [1.0, 0.47, 0.09];
   const SCHLICK_POWER = 5;
 
   /* The three-quarter view a model opens on. */
@@ -13726,6 +13734,65 @@ ${ENVIRONMENT}
     // Its own, not the room's: see backdropColour above.
     fragColour = vec4(encodeSrgb(toneMap(backdropColour(dir))), 1.0);
   }`;
+  /* The line round the part picked with the mouse.
+   *
+   * Drawn from the same buffer of part numbers the mouse is picked out of, and
+   * for the same reason: it is the only thing that knows which part a pixel
+   * belongs to, and it already accounts for what is in front of what. So the
+   * outline is of the part as it is actually seen — a wing half behind a wheel
+   * is outlined round the half that shows.
+   *
+   * A pixel is on the line when it is not the picked part but something within
+   * a step of it is. That puts the line just outside the silhouette, which
+   * leaves the part itself in its own colours; drawn inside it would cover the
+   * thing it is meant to point at. Diagonals included, or the line breaks up
+   * on any edge that is not square to the screen.
+   *
+   * This is what a rim off the surface normal cannot do. A rim only appears
+   * where a surface turns away from the eye, so a flat panel seen face-on has
+   * no line at all, and on a curved one it is a wash across the whole of the
+   * curve rather than a border. The two were tried in that order.
+   */
+  const OUTLINE_VERTEX = `#version 300 es
+  precision highp float;
+  void main() {
+    vec2 corner = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+  }`;
+
+  const OUTLINE_FRAGMENT = `#version 300 es
+  precision highp float;
+  uniform highp sampler2D uIds;   // one part number a pixel, as the pick pass writes them
+  uniform vec2 uTexel;            // one pixel, in the buffer's own coordinates
+  uniform float uWanted;          // the picked part, as the number written for it
+  uniform float uWidth;           // how many pixels out the line reaches
+  uniform vec3 uColour;
+  out vec4 fragColour;
+
+  /* Which part a pixel belongs to. The pick pass writes the number across
+   * three channels, low byte first, and nought for the background. */
+  float partAt(vec2 at) {
+    vec3 said = texture(uIds, at).rgb * 255.0;
+    return floor(said.r + 0.5) + floor(said.g + 0.5) * 256.0
+      + floor(said.b + 0.5) * 65536.0;
+  }
+
+  void main() {
+    vec2 at = gl_FragCoord.xy * uTexel;
+    // Inside the part is left alone: the line goes round it, not over it.
+    if (abs(partAt(at) - uWanted) < 0.5) discard;
+    for (float y = -uWidth; y <= uWidth; y += 1.0) {
+      for (float x = -uWidth; x <= uWidth; x += 1.0) {
+        if (x == 0.0 && y == 0.0) continue;
+        if (abs(partAt(at + vec2(x, y) * uTexel) - uWanted) < 0.5) {
+          fragColour = vec4(uColour, 1.0);
+          return;
+        }
+      }
+    }
+    discard;
+  }`;
+
   const VERTEX_SHADER = `#version 300 es
   precision highp float;
   layout(location = 0) in vec3 aPosition;
@@ -13904,6 +13971,7 @@ ${SHADOW_LOOKUP}
 
   const float PI = 3.141592653589793;
 
+
   // Distinct hues per material index without a lookup table.
   vec3 indexColour(float id) {
     float hue = fract(id * 0.6180339887);
@@ -13997,7 +14065,6 @@ ${SHADOW_LOOKUP}
       normal = normalize(cross(dFdx(vViewPosition), dFdy(vViewPosition)));
     }
     if (!gl_FrontFacing) normal = -normal;
-
     // The material index is a whole number carried in a float attribute.
     int slot = clamp(int(vMaterial + 0.5), 0, max(uPaletteSize - 1, 0));
 
@@ -14278,11 +14345,10 @@ ${SHADOW_LOOKUP}
     // Picking a material out of the list marks where it is on the model.
     bool marked = uHighlight >= 0 && group == uHighlight;
     if (marked) albedo = mix(albedo, vec3(1.0, 0.42, 0.05), 0.85);
-    // A part chosen with the mouse, kept a different colour from a material
-    // picked out of the list, and kept light enough to still read as itself.
-    if (uSelected >= 0 && vPart == uSelected) {
-      albedo = mix(albedo, vec3(0.15, 0.62, 1.0), 0.55);
-    }
+    /* A part chosen with the mouse is drawn round rather than coloured over,
+     * so what was picked is still the colour it was. The line round it is a
+     * pass of its own — see OUTLINE_FRAGMENT — and nothing about it is done
+     * here. */
 
     /* Each pass takes the half of the scene it is set up to draw.
      *
@@ -14541,7 +14607,9 @@ ${SHADOW_LOOKUP}
      * all and is added to what is behind instead of standing in front of it.
      * That is what a lamp's glow is: light on top of the thing it lies on. */
     float wrote = marked ? 1.0 : coverage;
-    vec3 out3 = encodeSrgb(toneMap(lit)) * wrote;
+    vec3 shaded = encodeSrgb(toneMap(lit));
+
+    vec3 out3 = shaded * wrote;
     // Only in the pass that blends: the opaque one writes with blending off,
     // and a coverage of nought there would mean nothing at best.
     fragColour = vec4(out3, additive && !marked && uPass == 1 ? 0.0 : wrote);
@@ -14775,6 +14843,14 @@ ${SHADOW_LOOKUP}
       };
 
       this.pickProgram = this._link(PICK_VERTEX, PICK_FRAGMENT, 'pick');
+      this.outlineProgram = this._link(OUTLINE_VERTEX, OUTLINE_FRAGMENT, 'outline');
+      this.outlineUniforms = {
+        ids: gl.getUniformLocation(this.outlineProgram, 'uIds'),
+        texel: gl.getUniformLocation(this.outlineProgram, 'uTexel'),
+        wanted: gl.getUniformLocation(this.outlineProgram, 'uWanted'),
+        width: gl.getUniformLocation(this.outlineProgram, 'uWidth'),
+        colour: gl.getUniformLocation(this.outlineProgram, 'uColour'),
+      };
       this.pickUniforms = {
         modelView: gl.getUniformLocation(this.pickProgram, 'uModelView'),
         projection: gl.getUniformLocation(this.pickProgram, 'uProjection'),
@@ -15985,6 +16061,36 @@ ${SHADOW_LOOKUP}
       const py = Math.round(y * ratio);
       if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return -1;
 
+      this._ensureIdBuffer();
+
+      const camera = this._camera();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickBuffer);
+      this._renderIds(camera);
+
+      const pixel = new Uint8Array(4);
+      gl.readPixels(px, this.canvas.height - 1 - py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      // The pick pass cleared to black; put the backdrop colour back so the
+      // next frame clears to what the viewport is supposed to show.
+      gl.clearColor(this.env.backdrop[0], this.env.backdrop[1],
+        this.env.backdrop[2], this.env.backdrop[3]);
+      // The picture was drawn over; put it back on the next frame.
+      this.dirty = true;
+
+      const id = pixel[0] | (pixel[1] << 8) | (pixel[2] << 16);
+      return id > 0 && id <= this.partCount ? id - 1 : -1;
+    }
+
+    /* One part number a pixel, at the size of the canvas.
+     *
+     * Shared by the mouse and by the outline round what the mouse picked: both
+     * want to know which part a pixel belongs to, and the answer accounts for
+     * the explode, the up axis and what is in front of what without a second
+     * copy of any of it.
+     */
+    _ensureIdBuffer() {
+      const gl = this.gl;
       if (!this.pickBuffer || this.pickSize[0] !== this.canvas.width
         || this.pickSize[1] !== this.canvas.height) {
         if (this.pickBuffer) {
@@ -16013,9 +16119,11 @@ ${SHADOW_LOOKUP}
         gl.bindRenderbuffer(gl.RENDERBUFFER, null);
         this.pickSize = [this.canvas.width, this.canvas.height];
       }
+    }
 
-      const camera = this._camera();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickBuffer);
+    /** Draw the part numbers into whatever framebuffer is bound. */
+    _renderIds(camera) {
+      const gl = this.gl;
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -16029,20 +16137,6 @@ ${SHADOW_LOOKUP}
       gl.drawArrays(gl.TRIANGLES, 0, this.triangleCount * 3);
       gl.enable(gl.CULL_FACE);
       gl.bindVertexArray(null);
-
-      const pixel = new Uint8Array(4);
-      gl.readPixels(px, this.canvas.height - 1 - py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-      // The pick pass cleared to black; put the backdrop colour back so the
-      // next frame clears to what the viewport is supposed to show.
-      gl.clearColor(this.env.backdrop[0], this.env.backdrop[1],
-        this.env.backdrop[2], this.env.backdrop[3]);
-      // The picture was drawn over; put it back on the next frame.
-      this.dirty = true;
-
-      const id = pixel[0] | (pixel[1] << 8) | (pixel[2] << 16);
-      return id > 0 && id <= this.partCount ? id - 1 : -1;
     }
 
     render() {
@@ -16181,6 +16275,66 @@ ${SHADOW_LOOKUP}
         gl.disable(gl.BLEND);
       }
       gl.bindVertexArray(null);
+      this._outlineSelected();
+    }
+
+    /* The line round the part picked with the mouse.
+     *
+     * Two passes and both of them only while something is picked: the part
+     * numbers into their own buffer, then one screen's worth of pixels asking
+     * which of them are just outside the picked one. Nothing is drawn at all
+     * with nothing selected, which is the ordinary case.
+     *
+     * The numbers have to be redrawn each frame rather than kept, since
+     * orbiting the camera moves every one of them; it is the same pass the
+     * mouse already runs on a click, and it is cheaper than the shadow map
+     * beside it.
+     */
+    _outlineSelected() {
+      const gl = this.gl;
+      if (this.selectedPart < 0 || !this.triangleCount || !this.partCount) return;
+      /* The same camera the mouse is picked through, asked for the same way.
+       * That is what makes the line sit on the part rather than near it: the
+       * numbers and the picture have to be drawn from one view. */
+      const camera = this._camera();
+      this._ensureIdBuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickBuffer);
+      this._renderIds(camera);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // The numbers pass cleared to black; put the backdrop back for the next
+      // frame's clear, as the mouse's own use of it does.
+      gl.clearColor(this.env.backdrop[0], this.env.backdrop[1],
+        this.env.backdrop[2], this.env.backdrop[3]);
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+
+      gl.useProgram(this.outlineProgram);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.pickTexture);
+      gl.uniform1i(this.outlineUniforms.ids, 0);
+      gl.uniform2f(this.outlineUniforms.texel,
+        1 / this.canvas.width, 1 / this.canvas.height);
+      // The pick pass writes a part's number one higher than its index, so
+      // that nought can mean the background.
+      gl.uniform1f(this.outlineUniforms.wanted, this.selectedPart + 1);
+      /* Wide enough to read on a high-density display, where a line one pixel
+       * across is a line half a pixel across as far as the eye is concerned.
+       * Scaled by what the canvas is drawn at rather than by what it is shown
+       * at, since the buffer is the first of those. */
+      const ratio = this.canvas.width / Math.max(this.canvas.clientWidth, 1);
+      gl.uniform1f(this.outlineUniforms.width,
+        Math.max(1, Math.round(OUTLINE_WIDTH * ratio)));
+      gl.uniform3f(this.outlineUniforms.colour, ...OUTLINE_COLOUR);
+
+      // Over the picture, and reading no depth: the line is a mark on the
+      // screen rather than a thing in the scene.
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.bindVertexArray(this.backgroundVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindVertexArray(null);
+      gl.depthMask(true);
+      gl.enable(gl.DEPTH_TEST);
+      gl.bindTexture(gl.TEXTURE_2D, null);
     }
   }
 

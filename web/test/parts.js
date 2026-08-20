@@ -132,9 +132,39 @@ async function main() {
       && named.shown.includes(state.parts[first].name),
       named.shown.slice(0, 70));
 
+    /* And drawn round rather than coloured over.
+     *
+     * The line comes off the same buffer of part numbers the mouse is picked
+     * out of, so it is the silhouette of the part as it is actually seen. What
+     * is checked here is that it appears when something is picked and goes
+     * when it is let go.
+     *
+     * After a frame has actually been drawn, not merely after the selection
+     * changed: the viewer marks itself for redrawing and paints on the next
+     * animation frame, so reading the pixels straight away reads the frame
+     * before — which says the line is still there long after it went. */
+    const orange = () => page.evaluate(async () => {
+      await new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go)));
+      const canvas = document.getElementById('viewport');
+      const gl = canvas.getContext('webgl2');
+      const px = new Uint8Array(canvas.width * canvas.height * 4);
+      gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      let hits = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        // The line is the one strongly orange thing on screen: red high, green
+        // about half of it, blue almost nothing.
+        if (px[i] > 200 && px[i + 1] > 90 && px[i + 1] < 160 && px[i + 2] < 70) hits++;
+      }
+      return hits;
+    });
+    const drawn = await orange();
+    check('the part picked is drawn round', drawn > 0, `${drawn} pixel(s) of line`);
+
     await page.evaluate(() => window.fbxtool.selectPart(-1));
     check('and let go again', await page.evaluate(() =>
       window.fbxtool.selectedPart === -1 && document.getElementById('part-info').hidden));
+    const gone = await orange();
+    check('and the line goes with it', gone === 0, `${gone} pixel(s) left`);
 
     // ---- taking it apart
     if (state.parts.length > 1) {
