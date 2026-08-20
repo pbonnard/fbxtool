@@ -36,6 +36,7 @@ SCRIPTS = [
     "blend.js",
     "gltfin.js",
     "max.js",
+    "acshaders.js",
     "kn5.js",
     "skins.js",
     "psd.js",

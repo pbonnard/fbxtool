@@ -476,6 +476,35 @@ def test_how_the_file_asked_to_be_blended_is_carried(car):
     assert by_name["grille"]["AlphaCutoff"] == pytest.approx(0.4)
 
 
+def test_an_alpha_tested_material_stating_no_cutoff_gets_the_games_own():
+    """A stated nought is a material that named no threshold, not one that
+    named nought.
+
+    Every alpha-tested material counted across the cars to hand states
+    ``ksAlphaRef`` as nought — all 20 of the ``ksPerPixelAT`` and all 17 of the
+    ``ksPerPixelAT_NM`` — and nought cuts nothing out, so a grille taken at face
+    value comes out a solid rectangle with the fence painted on it.
+    """
+    grey = fb.dds_bgra(4, 4, bytes([128, 128, 128, 255]) * 16)
+    vertices, indices = fb.kn5_cube(1.0)
+
+    def cutoff_of(stated):
+        material = fb.kn5_material(
+            "grille", "ksPerPixelAT", alpha_tested=True,
+            properties=fb.kn5_property("ksAlphaRef", stated), property_count=1,
+            slots=(("txDiffuse", 0, "grey.dds"),))
+        doc = kn5.parse_kn5(fb.build_kn5(
+            6, textures=[("grey.dds", grey)], materials=[material],
+            tree=fb.kn5_dummy("car", IDENTITY,
+                              fb.kn5_mesh("cube", vertices, indices), 1)))
+        found = next(iter(objects_of(doc, "Material")))
+        return properties_of(found)["AlphaCutoff"]
+
+    assert cutoff_of(0.0) == pytest.approx(0.5)
+    # And one that did state a threshold keeps it.
+    assert cutoff_of(0.25) == pytest.approx(0.25)
+
+
 # ----------------------------------------------------------------- textures
 
 def test_one_texture_record_is_shared_by_every_material_that_wears_it(car):
@@ -1005,6 +1034,57 @@ def test_a_paint_shop_slot_is_the_last_thing_asked_about_a_material(tmp_path):
     doc = read_fbx(str(path))
     assert doc.extra["skins"][0]["paints"] == [
         {"material": "carPaint03", "colour": "#a5080d"}], "the config still wins"
+
+
+def test_a_paint_pointed_at_the_wrong_material_is_flagged(tmp_path):
+    """A Ferrari Mondial's own ``extension/ext_config.ini`` names
+    ``EXT_RIM_AO`` as ``CarPaintMaterial`` — the ambient occlusion baked into
+    its wheel rims, not its body — so every one of its skins comes up
+    unpainted for it.  Nothing wrong with the file the skin brings; the file
+    just says the wrong thing.
+
+    Flagged rather than silently repainted: what ``paints`` reports is what
+    the file actually causes, and ``paint_suspect`` is the separate note that
+    it is probably wrong — with ``body_paint_2``, the one material on the car
+    that reads like paint and is not the same kind of mistake itself, named
+    as what was probably meant.
+    """
+    def paint(name: str) -> bytes:
+        return fb.kn5_material(name, "ksPerPixelMultiMap",
+                               slots=(("txDiffuse", 0, "paint.dds"),))
+
+    path = tmp_path / "car.kn5"
+    path.write_bytes(fb.build_kn5(
+        6,
+        textures=[("paint.dds", fb.dds_bc1())],
+        materials=[paint("EXT_RIM_AO"), paint("body_paint_2")],
+        tree=fb.kn5_dummy("car", IDENTITY,
+                          fb.kn5_mesh("body", TRIANGLE, [0, 1, 2], material=0), 1)))
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "ext_config.ini").write_text(
+        "[Material_CarPaint_Metallic]" + NL
+        + "CarPaintMaterial = EXT_RIM_AO" + NL, encoding="utf-8")
+    skin = tmp_path / "skins" / "00_rosso_scuderia"
+    skin.mkdir(parents=True)
+    (skin / "paint.dds").write_bytes(b"")
+    (skin / "cm_skin.json").write_text(
+        '{"carPaint": {"color": "#FF9D0304"}}', encoding="utf-8")
+
+    doc = read_fbx(str(path))
+    result = doc.extra["skins"][0]
+    assert result["paints"] == [{"material": "EXT_RIM_AO", "colour": "#9d0304"}], (
+        "what the file actually causes is reported as-is, not silently corrected")
+    assert result["paint_suspect"] == {
+        "stated": ["EXT_RIM_AO"], "corrected": ["body_paint_2"]}
+    assert "did you mean body_paint_2?" in render_text(analyze(doc))
+
+    # A config naming several materials is taken at its word as long as one of
+    # them does not read as some other part of the car — only where *every*
+    # material named reads wrong is anything said.
+    (skin / "ext_config.ini").write_text(
+        "CarPaintMaterial = EXT_RIM_AO, body_paint_2" + NL, encoding="utf-8")
+    doc = read_fbx(str(path))
+    assert "paint_suspect" not in doc.extra["skins"][0]
 
 
 def test_a_car_with_nothing_beside_it_says_nothing_about_skins(tmp_path):

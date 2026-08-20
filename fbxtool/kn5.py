@@ -52,6 +52,7 @@ import struct
 import zlib
 from typing import Sequence
 
+from . import acshaders
 from .model import ArrayInfo, Document, Node, ParseError, Property
 
 __all__ = ["MAGIC", "NODE_CLASSES", "is_kn5", "parse_kn5"]
@@ -68,19 +69,21 @@ _BLEND_MODES = {0: "OPAQUE", 1: "BLEND", 2: "MASK"}
 _VERTEX = 44
 _SKINNED_VERTEX = 76
 
-#: The kn5 texture slots that mean something to an FBX material.
+#: The kn5 texture slots that mean something to an FBX material.  Every other
+#: slot keeps the name the game gives it, which is what carries it across: a
+#: reader that knows the name finds the map, and one that does not sees a
+#: texture hung off a property it can ignore.
 _SLOT_PROPERTIES = {
     "txDiffuse": "DiffuseColor",
     "txNormal": "NormalMap",
+    # Heat in a brake disc rather than a surface that gives off light.  Kept as
+    # an emissive because that is the only slot an FBX has for it, and because
+    # the level beside it — nought on every material counted, since the game
+    # writes it per frame — is what ought to dim it.
     "txGlow": "EmissiveColor",
+    # And a real emissive map, which `ksPerPixelMultiMap_AT_emissive` binds.
+    "txEmissive": "EmissiveColor",
 }
-
-#: On the shaders that model a car being crashed, ``txNormal`` is not the
-#: surface's own relief — it is the dents, blended in as damage accumulates.
-#: A car as saved has none, so drawing it puts creases down the whole of a
-#: bonnet that has never been hit: the Mercedes' body names a 1024-square of
-#: dents there, and taken at face value every panel comes out beaten in.
-_DAMAGE_NORMAL_SLOTS = {"txNormal"}
 
 
 def _slot_property(slot: str, shader: str) -> str:
@@ -90,15 +93,17 @@ def _slot_property(slot: str, shader: str) -> str:
     not a metallic-roughness map however much it looks like one — its channels
     drive the game's own shader — and a map drawn from the wrong end is worse
     than one not drawn.
+
+    Which slot means what is :mod:`fbxtool.acshaders`' question rather than this
+    one's, and it is asked there: on the shaders that model a car being crashed
+    ``txNormal`` is not the surface's own relief but the dents blended in as
+    damage accumulates, and a car as saved has none — so drawn as relief it puts
+    creases down the whole of a bonnet that has never been hit.
     """
-    if slot in _DAMAGE_NORMAL_SLOTS and "damage" in shader.lower():
+    if acshaders.slot_role(slot, shader) == "damageNormal":
         return slot
     return _SLOT_PROPERTIES.get(slot, slot)
 
-#: Property defaults for a material that leaves one out, as the shaders do.
-_DEFAULT_FRESNEL_C = 0.05
-#: And no ceiling on the Fresnel term where none is stated.
-_DEFAULT_FRESNEL_MAX = 1.0
 
 
 #: The most a dielectric reflects facing you: diamond, at an index of refraction
@@ -160,17 +165,9 @@ def _reflectance(material: "_Material") -> float:
     brighter rim than the game draws and nothing like the difference between a
     lens and a mirror.
     """
-    facing = material.scalar("fresnelC", _DEFAULT_FRESNEL_C)
-    ceiling = material.scalar("fresnelMaxLevel", _DEFAULT_FRESNEL_MAX)
-    return min(max(min(facing, ceiling), 0.0), 1.0)
+    return acshaders.reflectance(material.scalar)
 
 
-#: What a plainly lit surface takes from the light: `ksAmbient` and `ksDiffuse`
-#: at the pair most materials state them at.  Of 1728 materials across the 27
-#: cars to hand, 0.5 and 0.6 is the commonest by a wide margin — 278 of them,
-#: one in six, and the value the game's own editor starts a material at.
-_LIGHT_AMBIENT = 0.5
-_LIGHT_DIFFUSE = 0.6
 
 
 def _light_weight(material: "_Material") -> float:
@@ -193,10 +190,7 @@ def _light_weight(material: "_Material") -> float:
     a dashboard or a lamp lens does on purpose.  A diffuse surface cannot
     return more than it was given, so that is where this stops.
     """
-    weight = (material.scalar("ksAmbient", _LIGHT_AMBIENT)
-              + material.scalar("ksDiffuse", _LIGHT_DIFFUSE)) \
-        / (_LIGHT_AMBIENT + _LIGHT_DIFFUSE)
-    return min(max(weight, 0.0), 1.0)
+    return acshaders.light_weight(material.scalar)
 
 
 def is_kn5(data: bytes) -> bool:
@@ -999,6 +993,81 @@ def _pair(named: list[str], colours: list[str], materials: set[str]) -> list[dic
     return out
 
 
+#: Words that mark a material as some other part of the car than its paint —
+#: the vocabulary its wheels, brakes, glass and cabin actually carry.
+#: ``CarPaintMaterial`` has been seen naming one of these by mistake: a
+#: Ferrari Mondial's own ``extension/ext_config.ini`` names ``EXT_RIM_AO``,
+#: the ambient occlusion baked into its wheel rims, and every one of its
+#: twelve skins comes up unpainted for it — nothing wrong with the file, the
+#: file just says the wrong thing.
+#:
+#: Matched whole, not as a substring: a Honda Prelude's own
+#: ``remap__prim_env_19_spec_`` is not a rim for containing "rim" — that is
+#: the middle of "prim" — and reading it as one is worse than missing it.
+_NOT_PAINT_WORDS = {
+    "rim", "wheel", "tyre", "tire", "brake", "caliper", "disc", "glass",
+    "lens", "chrome", "light", "lamp", "mirror", "interior", "seat",
+    "carpet", "dash", "leather", "steer", "pedal", "gauge", "plastic",
+    "plate", "exhaust", "badge", "logo",
+}
+
+#: A material name split into its words — on punctuation, digits and the
+#: casing itself, so ``EXT_RIM_AO`` and ``ExtRimAo`` come apart the same way.
+_WORD_SPLIT = re.compile(r"[^A-Za-z]+")
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])")
+
+
+def _words(name: str) -> set[str]:
+    out: set[str] = set()
+    for chunk in _WORD_SPLIT.split(name):
+        if chunk:
+            out.update(word.lower() for word in _CAMEL_SPLIT.sub(" ", chunk).split())
+    return out
+
+
+#: And what a car's paint is usually called, when it is named at all.  Takes
+#: precedence over `_NOT_PAINT_WORDS`: a material naming its own paintwork
+#: wins even where it also happens to carry one of the other words.  Matched
+#: as a substring rather than a whole word — unlike the wheel-and-cabin
+#: vocabulary above, nothing in a car's own parts happens to contain "paint".
+_IS_PAINT = re.compile(r"body.?paint|car.?paint|paint|ext.?body|wc.?body|bodywork", re.I)
+
+
+def _suspect_paint(name: str) -> bool:
+    """Whether a material named as the car's paint reads like some other part."""
+    if _IS_PAINT.search(name):
+        return False
+    words = _words(name)
+    return any(word in _NOT_PAINT_WORDS or (word.endswith("s") and word[:-1] in _NOT_PAINT_WORDS)
+               for word in words)
+
+
+def _paint_correction(stated: list[str], materials: set[str],
+                       casing: dict[str, str]) -> list[str] | None:
+    """The car's own material to use instead, where *stated* reads wrong.
+
+    Only where every material *stated* names reads like a wheel, a brake, a
+    lamp or the cabin rather than paint — a config naming several materials is
+    taken at its word otherwise, since a real paint spread over several parts
+    names one that is not obviously paint far more often than a genuine
+    mismatch does.
+
+    And only where the car's own materials name exactly one thing that reads
+    like paint and is not the same kind of mistake itself.  More than one such
+    material is not chosen among: the one thing this is sure of is that
+    *stated* is probably wrong, and a wrong guess dressed as a correction is
+    worse than none.  *materials* is every material name the car has,
+    lowercased; *casing* gets a lowered name back to how the file spelled it.
+    """
+    if not stated or not all(_suspect_paint(name) for name in stated):
+        return None
+    candidates = sorted(name for name in materials
+                        if _IS_PAINT.search(name) and not _suspect_paint(name))
+    if len(candidates) != 1:
+        return None
+    found = candidates[0]
+    return [casing.get(found, found)]
+
 
 #: A Custom Shaders Patch lamp block, and the two things wanted out of it.
 _LAMP_SECTION = re.compile(r"^\s*\[(REFRACTING_HEADLIGHT[^\]]*)\]")
@@ -1115,7 +1184,8 @@ def _base_pictures(materials: Sequence["_Material"]) -> dict[str, str]:
     return out
 
 
-def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[dict]:
+def _skins(path: str | None, named: set[str], pictures: dict[str, str],
+           casing: dict[str, str]) -> list[dict]:
     """The paint jobs sitting beside a car, and how much of each one it wears.
 
     A kn5 carries one set of textures and the game puts another over the top
@@ -1182,6 +1252,13 @@ def _skins(path: str | None, named: set[str], pictures: dict[str, str]) -> list[
         # opened at rather than anything the car said about itself.
         if not stated:
             stated = _slot_materials(skin["meta"], materials)
+        # And whether what got settled on reads like the car's paint at all —
+        # see `_paint_correction`.  Left as a note beside the skin rather than
+        # swapped in ahead of `_pair`: what a config states is a fact about the
+        # file, and this is only a guess at what was meant.
+        if stated and all(_suspect_paint(name) for name in stated):
+            skin["paint_suspect"] = {"stated": stated,
+                                     "corrected": _paint_correction(stated, materials, casing)}
         skin.pop("meta")
         colours = skin.pop("colours")
         files = skin.pop("files")
@@ -1431,9 +1508,20 @@ def _material_records(materials: Sequence[_Material], texture_uids: dict[str, in
             # picture is the pattern, so the two multiply.
             _p70("TintsTexture", "Bool", _i(1)),
         ]
+        # Where the surface is cut against its own alpha.
+        #
+        # A stated nought is not a threshold, it is a material that named none:
+        # every alpha-tested material counted across the cars to hand states
+        # `ksAlphaRef` as nought — all 20 of the `ksPerPixelAT` and all 17 of
+        # the `ksPerPixelAT_NM` — and nought cuts nothing out, so a grille taken
+        # at face value comes out a solid rectangle with the fence painted on
+        # it.  The game has a default behind the number and so has this.  A
+        # material that did state one keeps it.
         if material.alpha_tested:
+            stated = material.scalar("ksAlphaRef", 0.0)
             props.append(_p70("AlphaCutoff", "Number",
-                              _d(material.scalar("ksAlphaRef", 0.5))))
+                              _d(stated if stated > 0
+                                 else acshaders.ALPHA_REF_DEFAULT)))
 
         # What the surface gives off on its own.  `ksEmissive` is written as a
         # colour when it is one and as a single number when it is not.
@@ -1629,7 +1717,8 @@ def parse_kn5(
         "lods": scene.lods,
         "lenses": len(lit),
         "skins": _skins(path, {name.lower() for name in named if name},
-                        _base_pictures(materials)),
+                        _base_pictures(materials),
+                        {material.name.lower(): material.name for material in materials}),
         "encrypted": encrypted is not None,
         "encrypted_from": encrypted,
         "winding_agreement": round(agreement, 4) if sampled else None,

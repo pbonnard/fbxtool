@@ -119,6 +119,20 @@ async function main() {
   check('the grain\'s own relief, which glTF has no second normal slot for',
     extras.detailNormalTexture && extras.detailNormalTexture.index >= 0,
     JSON.stringify(extras.detailNormalTexture));
+  /* The game's own per-texel finish. 201 of the 528 materials across the cars
+   * to hand bind one — every `ksPerPixelMultiMap`, which is what a car's body
+   * wears — and with nothing here to name it, it matched no slot, never
+   * reached the palette and never reached the file: the largest single thing a
+   * car lost on the way through. Written under `extras` rather than as the
+   * metallic-roughness map it resembles, since its channels drive a
+   * Blinn-Phong highlight and put in that slot every panel comes out with a
+   * metalness and a roughness nobody wrote. */
+  check('the game\'s own per-texel finish, which is not a PBR map',
+    extras.acMapsTexture && extras.acMapsTexture.index >= 0,
+    JSON.stringify(extras.acMapsTexture));
+  check('and it is not mistaken for a metallic-roughness map',
+    !(material.pbrMetallicRoughness || {}).metallicRoughnessTexture,
+    JSON.stringify((material.pbrMetallicRoughness || {}).metallicRoughnessTexture));
   check('the shading model the file named',
     extras.shader === 'ksPerPixelMultiMap_NMDetail', String(extras.shader));
   check('and that its colour is read through its picture',

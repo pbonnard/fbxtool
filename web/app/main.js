@@ -36,6 +36,8 @@
     groundToggle: $('ground-toggle'),
     lightsToggle: $('lights-toggle'),
     lightsLabel: $('lights-label'),
+    shadersToggle: $('shaders-toggle'),
+    shadersLabel: $('shaders-label'),
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     exportGltf: $('export-gltf'),
@@ -1944,6 +1946,57 @@
     }
   }
 
+  /* Whether a game's own material model is used, remembered per file the way
+   * the up axis, the mirrors and the heading are.
+   *
+   * Per file rather than globally, because it is a fact about the file: a car
+   * reopened after being looked at the other way should come back the way it
+   * was left, and a `.blend` opened after a car should not inherit a switch
+   * that means nothing to it.
+   *
+   * On by default where the file states a game's material at all — the whole
+   * point of the switch is that the game's own reading is the better one for a
+   * car, and off is the escape hatch and the comparison. */
+  const shadersKey = (name) => `fbxtool:shaders:${name || 'unnamed'}`;
+
+  function rememberShaders() {
+    if (!currentDoc) return;
+    try {
+      window.localStorage.setItem(shadersKey(currentDoc.fileName),
+        dom.shadersToggle.checked ? 'on' : 'off');
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallShaders(fileName) {
+    try {
+      return window.localStorage.getItem(shadersKey(fileName)) !== 'off';
+    } catch (error) {
+      return true;
+    }
+  }
+
+  /**
+   * Whether the palette holds a game's material, and the switch that says so.
+   *
+   * Hidden for every file that states none — a `.blend`, an `.obj`, an `.fbx`
+   * that came from neither — since a switch with nothing to switch to is worse
+   * than no switch. Unticked with it, so that what the exporter reads is what
+   * the toolbar shows.
+   */
+  function applyShaders(palette) {
+    const has = (palette || []).some((entry) => entry && entry.ac);
+    dom.shadersLabel.hidden = !has;
+    if (!has) dom.shadersToggle.checked = false;
+    else if (currentDoc) dom.shadersToggle.checked = recallShaders(currentDoc.fileName);
+    viewer.setAcShaders(has && dom.shadersToggle.checked);
+    return has;
+  }
+
+  /** Whether a car is being written as the game states it rather than derived. */
+  const shadersOn = () => !dom.shadersLabel.hidden && dom.shadersToggle.checked;
+
   /** Put the heading on the camera and on the button that says so. */
   function applyHeading() {
     viewer.setHeading(heading);
@@ -2112,6 +2165,9 @@
     // Settings first, grouping second: a renamed material has to be grouped
     // and sorted under the name it now goes by.
     FbxPalette.apply(palette, materialOverrides);
+    // Before the palette is uploaded, so the first frame is drawn the way the
+    // file will be written.
+    applyShaders(palette);
     slotTriangles = trianglesPerSlot(mesh, palette.length);
     materialGroups = FbxPalette.groups(palette, slotTriangles);
     viewer.setPalette(palette);
@@ -2222,7 +2278,7 @@
       if (!file) continue;
       if (!entry.unfinished) {
         entry.unfinished = { roughness: file.roughness, metallic: file.metallic || 0,
-          specular: file.specular.slice() };
+          specular: file.specular.slice(), ac: entry.ac };
       }
       const named = String(file.name || '').toLowerCase();
       const said = { ...(said0.get(named) || {}), ...(skin.get(named) || {}) };
@@ -2231,8 +2287,24 @@
       if (typeof said.reflectance !== 'number' && typeof said.metalness !== 'number') {
         file.specular = entry.unfinished.specular.slice();
         file.metallic = entry.unfinished.metallic;
+        // Nothing spoke for this one, so the game's own reading is back on
+        // offer — a skin whose config named it may have been taken off again.
+        entry.ac = entry.unfinished.ac;
         continue;
       }
+      /* And the switch has nothing to offer here.
+       *
+       * What it turns off is *this tool's* inference — a metalness guessed
+       * from how much a surface reflects facing you, because a `.kn5` states
+       * none. A config that names the surface is not that guess: it is the
+       * car's own files saying outright that this material is polished metal
+       * at this reflectance, which is as much the game's own statement as
+       * `fresnelC` is and a good deal less ambiguous.
+       *
+       * So a material the config has spoken for keeps what the config said
+       * whichever way the switch is thrown. Left in, the switch flattened
+       * every chrome a car declared back to a dielectric. */
+      entry.ac = null;
       const metal = typeof said.metalness === 'number'
         ? said.metalness : entry.unfinished.metallic;
       // A dielectric reflects four per cent facing you unless the file says
@@ -3498,6 +3570,10 @@
         textures,
         upAxis: dom.upSelect.value,
         flips: flips.slice(),
+        /* And which reading of a game's material is the one being written,
+         * which is the same switch the viewer is drawing by: what you are
+         * looking at is what comes out. */
+        acShaders: shadersOn(),
       };
       let stats;
       if (format === 'fbx') {
@@ -3551,6 +3627,7 @@
       }
       const missingMaps = unwrittenMaps(images, textures);
       stats.format = format;
+      stats.acShaders = shadersOn();
       stats.dropped = currentGeometry ? null : reportDropped(stats, missingMaps);
       lastExport = stats;
       const instanced = stats.triangles > stats.stored
@@ -3562,6 +3639,9 @@
         + `${(stats.bytes / 1048576).toFixed(1)} MiB`
         + `${stats.images ? ` with ${stats.images} image(s)` : ''} · `
         + `${(performance.now() - started).toFixed(0)} ms`
+        + (stats.acShaders === undefined ? ''
+          : ` · ${stats.acShaders ? "the game's own materials"
+            : 'materials approximated'}`)
         + describeDropped(stats.dropped), 'ok');
     } catch (error) {
       console.error(error);
@@ -3739,6 +3819,34 @@
     }
     return out;
   }
+  /**
+   * The surface as the game itself states it, for a material that came from a
+   * `.kn5`, or null for one that did not.
+   *
+   * Two numbers are the whole of it. `weight` is how much of the light the
+   * surface takes — `ksAmbient` and `ksDiffuse` against the pair most
+   * materials state, which is what the picture is read through. `facing` is
+   * what it reflects head-on — `fresnelC` held under `fresnelMaxLevel`, which
+   * is what the Schlick term is built on.
+   *
+   * Neither is split between a diffuse and a conductor, because the game does
+   * not split them: it shades a car with a Blinn-Phong highlight and a Fresnel
+   * over it, and chrome is a material whose reflection an artist set high
+   * rather than a metal. The split is this tool's reading of that, and it is
+   * what the switch turns off.
+   *
+   * A file with no shader name is not a game's material and gets nothing here
+   * — its `fresnelC` would be a parameter it never wrote.
+   */
+  function acSurface(props) {
+    if (typeof props.ShaderName !== 'string' || !props.ShaderName) return null;
+    const scalar = FbxAcShaders.statedScalar(props);
+    return {
+      weight: FbxAcShaders.lightWeight(scalar),
+      facing: FbxAcShaders.reflectance(scalar),
+    };
+  }
+
   /** One palette entry: how a material shades, and the image it wears. */
   function materialEntry(material, analysis, index) {
     const info = analysis || currentAnalysis;
@@ -3832,6 +3940,22 @@
        * slot for, its own shading model among them. */
       shader: typeof props.ShaderName === 'string' ? props.ShaderName : null,
       stated: statedProperties(props),
+      /* And the same surface as the game states it, beside the one derived
+       * from it above.
+       *
+       * Both are carried so the switch between them costs a uniform rather
+       * than a rebuild: a palette re-derived per click would have to be
+       * regrouped, re-sorted and re-uploaded, and a material crossing between
+       * the opaque and the blended halves would re-sort half a million
+       * triangles and the sun's view with them.
+       *
+       * What differs is the metalness. A kn5 states none, and the reader
+       * infers one from how much the surface reflects facing you — which is
+       * the approximation this switch exists to be able to turn off. With it
+       * off there is no conductor and no split: the albedo is the whole of the
+       * light the surface takes, and the reflection is the Fresnel the file
+       * stated, uncapped by what a dielectric is allowed. */
+      ac: acSurface(props),
       // The maps this tool does not show, kept as they were read.
       textures: rest,
       layer: -1,
@@ -4418,7 +4542,7 @@
     for (const skin of suppliedSkins.values()) {
       read.push(await FbxSkins.read(skin, { worn }));
     }
-    FbxSkins.settle(read, { pictures, fallback: carPaintNames,
+    FbxSkins.settle(read, { pictures, fallback: carPaintNames, materialNames: named('Material'),
       brightness: (skin) => merged((text) => FbxSkins.paintBrightness(text, skin)) });
     /* And, for the ones still stating no colour, the chip they carry a picture
      * of — which is the only thing left saying what colour they are. Settled
@@ -4453,6 +4577,21 @@
           + 'dropped says which material it is — usually the car\'s own '
           + 'extension/ext_config.ini. Bring that with the car and the colour '
           + 'lands on the body.';
+      } else if (skin.paintSuspect) {
+        const { stated, corrected } = skin.paintSuspect;
+        if (corrected) {
+          option.textContent += ' · paint corrected';
+          option.title = `The car's own config points its paint at ${stated.join(', ')}, `
+            + 'which reads like rim, brake, glass or cabin shading rather than the '
+            + `body, so its colour was put on ${corrected.join(', ')} instead — the `
+            + 'car\'s own material that reads like paint.';
+        } else {
+          option.textContent += ' · paint may be misplaced';
+          option.title = `The car's own config points its paint at ${stated.join(', ')}, `
+            + 'which reads like rim, brake, glass or cabin shading rather than the '
+            + 'body, and nothing else on the car reads like paint clearly enough to '
+            + 'use instead.';
+        }
       }
       dom.skinSelect.appendChild(option);
     }
@@ -4480,10 +4619,18 @@
       ? `${wearing.name}: ${wearing.replaces} texture(s) over the top of the car`
         + (wearing.paints.length
           ? `, and its paint on ${wearing.paints.map((p) => p.material).join(', ')}`
+            + (wearing.paintSuspect && wearing.paintSuspect.corrected
+              ? ` — corrected from ${wearing.paintSuspect.stated.join(', ')}, which `
+                + 'reads like rim, brake, glass or cabin shading'
+              : '')
           : (wearing.paintLost
             ? ', but its paint stayed off — no file among those dropped says '
               + 'which material it is (usually the car\'s extension/ext_config.ini)'
-            : ''))
+            : (wearing.paintSuspect
+              ? `, but its stated material — ${wearing.paintSuspect.stated.join(', ')} — `
+                + 'reads like rim, brake, glass or cabin shading rather than paint, and '
+                + 'nothing else on the car reads like paint clearly enough to use instead'
+              : '')))
       : 'The car as the file has it.');
     return textures;
   }
@@ -5062,6 +5209,10 @@
       () => viewer.setShowGround(dom.groundToggle.checked));
     dom.lightsToggle.addEventListener('change',
       () => viewer.setLightsOn(dom.lightsToggle.checked));
+    dom.shadersToggle.addEventListener('change', () => {
+      viewer.setAcShaders(dom.shadersToggle.checked);
+      rememberShaders();
+    });
     dom.textureToggle.addEventListener('change',
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());

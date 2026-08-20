@@ -1147,6 +1147,46 @@ def test_what_a_car_calls_its_paint_is_settled_across_its_own_skins():
 
 
 @needs_node
+def test_a_paint_pointed_at_the_wrong_material_is_corrected():
+    """A Ferrari Mondial's own `extension/ext_config.ini` names `EXT_RIM_AO`
+    as `CarPaintMaterial` — the ambient occlusion baked into its wheel rims,
+    not its body — so every one of its skins came up unpainted for it.
+
+    The car's own materials name exactly one thing that reads like paint —
+    `body_paint_2` — and nothing else does, so that is what the colour goes
+    on instead, with the mismatch kept beside it rather than hidden.
+    """
+    assert _skins("S.suspectPaint('EXT_RIM_AO')") is True
+    assert _skins("S.suspectPaint('body_paint_2')") is False, (
+        "a name stating its own paintwork wins even where it also reads like a part")
+    assert _skins("S.suspectPaint('chrome_carpaint')") is False
+
+    materials = ["ext_rim_ao", "body_paint_2", "ext_plastic", "int_dash"]
+    assert _skins(f"S.paintCorrection(['EXT_RIM_AO'], new Set({materials}), "
+                  "new Map([['body_paint_2', 'body_paint_2']]))") == ["body_paint_2"]
+    # More than one thing on the car reads like paint — not guessed among.
+    ambiguous = ["ext_rim_ao", "body_paint_2", "carpaint_02"]
+    assert _skins(f"S.paintCorrection(['EXT_RIM_AO'], new Set({ambiguous}), "
+                  "new Map())") is None
+    # A config naming several materials is taken at its word as long as one
+    # of them does not read as some other part of the car.
+    assert _skins("S.paintCorrection(['EXT_RIM_AO', 'body'], "
+                  "new Set(['ext_rim_ao', 'body', 'body_paint_2']), new Map())") is None
+
+    settled = _skins(
+        "(()=>{const skins=[{name:'00_rosso_scuderia',named:['EXT_RIM_AO'],"
+        "colours:[{key:'carPaint',hex:'#9d0304',enabled:true}],images:new Map()}];"
+        "S.settle(skins,{pictures:new Map([['ext_rim_ao','rim.dds'],"
+        "['body_paint_2','']]),fallback:['EXT_RIM_AO'],"
+        "materialNames:['EXT_RIM_AO','body_paint_2']});"
+        "return skins.map(s=>[s.name,s.paints,s.paintSuspect]);})()")
+    name, paints, suspect = settled[0]
+    assert paints == [{"material": "body_paint_2", "hex": "#9d0304", "scale": 1,
+                       "picture": False}]
+    assert suspect == {"stated": ["EXT_RIM_AO"], "corrected": ["body_paint_2"]}
+
+
+@needs_node
 def test_a_colour_a_skin_states_in_its_own_config():
     """Half of them have no `cm_skin.json` at all. A chameleon paint states
     two colours in the config instead — one facing you and one at a grazing
@@ -2837,18 +2877,24 @@ def test_what_a_gltf_can_be_made_to_hold_of_a_game_material(built, tmp_path):
                   + fb.kn5_property("useDetail", 1.0)
                   + fb.kn5_property("detailUVMultiplier", 20.0)
                   + fb.kn5_property("detailNormalBlend", 0.3))
+    # `txMaps` among them: 201 of the 528 materials across the cars to hand
+    # bind one — every `ksPerPixelMultiMap` — and until it was given a slot of
+    # its own it matched nothing and reached neither the palette nor the file.
+    finish = fb.dds_bgra(4, 4, bytes([90, 200, 40, 255]) * 16)
     material = fb.kn5_material(
         "everything", "ksPerPixelMultiMap_NMDetail", alpha_tested=True,
         properties=properties, property_count=15,
         slots=(("txDiffuse", 0, "grey.dds"), ("txDetail", 3, "speck.dds"),
-               ("txNormalDetail", 4, "tilt.dds"), ("txGlow", 5, "lamp.dds")))
+               ("txNormalDetail", 4, "tilt.dds"), ("txGlow", 5, "lamp.dds"),
+               ("txMaps", 6, "finish.dds")))
     identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
     vertices, indices = fb.kn5_cube(1.0)
     model = tmp_path / "everything.kn5"
     model.write_bytes(fb.build_kn5(
         6, textures=[("grey.dds", grey), ("speck.dds", speck),
-                     ("tilt.dds", tilt), ("lamp.dds", lamp)],
+                     ("tilt.dds", tilt), ("lamp.dds", lamp),
+                     ("finish.dds", finish)],
         materials=[material],
         tree=fb.kn5_dummy("car", identity,
                           fb.kn5_mesh("cube", vertices, indices), 1)))
@@ -2858,6 +2904,76 @@ def test_what_a_gltf_can_be_made_to_hold_of_a_game_material(built, tmp_path):
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
     assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_the_switch_between_a_games_materials_and_the_approximation(built, tmp_path):
+    """A `.kn5` states no metalness, and the reader infers one from how much
+    the surface reflects facing you.
+
+    That inference is a good reading of the file and it is still a reading: the
+    game shades a car with a Blinn-Phong highlight and a Fresnel over it, and
+    chrome is a material whose reflection an artist set high rather than a
+    metal.  So the switch — and it settles the file as well as the view, in
+    both spellings, because what you are looking at is what comes out.
+
+    The fixture is chrome as a `.kn5` spells it: `fresnelC` at 0.6, which is
+    past the 17% no dielectric exceeds and so reads as a conductor.  Without
+    that the switch would have nothing to turn off.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    grey = fb.dds_bgra(4, 4, bytes([170, 170, 170, 255]) * 16)
+    properties = (fb.kn5_property("ksAmbient", 0.4) + fb.kn5_property("ksDiffuse", 0.4)
+                  + fb.kn5_property("ksSpecular", 0.6)
+                  + fb.kn5_property("ksSpecularEXP", 50.0)
+                  + fb.kn5_property("fresnelC", 0.6)
+                  + fb.kn5_property("fresnelEXP", 3.0)
+                  + fb.kn5_property("fresnelMaxLevel", 0.9))
+    material = fb.kn5_material("chrome", "ksPerPixelReflection",
+                               properties=properties, property_count=7,
+                               slots=(("txDiffuse", 0, "grey.dds"),))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    car = tmp_path / "chrome.kn5"
+    car.write_bytes(fb.build_kn5(
+        6, textures=[("grey.dds", grey)], materials=[material],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("cube", vertices, indices), 1)))
+
+    # And the same car as a plain dielectric, for the half of the check the
+    # chrome cannot carry: read as a pure conductor its diffuse was multiplied
+    # by nought, so a colour set by hand was lost to that nought long before
+    # this switch existed.  A material stating an ordinary reflection is read as
+    # no conductor at all, which is what most of a car is.
+    dull = properties.replace(fb.kn5_property("fresnelC", 0.6),
+                              fb.kn5_property("fresnelC", 0.05))
+    paint = tmp_path / "paint.kn5"
+    paint.write_bytes(fb.build_kn5(
+        6, textures=[("grey.dds", grey)],
+        materials=[fb.kn5_material("paint", "ksPerPixelMultiMap",
+                                   properties=dull, property_count=7,
+                                   slots=(("txDiffuse", 0, "grey.dds"),))],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("cube", vertices, indices), 1)))
+
+    # And a file that states no shader at all, which must never be offered it.
+    plain = ROOT / "samples" / "cube_binary.fbx"
+
+    result = _run(["node", str(WEB / "test" / "shaders.js"), str(tmp_path),
+                   str(car), str(paint), str(plain)], env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
 
 @needs_clang
 @needs_node

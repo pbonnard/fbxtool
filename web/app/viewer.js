@@ -43,7 +43,7 @@ const FbxViewer = (function () {
    * busiest of the 135 cars to hand states sixteen. */
   const MAX_LIGHTS = 24;
 
-  const PALETTE_ROWS = 9;
+  const PALETTE_ROWS = 10;
   const SCHLICK_POWER = 5;
 
   /* The three-quarter view a model opens on. */
@@ -465,6 +465,11 @@ ${ENVIRONMENT}
   uniform int uLightsOn;
   uniform mat4 uModel;               // the same one the vertex stage uses
   uniform int uUseTextures;
+  /* Whether a game's material is shaded as the game states it or as the PBR
+   * approximation derived from it. Row 9 carries both answers, so this is a
+   * uniform rather than a rebuild: the palette is not re-derived, regrouped or
+   * re-sorted, and nothing crosses between the opaque and the blended halves. */
+  uniform int uShaders;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
   uniform float uOpaqueLimit;
@@ -686,6 +691,43 @@ ${SHADOW_LOOKUP}
       albedo = entry.rgb;
       f0 = finish.rgb;
       roughness = clamp(finish.a, 0.05, 1.0);
+      /* Or the same surface as the game states it, where the switch is on and
+       * this material came from a file that states one.
+       *
+       * A kn5 states no metalness. The reader infers one from how much the
+       * surface reflects facing you — no dielectric reflects more than about
+       * 17% and no conductor less than half — and splits the colour between a
+       * diffuse and a conductor's reflectance on the strength of it. That
+       * inference is the approximation this switch turns off: with it off
+       * there is no conductor and no split, the albedo is the whole of the
+       * light the surface takes, and the reflection is the Fresnel the file
+       * stated rather than one held under what a dielectric is allowed.
+       *
+       * Substituted here rather than at the end because what follows is the
+       * picture, the grain and the lens multiplying into the albedo, and the
+       * game reads its picture through this number exactly as it does the
+       * other. */
+      vec4 game = texelFetch(uPalette, ivec2(slot, 9), 0);
+      if (uShaders == 1 && game.a > 0.5) {
+        /* The split undone, rather than what it produced thrown away.
+         *
+         * A skin's paint and a colour set by hand have already multiplied into
+         * this albedo — the paint is the file's own weight times what the skin
+         * says, which is how a car wears a livery — so substituting the file's
+         * weight here would unpaint every car the moment the switch went on.
+         * Dividing the metalness back out keeps both, and on the great
+         * majority of materials the metalness is nought and this changes
+         * nothing at all: what the switch does there is the reflection alone.
+         *
+         * Where the split took the whole of the diffuse — a material read as a
+         * pure conductor — there is nothing left to divide back out, and the
+         * file's own weight is what it was. A paint is already lost on such a
+         * material before this, since it was multiplied by the same nought. */
+        float conductor = clamp(extra.a, 0.0, 1.0);
+        albedo = conductor >= 0.999 ? vec3(game.r)
+          : min(albedo / max(1.0 - conductor, 1e-3), vec3(1.0));
+        f0 = vec3(game.g);
+      }
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
@@ -1237,6 +1279,7 @@ ${SHADOW_LOOKUP}
         lightCount: gl.getUniformLocation(program, 'uLightCount'),
         lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
+        shaders: gl.getUniformLocation(program, 'uShaders'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
         opaqueLimit: gl.getUniformLocation(program, 'uOpaqueLimit'),
@@ -1452,6 +1495,10 @@ ${SHADOW_LOOKUP}
       this.lightSources = [];
       this.lightCount = 0;
       this.lightsOn = false;
+      /* Whether a game's own material model is used where a file states one.
+       * Off until something says otherwise, so a viewer nobody has told
+       * anything draws exactly what it drew before this existed. */
+      this.acShaders = false;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -1530,6 +1577,19 @@ ${SHADOW_LOOKUP}
     /** Whether the car's lights are on. */
     setLightsOn(on) {
       this.lightsOn = on !== false;
+      this.dirty = true;
+    }
+
+    /**
+     * Whether a game's own material model is used, where a file states one.
+     *
+     * Costs a uniform and a redraw. The palette already carries both answers,
+     * so nothing here is re-derived, regrouped, re-sorted or re-uploaded — and
+     * no material crosses between the opaque and the blended halves, which is
+     * the one change that would cost a walk over every triangle.
+     */
+    setAcShaders(on) {
+      this.acShaders = on === true;
       this.dirty = true;
     }
     setParts(parts) {
@@ -1755,6 +1815,25 @@ ${SHADOW_LOOKUP}
         const glowLayer = Number.isInteger(material.emissiveLayer)
           ? material.emissiveLayer : -1;
         data[(width * 7 + i) * 4 + 3] = Math.max(0, glowLayer + 1);
+        /* And the same surface as the game states it, beside the reading
+         * derived from it in rows 0 and 1.
+         *
+         * Both are carried so the switch between them is a uniform: a palette
+         * re-derived per click would be regrouped, re-sorted and re-uploaded,
+         * and a material crossing between the opaque and the blended halves
+         * would take half a million triangles and the sun's view with it.
+         *
+         * The fourth channel is whether there is a game's material here at
+         * all. A `.blend`, an `.obj` and an `.fbx` state none of this, and a
+         * switch thrown over one of those has nothing to switch to — so it
+         * reads nought and the derived surface stands whichever way it is
+         * set. */
+        const ac = material.ac;
+        data[(width * 9 + i) * 4] = ac && typeof ac.weight === 'number'
+          ? Math.min(1, Math.max(0, ac.weight)) : 0;
+        data[(width * 9 + i) * 4 + 1] = ac && typeof ac.facing === 'number'
+          ? Math.min(1, Math.max(0, ac.facing)) : 0;
+        data[(width * 9 + i) * 4 + 3] = ac ? 1 : 0;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -2543,6 +2622,7 @@ ${SHADOW_LOOKUP}
       gl.uniform1i(this.uniforms.normalDetail, 9);
       gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
       gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
+      gl.uniform1i(this.uniforms.shaders, this.acShaders ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the

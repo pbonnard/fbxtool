@@ -34,6 +34,14 @@
 'use strict';
 
 const FbxKn5 = (function () {
+  /* The shader table, which says what each slot is and which shaders mean
+   * something else by one. The browser bundle has it as a global, since the
+   * build concatenates it above this file; a bare `node` run does not, and
+   * `web/test/kn5.js` requires this file on its own to dump what the page read.
+   * So it is taken from whichever of the two is there. */
+  const AcShaders = typeof FbxAcShaders !== 'undefined' ? FbxAcShaders
+    : require('./acshaders.js');
+
   const CLASS_SEP = '\u0000\u0001';
   //: "sc6969", the six bytes every kn5 begins with.
   const MAGIC = [0x73, 0x63, 0x36, 0x39, 0x36, 0x39];
@@ -59,15 +67,16 @@ const FbxKn5 = (function () {
    * drive the game's own shader — and a map drawn from the wrong end is worse
    * than one not drawn.
    *
-   * On the shaders that model a car being crashed, `txNormal` is not the
-   * surface's own relief either — it is the dents, blended in as damage
-   * accumulates. A car as saved has none, so drawing it puts creases down the
-   * whole of a bonnet that has never been hit: the Mercedes' body names a
-   * 1024-square of dents there, and taken at face value every panel comes out
-   * beaten in, with the sun catching each crease pink.
+   * Which slot means what is `FbxAcShaders`' question rather than this one's,
+   * and it is asked there: on the shaders that model a car being crashed
+   * `txNormal` is not the surface's own relief either — it is the dents,
+   * blended in as damage accumulates. A car as saved has none, so drawing it
+   * puts creases down the whole of a bonnet that has never been hit: the
+   * Mercedes' body names a 1024-square of dents there, and taken at face value
+   * every panel comes out beaten in, with the sun catching each crease pink.
    */
   function slotProperty(slot, shader) {
-    if (slot === 'txNormal' && /damage/i.test(shader)) return slot;
+    if (AcShaders.slotRole(slot, shader) === 'damageNormal') return slot;
     return SLOT_PROPERTIES[slot] || slot;
   }
 
@@ -103,11 +112,6 @@ const FbxKn5 = (function () {
       / (METAL_FLOOR - DIELECTRIC_CEILING));
   }
 
-  /* Property defaults for a material that leaves one out, as the shaders do,
-   * and no ceiling on the Fresnel term where none is stated. */
-  const DEFAULT_FRESNEL_C = 0.05;
-  const DEFAULT_FRESNEL_MAX = 1;
-
   /**
    * What a surface actually reflects facing you.
    *
@@ -130,18 +134,8 @@ const FbxKn5 = (function () {
    * `fresnelMaxLevel`.
    */
   function reflectance(material) {
-    const facing = scalarOf(material, 'fresnelC', DEFAULT_FRESNEL_C);
-    const ceiling = scalarOf(material, 'fresnelMaxLevel', DEFAULT_FRESNEL_MAX);
-    return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
+    return AcShaders.reflectance((name, fallback) => scalarOf(material, name, fallback));
   }
-
-  /* What a plainly lit surface takes from the light: `ksAmbient` and
-   * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
-   * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
-   * — 278 of them, one in six, and the value the game's own editor starts a
-   * material at. */
-  const LIGHT_AMBIENT = 0.5;
-  const LIGHT_DIFFUSE = 0.6;
 
   /**
    * How much of the light a material takes, against a plainly lit one.
@@ -164,9 +158,7 @@ const FbxKn5 = (function () {
    * return more than it was given, so that is where this stops.
    */
   function lightWeight(material) {
-    const weight = (scalarOf(material, 'ksAmbient', LIGHT_AMBIENT)
-      + scalarOf(material, 'ksDiffuse', LIGHT_DIFFUSE)) / (LIGHT_AMBIENT + LIGHT_DIFFUSE);
-    return Math.min(Math.max(weight, 0), 1);
+    return AcShaders.lightWeight((name, fallback) => scalarOf(material, name, fallback));
   }
 
   /* A Custom Shaders Patch lamp block, and the two things wanted out of it. */
@@ -854,8 +846,19 @@ const FbxKn5 = (function () {
       // about a surface is stated for the whole of it and the picture is the
       // pattern, so the two multiply.
       props.push(p70('TintsTexture', 'Bool', I(1)));
+      /* Where the surface is cut against its own alpha.
+       *
+       * A stated nought is not a threshold, it is a material that named none:
+       * every alpha-tested material counted across the cars to hand states
+       * `ksAlphaRef` as nought — all 20 of the `ksPerPixelAT` and all 17 of the
+       * `ksPerPixelAT_NM` — and nought cuts nothing out, so a grille taken at
+       * face value comes out a solid rectangle with the fence painted on it.
+       * The game has a default behind the number and so has this. A material
+       * that did state one keeps it. */
       if (material.alphaTested) {
-        props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
+        const stated = scalarOf(material, 'ksAlphaRef', 0);
+        props.push(p70('AlphaCutoff', 'Number',
+          D(stated > 0 ? stated : AcShaders.ALPHA_REF_DEFAULT)));
       }
       /* What the surface gives off on its own.
        *

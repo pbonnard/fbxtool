@@ -355,6 +355,15 @@ def _render_kn5_rows(rows: list[tuple[str, Any]], doc) -> None:
         if paints:
             detail += " and paints " + ", ".join(
                 f"{paint['material']} {paint['colour']}" for paint in paints)
+        suspect = best.get("paint_suspect")
+        if suspect:
+            stated = ", ".join(suspect["stated"])
+            corrected = suspect.get("corrected")
+            note = f"{stated} reads like rim, brake, glass or cabin shading rather than paint"
+            note += (f" — did you mean {', '.join(corrected)}?" if corrected
+                     else ", and nothing else on the car reads like paint clearly "
+                          "enough to use instead")
+            detail += f" ({note})"
         rows.append(("Skins", detail + ". What is in the car is the car unpainted"))
 
 

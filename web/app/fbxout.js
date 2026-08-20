@@ -198,14 +198,39 @@ const FbxOut = (function () {
    * so a reader that understands it can put the two back together and one
    * that does not still sees a plausible surface.
    */
-  function materialRecord(entry, build) {
-    const colour = entry.colour || [0.8, 0.8, 0.8];
-    const specular = entry.specular || [0.04, 0.04, 0.04];
+  function materialRecord(entry, build, acShaders) {
+    /* Which reading of the surface is being written: the game's own, or the
+     * PBR approximation derived from it.
+     *
+     * This is the one place the two can differ freely. FBX has no fixed set of
+     * material properties, so the game's own numbers go in as they stand —
+     * uncapped, unsplit, with no metalness inferred — and a reader that wants
+     * the approximation can derive the same one this tool does from the same
+     * parameters, which are all written below anyway. glTF has to keep a core
+     * a stranger can render and holds its reflectance at the 4% a dielectric
+     * has; here there is nothing to hold it under. */
+    const game = acShaders && entry.ac ? entry.ac : null;
+    const painted = entry.colour || [0.8, 0.8, 0.8];
+    /* The split undone, rather than what it produced thrown away: a skin's
+     * paint and a colour set by hand have already multiplied into `colour`, so
+     * writing the file's own weight instead would unpaint every car exported
+     * with the switch on. Where the split took the whole of the diffuse there
+     * is nothing left to undo, and the file's own weight is what it was. */
+    const split = typeof entry.metallic === 'number'
+      ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
+    const colour = !game ? painted
+      : (split >= 0.999 ? [game.weight, game.weight, game.weight]
+        : painted.map((c) => Math.min(c / Math.max(1 - split, 1e-3), 1)));
+    const specular = game ? [game.facing, game.facing, game.facing]
+      : (entry.specular || [0.04, 0.04, 0.04]);
     const roughness = typeof entry.roughness === 'number' ? entry.roughness : 0.5;
     const props = [
       p70('DiffuseColor', 'Color', ...colour.map(D)),
       p70('SpecularColor', 'Color', ...specular.map(D)),
-      p70('Metallic', 'Number', D(typeof entry.metallic === 'number' ? entry.metallic : 0)),
+      // No conductor where the game states none, which is every kn5 material:
+      // the metalness is this tool's inference and the switch turns it off.
+      p70('Metallic', 'Number',
+        D(game ? 0 : (typeof entry.metallic === 'number' ? entry.metallic : 0))),
 /* FBX states a Phong exponent, not a roughness. The two meet through
        * the microfacet alpha — `alpha = roughness squared` and
        * `alpha = sqrt(2 / (n + 2))` — so the exponent is two over the fourth
@@ -360,7 +385,7 @@ const FbxOut = (function () {
     const worn = new Set();
     const materialFor = (entry) => {
       if (materialUid.has(entry.name)) return materialUid.get(entry.name);
-      const uid = materialRecord(entry, make);
+      const uid = materialRecord(entry, make, scene.acShaders === true);
       materialUid.set(entry.name, uid);
       // And the maps it wears, hung off it by the property each one drives.
       const wearing = [];

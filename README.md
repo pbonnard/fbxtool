@@ -152,7 +152,13 @@ everywhere.
 - **Materials**: `txDiffuse` as albedo, `ksSpecularEXP` as shininess exponent, `ksSpecular` as highlight strength, `fresnelC` / `fresnelEXP` / `fresnelMaxLevel` as a Schlick Fresnel with a ceiling. Every named parameter also carried under its own name.
 - `ksAmbient` and `ksDiffuse` read as how much of the light a material takes, against a 0.5/0.6 baseline.
 - Metalness inferred from reflectance at normal incidence (dielectrics below ~17%, metals above ~50%); nothing inferred from a see-through surface.
-- Texture slots: `txDiffuse`, `txNormal`, `txGlow`, `txDetail` mapped; everything else keeps the game's own name.
+- **Shader table** (`fbxtool/acshaders.py`, mirrored in `web/app/acshaders.js`): a shader name read as a base with suffixes, so `ksPerPixelMultiMap_AT_NMDetail` is described without a row of its own and a Custom Shaders Patch name nobody has seen is still described by its suffixes. Gives the family, the capability flags and what each texture slot is. Settled by `tools/shader_census.py` over the cars to hand, and held to the JavaScript copy by `tests/test_acshaders.py`.
+- Texture slots: `txDiffuse`, `txNormal`, `txGlow`, `txEmissive`, `txDetail`, `txNormalDetail` and `txMaps` mapped; everything else keeps the game's own name.
+- `txMaps` carried as `acMaps` — a slot of its own rather than as a metallic-roughness map, whose channels drive a Blinn-Phong highlight and which put in that slot gives every panel a metalness and a roughness nobody wrote. 201 of the 528 materials counted bind one.
+- On the shaders that model a car being crashed, `txNormal` is the dents rather than the panel's own relief, and is not drawn as relief.
+- **`shaders` switch** — one control settling both the view and the export, offered only for a file that states a game's material and on by default for one that does. On, the surface is what the game states: the whole of the light it takes as its albedo, the Fresnel it stated as its reflection, and no conductor anywhere. Off, it is the PBR approximation this tool derives. Remembered per file.
+- The switch turns off *this tool's inference* and nothing else: a paint, a colour set by hand and a finish the car's own config names all stand whichever way it is thrown. The glTF core stays inside what a stranger can render either way — a dielectric's reflectance is still held at 4% and an emissive past white still carries its strength in an extension — with the game's own numbers in `extras`, marked `shaderModel`.
+- `ksAlphaRef` stated as nought read as the game's own 0.5: every alpha-tested material counted states nought, and nought cuts nothing out, so a grille taken at face value is a solid rectangle.
 - `txDetail` applied as a tiled grain, neutral at its own average.
 - Meshes marked invisible and nodes marked inactive are read, counted, reported and not drawn; visibility descends.
 - Textures carried on the `Video` clip and shared between materials; textures a material names but the file lacks are listed.
@@ -171,6 +177,7 @@ everywhere.
 - Materials and colours paired by order; one colour is spread over however many materials are named.
 - Names held against the model — a material the car has not got is not painted.
 - The paint **tints** its texture rather than replacing it.
+- **A named paint checked against what it reads like.** A material naming a wheel, a brake, a lamp or the cabin — a Ferrari Mondial's own `extension/ext_config.ini` points its paint at `EXT_RIM_AO`, its wheel rims' baked ambient occlusion — is flagged, and where the car's own materials name exactly one thing that reads like paint and is not the same mistake itself, the web viewer puts the colour there instead; more than one candidate is not guessed among.
 
 ## Web viewer
 
@@ -337,7 +344,15 @@ of `FbxError`.
 pytest                          # no dependencies beyond pytest itself
 python3 tools/make_samples.py   # regenerate the generated files in samples/
 python3 web/build.py            # rebuild web/dist/fbxview.html
+python3 tools/shader_census.py <folder of cars>   # what the game's shaders are made of
 ```
+
+`tools/shader_census.py` reads only each `.kn5`'s header and material table —
+the texture payloads are stepped over rather than loaded — and counts, per
+shader name, how many materials wear it and across how many cars, which
+parameters they state and what those come to, and which texture slots they bind.
+Every decision in `fbxtool/acshaders.py` is settled by its output rather than by
+what a shader's name suggests; `--json` emits the counts for holding against.
 
 The JavaScript and WebAssembly layers have their own harnesses, each run by
 `pytest` and each usable on its own:
@@ -359,6 +374,7 @@ node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
 node web/test/flip.js samples/scene_parts.fbx        # mirroring, and its winding
 node web/test/turn.js samples/scene_parts.fbx        # facing the other way
 node web/test/skin.js <car folder> <other.kn5>       # putting a skin on a car
+node web/test/shaders.js <dir> <chrome.kn5> <paint.kn5> <plain.fbx>  # the shaders switch
 node web/test/drop.js samples/pyramid.obj samples/pyramid.mtl samples/checker.png
 node web/test/edits.js samples/Shelby.fbx            # deleting and splitting
 ```

@@ -666,6 +666,69 @@ const FbxSkins = (function () {
     return out;
   }
 
+  /* Words that mark a material as some other part of the car than its
+   * paint — the vocabulary its wheels, brakes, glass and cabin actually
+   * carry. `CarPaintMaterial` has been seen naming one of these by mistake:
+   * a Ferrari Mondial's own `extension/ext_config.ini` names `EXT_RIM_AO`,
+   * the ambient occlusion baked into its wheel rims, and every one of its
+   * twelve skins comes up unpainted for it — nothing wrong with the file,
+   * the file just says the wrong thing.
+   *
+   * Matched whole, not as a substring: a car naming its side trim `Trim` is
+   * not a rim for containing "rim" — that is the middle of "Trim" — and a
+   * Honda Prelude's own `remap__prim_env_19_spec_` is not one either. Reading
+   * either as a wheel is worse than missing it. */
+  const NOT_PAINT_WORDS = new Set(['rim', 'wheel', 'tyre', 'tire', 'brake', 'caliper',
+    'disc', 'glass', 'lens', 'chrome', 'light', 'lamp', 'mirror', 'interior', 'seat',
+    'carpet', 'dash', 'leather', 'steer', 'pedal', 'gauge', 'plastic', 'plate',
+    'exhaust', 'badge', 'logo']);
+
+  /* A material name split into its words — on punctuation, digits and the
+   * casing itself, so `EXT_RIM_AO` and `ExtRimAo` come apart the same way. */
+  function words(name) {
+    const out = [];
+    for (const chunk of String(name).split(/[^A-Za-z]+/)) {
+      if (chunk) out.push(...chunk.replace(/(?<=[a-z])(?=[A-Z])/g, ' ').toLowerCase().split(' '));
+    }
+    return out;
+  }
+
+  /* And what a car's paint is usually called, when it is named at all.
+   * Takes precedence over NOT_PAINT_WORDS: a material naming its own
+   * paintwork wins even where it also happens to carry one of the other
+   * words. Matched as a substring rather than a whole word — unlike the
+   * wheel-and-cabin vocabulary above, nothing in a car's own parts happens
+   * to contain "paint". */
+  const IS_PAINT = /body.?paint|car.?paint|paint|ext.?body|wc.?body|bodywork/i;
+
+  /** Whether a material named as the car's paint reads like some other part. */
+  function suspectPaint(name) {
+    if (IS_PAINT.test(name)) return false;
+    return words(name).some((word) => NOT_PAINT_WORDS.has(word)
+      || (word.endsWith('s') && NOT_PAINT_WORDS.has(word.slice(0, -1))));
+  }
+
+  /**
+   * The car's own material to use instead, where every material *named*
+   * reads like a wheel, a brake, a lamp or the cabin rather than paint.
+   *
+   * Only where the car's own materials name exactly one thing that reads
+   * like paint and is not the same kind of mistake itself. More than one
+   * such material is not chosen among: the one thing this is sure of is
+   * that *named* is probably wrong, and a wrong guess dressed as a
+   * correction is worse than none.
+   *
+   * *materials* is every material name the car has, lowercased; *casing*
+   * gets a lowered name back to how the file spelled it.
+   */
+  function paintCorrection(named, materials, casing) {
+    if (!named.length || !named.every(suspectPaint)) return null;
+    const candidates = [...materials].filter((m) => IS_PAINT.test(m) && !suspectPaint(m));
+    if (candidates.length !== 1) return null;
+    const found = candidates[0];
+    return [casing.get(found) || found];
+  }
+
   /**
    * Settle what a car's paint is called, and put each skin's colour on it.
    *
@@ -681,7 +744,7 @@ const FbxSkins = (function () {
    * that names nothing the car has is answered this way, and only from names
    * its own siblings used.
    */
-  function settle(skins, { pictures, fallback, brightness }) {
+  function settle(skins, { pictures, fallback, brightness, materialNames }) {
     /* The car's own word, read for each skin rather than once for the car: a
      * config states some of its settings per skin — a 550 Maranello writes
      * its body once for its reds and once for its silvers — so a single
@@ -690,6 +753,12 @@ const FbxSkins = (function () {
       ? brightness : () => brightness || new Map();
     //: Material name -> the picture it wears, both lowercased.
     const materials = new Set(pictures.keys());
+    //: A lowered material name -> how the file actually spelled it.
+    const casing = new Map();
+    for (const name of materialNames || []) {
+      const low = String(name).toLowerCase();
+      if (!casing.has(low)) casing.set(low, name);
+    }
     const known = [];
     for (const skin of skins) {
       for (const name of skin.named) {
@@ -705,6 +774,17 @@ const FbxSkins = (function () {
        * for the same reason the chip is: a slot name is what Content Manager
        * opened at rather than anything the car said about itself. */
       if (!named.length) named = slotMaterials(skin.colours, materials);
+      /* And whether what got settled on reads like the car's paint at all —
+       * see `paintCorrection`. Corrected in place rather than only noted:
+       * this is the viewer, and a car whose config points its paint at its
+       * own wheel shading should not draw pale for it when the material it
+       * plainly meant sits right there. `paintSuspect` says so regardless of
+       * whether a correction was found, so the car can too. */
+      if (named.length && named.every(suspectPaint)) {
+        const corrected = paintCorrection(named, materials, casing);
+        skin.paintSuspect = { stated: named, corrected };
+        if (corrected) named = corrected;
+      }
       skin.settled = named;
       /* A skin's own reading of how bright its paint is, over the car's.
        * Both are the same setting in the same shape of section — one written
@@ -752,7 +832,7 @@ const FbxSkins = (function () {
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
     paintColours, configColours, chipColour, fromChip, paintBrightness,
-    materialFinish, carReplacements, slotMaterials };
+    materialFinish, carReplacements, slotMaterials, suspectPaint, paintCorrection };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;

@@ -270,13 +270,25 @@ const FbxAnalyze = (function () {
   const TEXTURE_SLOTS = [
     ['baseColor', /^(diffuse|diffusecolor|basecolor|base_color|texmapdiffuse|color)$/i],
     ['normal', /^(normal|normalmap|normal_map|normalcamera|bump|bumpmap|texmapbump|texmapnormal)$/i],
-    ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum)$/i],
+    ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum|txemissive)$/i],
     ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
     ['detail', /^(txdetail|detail|detailmap|detailtexture)$/i],
     // The shape that goes with that grain. A game spells it one way and
     // keeps it in a slot of its own; nothing else writes one at all.
     ['detailNormal', /^(txnormaldetail|detailnormal|detailnormalmap)$/i],
+    /* The game's own per-texel finish, which is not a metallic-roughness map
+     * however much it looks like one: its channels drive a Blinn-Phong
+     * highlight rather than a PBR one, so read as `metallicRoughness` it is a
+     * map taken from the wrong end. It gets a slot of its own instead.
+     *
+     * 201 of the 528 materials across the cars to hand bind one — every
+     * `ksPerPixelMultiMap`, which is what a car's body wears — and with no
+     * pattern here it matched nothing, never reached the palette and never
+     * reached an export either. It was the largest single thing a car lost on
+     * the way through. Accepted under the game's name and under this one, so
+     * that a file written here reads back as what it was. */
+    ['acMaps', /^(txmaps|acmaps)$/i],
   ];
 
   /**

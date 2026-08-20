@@ -677,6 +677,14 @@ ul.record-tree .count { color: var(--muted); }
            they are. Hidden for everything that did not. -->
       <label class="check" id="lights-label" hidden><input id="lights-toggle"
         type="checkbox"> lights</label>
+      <!-- The game's own material model, for a file that states one. Hidden
+           for every file that does not, since there is nothing to switch to.
+           It settles the export as well as the view: a car written out while
+           it is on keeps what the game said, and written out while it is off
+           becomes the PBR approximation this tool derives. -->
+      <label class="check" id="shaders-label" hidden
+        title="Shade and export Assetto Corsa materials by the game's own shaders — off draws and writes the PBR approximation instead"><input
+        id="shaders-toggle" type="checkbox"> shaders</label>
       <button id="reset-view" type="button">Reset view</button>
       <!-- Which spelling the export is written in. A .glb is one file and is
            what most things want; a .gltf beside a .bin is the same document
@@ -6011,6 +6019,318 @@ const FbxMax = (function () {
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxMax;
 
+// ---- acshaders.js ------------------------------------------------------
+/**
+ * What an Assetto Corsa shader name says about the material wearing it.
+ *
+ * The same table as `fbxtool/acshaders.py`, and it has to stay the same: a car
+ * opened in the browser and the same car described by `fbxinfo` are meant to be
+ * the same car. `tests/test_acshaders.py` reads both and compares them.
+ *
+ * A `.kn5` material names its shader and then states three dozen loose numbers,
+ * and which of those numbers mean anything depends entirely on the name. The
+ * names are compositional — `ksPerPixelMultiMap_AT_NMDetail` is
+ * `ksPerPixelMultiMap` with alpha testing and a detail normal — so a name is
+ * read as a base with suffixes rather than looked up whole, which is what lets
+ * a shader nobody here has seen still be described correctly.
+ *
+ * Everything here is settled by `tools/shader_census.py` over the cars to hand.
+ * Two of its findings shape the whole module: `ksAlphaRef` is nought on every
+ * alpha-tested material counted, and `blurLevel`, `dirtyLevel` and `glowLevel`
+ * are nought on every material that states them — they are what the game writes
+ * per frame out of wheel speed, dirt and heat, and a car sitting still has none
+ * of any of them.
+ */
+const FbxAcShaders = (() => {
+  /* What each texture slot is, wherever it is bound. The roles are this
+   * project's own names, shared with the palette and the exporters. */
+  const SLOT_ROLES = {
+    txDiffuse: 'baseColor',
+    txNormal: 'normal',
+    /* Not a metallic-roughness map however much it looks like one: its channels
+     * drive the game's own Blinn-Phong highlight, and read as PBR it is a map
+     * drawn from the wrong end. 201 of the 528 materials counted bind one, so
+     * it is the largest single thing a car loses on the way through here. */
+    txMaps: 'acMaps',
+    txDetail: 'detail',
+    txNormalDetail: 'detailNormal',
+    // A real emissive map, unlike `txGlow`: `ksPerPixelMultiMap_AT_emissive`
+    // binds it beside a block of `ksEmissive1`..`ksEmissive6` channel levels.
+    txEmissive: 'emissive',
+    // Heat in a brake disc — 10 of the 10 that bind it — at nought on a car
+    // at rest.
+    txGlow: 'glow',
+    /* What the surface turns into as it spins. A tyre and a disc each bind a
+     * blurred colour and a blurred relief, and `blurLevel` says how far between
+     * the two the wheel currently is: nought, parked. */
+    txBlur: 'blur',
+    txNormalBlur: 'normalBlur',
+    // What a tyre picks up off the track, at `dirtyLevel` — nought, parked.
+    txDirty: 'dirt',
+    // And what a car accumulates as it is driven into things.
+    txDust: 'dust',
+    txDamage: 'damage',
+    txDamageMask: 'damageMask',
+  };
+
+  /* Slots whose level the file states as nought because the game writes it per
+   * frame. Bound, carried, and not to be drawn at the level the file gives. */
+  const RUNTIME_SLOTS = new Set(['txGlow', 'txBlur', 'txNormalBlur', 'txDirty',
+    'txDust', 'txDamage', 'txDamageMask']);
+
+  /* The levels those slots are driven at, so a reader can tell a stated nought
+   * from an absent one. */
+  const RUNTIME_LEVELS = {
+    txGlow: 'glowLevel',
+    txBlur: 'blurLevel',
+    txNormalBlur: 'blurLevel',
+    txDirty: 'dirtyLevel',
+    txDust: 'dirt',
+    txDamage: 'damageZones',
+  };
+
+  /* What the game cuts an alpha-tested surface at when the material says
+   * nought, which every alpha-tested material counted does. */
+  const ALPHA_REF_DEFAULT = 0.5;
+
+  /* The shader bases, with what each one is beyond the suffixes on its name. */
+  const FAMILIES = {
+    ksPerPixel: { family: 'perPixel' },
+    /* A per-texel highlight out of `txMaps`, a grain out of `txDetail` tiled
+     * `detailUVMultiplier` times across the surface — a median of 100, and up
+     * to 5000 — and `useDetail` saying whether the grain is worn at all. */
+    ksPerPixelMultiMap: {
+      family: 'multiMap', detail: true, normalMap: true, acMaps: true,
+    },
+    /* The world in a cube map, which nothing here has: the viewer lights from
+     * an analytic sky, so this stays an approximation whichever way the switch
+     * is set. Its highlight is the tightest of any family — a median exponent
+     * of 200 against the 20 a multi-map states — which is what chrome is. */
+    ksPerPixelReflection: { family: 'reflection' },
+    ksPerPixelSimpleRefl: { family: 'reflection' },
+    // A tyre: a clean tread, a blurred one, a dirty one, and two levels the
+    // game writes per frame to say how far between them the wheel is.
+    ksTyres: { family: 'tyres', normalMap: true },
+    // A disc: the same blur, plus the heat glow.
+    ksBrakeDisc: { family: 'brakeDisc', normalMap: true },
+    // Always blended — 7 of the 7 counted — and the only family that is.
+    ksWindscreen: { family: 'windscreen', blended: true },
+    ksBrokenGlass: { family: 'windscreen', normalMap: true, blended: true },
+    // A diffuse that answers a grazing light the way cloth and unpolished
+    // stone do, at the `fRoughness` it states.
+    ksOrenNayar: { family: 'orenNayar' },
+  };
+
+  /* The suffixes a name is built out of, longest first so that `NMDetail` is
+   * read as itself rather than as `NM` with `Detail` left over.
+   *
+   * A suffix is written both ways round and the same name may do both:
+   * `ksPerPixelAT` runs it straight on, `ksPerPixelAT_NM` puts an underscore
+   * before the next one, and `ksPerPixelMultiMap_AT_NMDetail` underscores every
+   * one. So each is tried underscored first and then bare. */
+  const SUFFIXES = [
+    ['NMDetail', { normalMap: true, detailNormal: true }],
+    ['damage_dirt', { damage: true, dirt: true }],
+    ['emissive', { emissiveMap: true }],
+    ['damage', { damage: true }],
+    ['UVMult', { uvMultiplier: true }],
+    ['dirt', { dirt: true }],
+    ['UV2', { secondUv: true }],
+    ['AT', { alphaTested: true }],
+    ['NM', { normalMap: true }],
+    ['NS', {}],
+  ];
+
+  /* netKar Pro's shaders, which a few cars still carry. They are the same
+   * surfaces under an older prefix, so they are read as the ks- ones. */
+  const ALIASES = { ne: 'ks', sm: 'ks' };
+
+  const FLAGS = ['alphaTested', 'normalMap', 'detail', 'detailNormal', 'acMaps',
+    'damage', 'dirt', 'emissiveMap', 'secondUv', 'uvMultiplier', 'blended'];
+
+  /** A shader under another vendor's prefix, said the house way. */
+  function alias(name) {
+    for (const [prefix, house] of Object.entries(ALIASES)) {
+      if (name.startsWith(prefix) && name.length > prefix.length
+        && name[prefix.length] === name[prefix.length].toUpperCase()
+        && name[prefix.length] !== name[prefix.length].toLowerCase()) {
+        return house + name.slice(prefix.length);
+      }
+    }
+    return name;
+  }
+
+  /**
+   * What a shader name says, read as a base with suffixes.
+   *
+   * The result is the same shape for a name in `FAMILIES` and for one nobody
+   * here has seen; `known` says which it was.
+   */
+  function describe(shader) {
+    const name = alias(String(shader || '').trim());
+    const out = { shader: String(shader || '') };
+    for (const flag of FLAGS) out[flag] = false;
+
+    /* The suffixes come off one at a time and in the order listed, so that a
+     * name wearing several — `_AT_NMDetail` — gives up all of them.
+     *
+     * Underscored, the match ignores case: the separator is enough to say a
+     * suffix is what it is. Bare, it does not: `AT` run straight onto a name
+     * has only its capitals to mark it out, and matching loosely would find one
+     * at the end of any word ending in those letters. */
+    let base = name;
+    let peeled = true;
+    while (peeled) {
+      peeled = false;
+      for (const [suffix, says] of SUFFIXES) {
+        const marked = `_${suffix}`;
+        if (base.length > marked.length
+          && base.toLowerCase().endsWith(marked.toLowerCase())) {
+          base = base.slice(0, -marked.length);
+        } else if (base.length > suffix.length && base.endsWith(suffix)) {
+          base = base.slice(0, -suffix.length);
+        } else {
+          continue;
+        }
+        Object.assign(out, says);
+        peeled = true;
+        break;
+      }
+    }
+
+    let entry = FAMILIES[base] || FAMILIES[name];
+    out.known = entry !== undefined;
+    /* A name that peeled down to nothing recognisable is still described by its
+     * suffixes; `ksPerPixel` is what every one of these families is
+     * underneath. */
+    if (entry === undefined) {
+      entry = FAMILIES[name.split('_')[0]] || { family: 'perPixel' };
+    }
+    out.family = entry.family || 'perPixel';
+    for (const flag of FLAGS) if (entry[flag]) out[flag] = true;
+
+    // A multi-map states its `txMaps` and its grain whichever suffixes follow.
+    if (out.family === 'multiMap') {
+      out.acMaps = true;
+      out.detail = true;
+      out.normalMap = true;
+    }
+    out.base = base || name;
+    return out;
+  }
+
+  /**
+   * What a texture slot is on this shader, or null for one nothing knows.
+   *
+   * One slot changes meaning with the shader and it is the important one: on
+   * the families that model a car being crashed, `txNormal` is not the
+   * surface's own relief but the dents blended in as damage accumulates. A car
+   * as saved has none, so drawn as relief it puts creases down the whole of a
+   * bonnet that has never been hit.
+   */
+  function slotRole(slot, shader) {
+    if (slot === 'txNormal' && describe(shader).damage) return 'damageNormal';
+    return SLOT_ROLES[slot] || null;
+  }
+
+  /* ------------------------------ what a surface is, as the game says it */
+
+  /* What a plainly lit surface takes from the light: `ksAmbient` and
+   * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
+   * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
+   * — 278 of them, one in six, and the value the game's own editor starts a
+   * material at. */
+  const LIGHT_AMBIENT = 0.5;
+  const LIGHT_DIFFUSE = 0.6;
+
+  /* What a material that leaves the Fresnel out means by it, and no ceiling on
+   * the term where none is stated. */
+  const DEFAULT_FRESNEL_C = 0.05;
+  const DEFAULT_FRESNEL_MAX = 1;
+
+  /**
+   * How much of the light a material takes, against a plainly lit one.
+   *
+   * `scalar` is `(name, default) -> number` — a material's own reader, or a
+   * lookup into whatever the parameters were carried in.
+   *
+   * `ksAmbient` and `ksDiffuse` weight the two halves of the game's own
+   * lighting rather than tinting anything. Both halves are diffuse, so in a
+   * viewer with one fixed light the two weights have nowhere to go but the
+   * albedo, where they are the same arithmetic: dimming the light that reaches
+   * a surface and dimming the surface come to the same picture.
+   *
+   * This is the whole of why an Audi S8 comes up white from end to end. Its
+   * paint is 0.4 and 0.4 and its wheels are 0.03 and 0.01; its headlight
+   * housings are nothing at all. The pictures under those are grey panel maps
+   * — the colour was never in the picture — so read without the weights the
+   * rims, the lamps and the carbon mirror caps all draw as bright as the body.
+   *
+   * A quarter of them ask for more light than a plainly lit surface gets,
+   * which a dashboard or a lamp lens does on purpose. A diffuse surface cannot
+   * return more than it was given, so that is where this stops.
+   */
+  function lightWeight(scalar) {
+    const weight = (scalar('ksAmbient', LIGHT_AMBIENT)
+      + scalar('ksDiffuse', LIGHT_DIFFUSE)) / (LIGHT_AMBIENT + LIGHT_DIFFUSE);
+    return Math.min(Math.max(weight, 0), 1);
+  }
+
+  /**
+   * What a surface actually reflects facing you.
+   *
+   * `fresnelC` is the Schlick base and `fresnelMaxLevel` is a ceiling on the
+   * whole term — not the value at a grazing angle, which is what the pair
+   * reads like until you see the numbers. A BMW Z3M's `lightclear` states 1.0
+   * and 0.03: read as a base it is a perfect mirror, and read as a ceiling it
+   * is the three per cent a clear lens reflects. An Alfa TZ2's `EXT_TYRE`
+   * settles it — it states 5.0, which is not a reflectance at all and can only
+   * be a number something clamps, beside a ceiling of 0.02.
+   *
+   * The two always travel together: of 1853 materials across the cars to hand,
+   * 1075 state both and 778 state neither, and not one states only one of
+   * them. So reading the first without the second is reading half of a
+   * sentence, and it is the half that turns a tail lamp and a tyre into
+   * mirrors.
+   */
+  function reflectance(scalar) {
+    const facing = scalar('fresnelC', DEFAULT_FRESNEL_C);
+    const ceiling = scalar('fresnelMaxLevel', DEFAULT_FRESNEL_MAX);
+    return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
+  }
+
+  /** A lookup into a plain object of stated numbers, as the two above want.
+   *
+   * A property read back out of a record tree is a number where the file wrote
+   * one number and a list where it wrote several, and a `Number` property that
+   * came through a template arrives as a list of one. All three mean the same
+   * thing here, so all three are read. */
+  const statedScalar = (stated) => (name, fallback) => {
+    const raw = (stated || {})[name];
+    const value = Array.isArray(raw) ? Number(raw[0]) : Number(raw);
+    return Number.isFinite(value) ? value : fallback;
+  };
+
+  return {
+    describe,
+    slotRole,
+    SLOT_ROLES,
+    RUNTIME_SLOTS,
+    RUNTIME_LEVELS,
+    FAMILIES,
+    ALPHA_REF_DEFAULT,
+    lightWeight,
+    reflectance,
+    statedScalar,
+    LIGHT_AMBIENT,
+    LIGHT_DIFFUSE,
+    DEFAULT_FRESNEL_C,
+    DEFAULT_FRESNEL_MAX,
+  };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = FbxAcShaders;
+
 // ---- kn5.js ------------------------------------------------------------
 /* Read Assetto Corsa's `.kn5` into the record tree every other reader
  * produces, so the report, the viewer, the material list and the exporter all
@@ -6048,6 +6368,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxMax;
 'use strict';
 
 const FbxKn5 = (function () {
+  /* The shader table, which says what each slot is and which shaders mean
+   * something else by one. The browser bundle has it as a global, since the
+   * build concatenates it above this file; a bare `node` run does not, and
+   * `web/test/kn5.js` requires this file on its own to dump what the page read.
+   * So it is taken from whichever of the two is there. */
+  const AcShaders = typeof FbxAcShaders !== 'undefined' ? FbxAcShaders
+    : require('./acshaders.js');
+
   const CLASS_SEP = '\u0000\u0001';
   //: "sc6969", the six bytes every kn5 begins with.
   const MAGIC = [0x73, 0x63, 0x36, 0x39, 0x36, 0x39];
@@ -6073,15 +6401,16 @@ const FbxKn5 = (function () {
    * drive the game's own shader — and a map drawn from the wrong end is worse
    * than one not drawn.
    *
-   * On the shaders that model a car being crashed, `txNormal` is not the
-   * surface's own relief either — it is the dents, blended in as damage
-   * accumulates. A car as saved has none, so drawing it puts creases down the
-   * whole of a bonnet that has never been hit: the Mercedes' body names a
-   * 1024-square of dents there, and taken at face value every panel comes out
-   * beaten in, with the sun catching each crease pink.
+   * Which slot means what is `FbxAcShaders`' question rather than this one's,
+   * and it is asked there: on the shaders that model a car being crashed
+   * `txNormal` is not the surface's own relief either — it is the dents,
+   * blended in as damage accumulates. A car as saved has none, so drawing it
+   * puts creases down the whole of a bonnet that has never been hit: the
+   * Mercedes' body names a 1024-square of dents there, and taken at face value
+   * every panel comes out beaten in, with the sun catching each crease pink.
    */
   function slotProperty(slot, shader) {
-    if (slot === 'txNormal' && /damage/i.test(shader)) return slot;
+    if (AcShaders.slotRole(slot, shader) === 'damageNormal') return slot;
     return SLOT_PROPERTIES[slot] || slot;
   }
 
@@ -6117,11 +6446,6 @@ const FbxKn5 = (function () {
       / (METAL_FLOOR - DIELECTRIC_CEILING));
   }
 
-  /* Property defaults for a material that leaves one out, as the shaders do,
-   * and no ceiling on the Fresnel term where none is stated. */
-  const DEFAULT_FRESNEL_C = 0.05;
-  const DEFAULT_FRESNEL_MAX = 1;
-
   /**
    * What a surface actually reflects facing you.
    *
@@ -6144,18 +6468,8 @@ const FbxKn5 = (function () {
    * `fresnelMaxLevel`.
    */
   function reflectance(material) {
-    const facing = scalarOf(material, 'fresnelC', DEFAULT_FRESNEL_C);
-    const ceiling = scalarOf(material, 'fresnelMaxLevel', DEFAULT_FRESNEL_MAX);
-    return Math.min(Math.max(Math.min(facing, ceiling), 0), 1);
+    return AcShaders.reflectance((name, fallback) => scalarOf(material, name, fallback));
   }
-
-  /* What a plainly lit surface takes from the light: `ksAmbient` and
-   * `ksDiffuse` at the pair most materials state them at. Of 1728 materials
-   * across the 27 cars to hand, 0.5 and 0.6 is the commonest by a wide margin
-   * — 278 of them, one in six, and the value the game's own editor starts a
-   * material at. */
-  const LIGHT_AMBIENT = 0.5;
-  const LIGHT_DIFFUSE = 0.6;
 
   /**
    * How much of the light a material takes, against a plainly lit one.
@@ -6178,9 +6492,7 @@ const FbxKn5 = (function () {
    * return more than it was given, so that is where this stops.
    */
   function lightWeight(material) {
-    const weight = (scalarOf(material, 'ksAmbient', LIGHT_AMBIENT)
-      + scalarOf(material, 'ksDiffuse', LIGHT_DIFFUSE)) / (LIGHT_AMBIENT + LIGHT_DIFFUSE);
-    return Math.min(Math.max(weight, 0), 1);
+    return AcShaders.lightWeight((name, fallback) => scalarOf(material, name, fallback));
   }
 
   /* A Custom Shaders Patch lamp block, and the two things wanted out of it. */
@@ -6868,8 +7180,19 @@ const FbxKn5 = (function () {
       // about a surface is stated for the whole of it and the picture is the
       // pattern, so the two multiply.
       props.push(p70('TintsTexture', 'Bool', I(1)));
+      /* Where the surface is cut against its own alpha.
+       *
+       * A stated nought is not a threshold, it is a material that named none:
+       * every alpha-tested material counted across the cars to hand states
+       * `ksAlphaRef` as nought — all 20 of the `ksPerPixelAT` and all 17 of the
+       * `ksPerPixelAT_NM` — and nought cuts nothing out, so a grille taken at
+       * face value comes out a solid rectangle with the fence painted on it.
+       * The game has a default behind the number and so has this. A material
+       * that did state one keeps it. */
       if (material.alphaTested) {
-        props.push(p70('AlphaCutoff', 'Number', D(scalarOf(material, 'ksAlphaRef', 0.5))));
+        const stated = scalarOf(material, 'ksAlphaRef', 0);
+        props.push(p70('AlphaCutoff', 'Number',
+          D(stated > 0 ? stated : AcShaders.ALPHA_REF_DEFAULT)));
       }
       /* What the surface gives off on its own.
        *
@@ -7825,6 +8148,69 @@ const FbxSkins = (function () {
     return out;
   }
 
+  /* Words that mark a material as some other part of the car than its
+   * paint — the vocabulary its wheels, brakes, glass and cabin actually
+   * carry. `CarPaintMaterial` has been seen naming one of these by mistake:
+   * a Ferrari Mondial's own `extension/ext_config.ini` names `EXT_RIM_AO`,
+   * the ambient occlusion baked into its wheel rims, and every one of its
+   * twelve skins comes up unpainted for it — nothing wrong with the file,
+   * the file just says the wrong thing.
+   *
+   * Matched whole, not as a substring: a car naming its side trim `Trim` is
+   * not a rim for containing "rim" — that is the middle of "Trim" — and a
+   * Honda Prelude's own `remap__prim_env_19_spec_` is not one either. Reading
+   * either as a wheel is worse than missing it. */
+  const NOT_PAINT_WORDS = new Set(['rim', 'wheel', 'tyre', 'tire', 'brake', 'caliper',
+    'disc', 'glass', 'lens', 'chrome', 'light', 'lamp', 'mirror', 'interior', 'seat',
+    'carpet', 'dash', 'leather', 'steer', 'pedal', 'gauge', 'plastic', 'plate',
+    'exhaust', 'badge', 'logo']);
+
+  /* A material name split into its words — on punctuation, digits and the
+   * casing itself, so `EXT_RIM_AO` and `ExtRimAo` come apart the same way. */
+  function words(name) {
+    const out = [];
+    for (const chunk of String(name).split(/[^A-Za-z]+/)) {
+      if (chunk) out.push(...chunk.replace(/(?<=[a-z])(?=[A-Z])/g, ' ').toLowerCase().split(' '));
+    }
+    return out;
+  }
+
+  /* And what a car's paint is usually called, when it is named at all.
+   * Takes precedence over NOT_PAINT_WORDS: a material naming its own
+   * paintwork wins even where it also happens to carry one of the other
+   * words. Matched as a substring rather than a whole word — unlike the
+   * wheel-and-cabin vocabulary above, nothing in a car's own parts happens
+   * to contain "paint". */
+  const IS_PAINT = /body.?paint|car.?paint|paint|ext.?body|wc.?body|bodywork/i;
+
+  /** Whether a material named as the car's paint reads like some other part. */
+  function suspectPaint(name) {
+    if (IS_PAINT.test(name)) return false;
+    return words(name).some((word) => NOT_PAINT_WORDS.has(word)
+      || (word.endsWith('s') && NOT_PAINT_WORDS.has(word.slice(0, -1))));
+  }
+
+  /**
+   * The car's own material to use instead, where every material *named*
+   * reads like a wheel, a brake, a lamp or the cabin rather than paint.
+   *
+   * Only where the car's own materials name exactly one thing that reads
+   * like paint and is not the same kind of mistake itself. More than one
+   * such material is not chosen among: the one thing this is sure of is
+   * that *named* is probably wrong, and a wrong guess dressed as a
+   * correction is worse than none.
+   *
+   * *materials* is every material name the car has, lowercased; *casing*
+   * gets a lowered name back to how the file spelled it.
+   */
+  function paintCorrection(named, materials, casing) {
+    if (!named.length || !named.every(suspectPaint)) return null;
+    const candidates = [...materials].filter((m) => IS_PAINT.test(m) && !suspectPaint(m));
+    if (candidates.length !== 1) return null;
+    const found = candidates[0];
+    return [casing.get(found) || found];
+  }
+
   /**
    * Settle what a car's paint is called, and put each skin's colour on it.
    *
@@ -7840,7 +8226,7 @@ const FbxSkins = (function () {
    * that names nothing the car has is answered this way, and only from names
    * its own siblings used.
    */
-  function settle(skins, { pictures, fallback, brightness }) {
+  function settle(skins, { pictures, fallback, brightness, materialNames }) {
     /* The car's own word, read for each skin rather than once for the car: a
      * config states some of its settings per skin — a 550 Maranello writes
      * its body once for its reds and once for its silvers — so a single
@@ -7849,6 +8235,12 @@ const FbxSkins = (function () {
       ? brightness : () => brightness || new Map();
     //: Material name -> the picture it wears, both lowercased.
     const materials = new Set(pictures.keys());
+    //: A lowered material name -> how the file actually spelled it.
+    const casing = new Map();
+    for (const name of materialNames || []) {
+      const low = String(name).toLowerCase();
+      if (!casing.has(low)) casing.set(low, name);
+    }
     const known = [];
     for (const skin of skins) {
       for (const name of skin.named) {
@@ -7864,6 +8256,17 @@ const FbxSkins = (function () {
        * for the same reason the chip is: a slot name is what Content Manager
        * opened at rather than anything the car said about itself. */
       if (!named.length) named = slotMaterials(skin.colours, materials);
+      /* And whether what got settled on reads like the car's paint at all —
+       * see `paintCorrection`. Corrected in place rather than only noted:
+       * this is the viewer, and a car whose config points its paint at its
+       * own wheel shading should not draw pale for it when the material it
+       * plainly meant sits right there. `paintSuspect` says so regardless of
+       * whether a correction was found, so the car can too. */
+      if (named.length && named.every(suspectPaint)) {
+        const corrected = paintCorrection(named, materials, casing);
+        skin.paintSuspect = { stated: named, corrected };
+        if (corrected) named = corrected;
+      }
       skin.settled = named;
       /* A skin's own reading of how bright its paint is, over the car's.
        * Both are the same setting in the same shape of section — one written
@@ -7911,7 +8314,7 @@ const FbxSkins = (function () {
 
   return { group, read, settle, pair, stated, unset, skinOf, rgbHex, paintMaterials, paintColour,
     paintColours, configColours, chipColour, fromChip, paintBrightness,
-    materialFinish, carReplacements, slotMaterials };
+    materialFinish, carReplacements, slotMaterials, suspectPaint, paintCorrection };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = FbxSkins;
@@ -9652,13 +10055,25 @@ const FbxAnalyze = (function () {
   const TEXTURE_SLOTS = [
     ['baseColor', /^(diffuse|diffusecolor|basecolor|base_color|texmapdiffuse|color)$/i],
     ['normal', /^(normal|normalmap|normal_map|normalcamera|bump|bumpmap|texmapbump|texmapnormal)$/i],
-    ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum)$/i],
+    ['emissive', /^(emissive|emissivecolor|emission|emissioncolor|selfillumcolor|texmapselfillum|txemissive)$/i],
     ['occlusion', /^(occlusion|occlusiontexture|ambientocclusion|ambient_occlusion|texmapao)$/i],
     ['metallicRoughness', /^(metallicroughness|metallic_roughness|metalroughness)$/i],
     ['detail', /^(txdetail|detail|detailmap|detailtexture)$/i],
     // The shape that goes with that grain. A game spells it one way and
     // keeps it in a slot of its own; nothing else writes one at all.
     ['detailNormal', /^(txnormaldetail|detailnormal|detailnormalmap)$/i],
+    /* The game's own per-texel finish, which is not a metallic-roughness map
+     * however much it looks like one: its channels drive a Blinn-Phong
+     * highlight rather than a PBR one, so read as `metallicRoughness` it is a
+     * map taken from the wrong end. It gets a slot of its own instead.
+     *
+     * 201 of the 528 materials across the cars to hand bind one — every
+     * `ksPerPixelMultiMap`, which is what a car's body wears — and with no
+     * pattern here it matched nothing, never reached the palette and never
+     * reached an export either. It was the largest single thing a car lost on
+     * the way through. Accepted under the game's name and under this one, so
+     * that a file written here reads back as what it was. */
+    ['acMaps', /^(txmaps|acmaps)$/i],
   ];
 
   /**
@@ -10945,17 +11360,46 @@ const FbxGltf = (function () {
    * whether the base colour image carries an alpha channel. A bare number is
    * taken as the base colour index, which is what this used to take.
    */
-  function material(entry, slots) {
+  function material(entry, slots, acShaders) {
     const at = typeof slots === 'number' ? { baseColor: slots } : (slots || {});
-    const metallic = typeof entry.metallic === 'number'
-      ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
+    /* Which reading of the surface is being written: the game's own, or the
+     * PBR approximation derived from it.
+     *
+     * A kn5 states no metalness, and the reader infers one from how much the
+     * surface reflects facing you. That inference is what the switch turns
+     * off — and with it off there is no conductor and no split, so the base
+     * colour is the whole of the light the surface takes and the metalness is
+     * nought.
+     *
+     * What does *not* change either way is the core staying inside what a
+     * reader is entitled to expect: the reflectance below is still held at the
+     * 4% a dielectric has, and the emissive still inside the unit range with
+     * its strength in an extension. Keeping the game's own numbers was never
+     * an argument for writing a file that renders wrong everywhere else — they
+     * go in `extras`, where the number that was actually stated already is. */
+    const game = acShaders && entry.ac ? entry.ac : null;
+    const metallic = game ? 0
+      : (typeof entry.metallic === 'number'
+        ? Math.min(Math.max(entry.metallic, 0), 1) : 0);
     const colour = entry.colour || [0.8, 0.8, 0.8];
-    const specular = entry.specular || [0.04, 0.04, 0.04];
+    const specular = game ? [game.facing, game.facing, game.facing]
+      : (entry.specular || [0.04, 0.04, 0.04]);
     const opacity = typeof entry.opacity === 'number' ? entry.opacity : 1;
     // Our palette splits a metal's colour between diffuse and reflectance;
     // glTF puts the whole thing in the base colour and flags it as metal.
-    const base = metallic >= 0.999
-      ? specular : colour.map((c) => Math.min(c / Math.max(1 - metallic, 1e-3), 1));
+    /* The split undone, rather than what it produced thrown away: a skin's
+     * paint and a colour set by hand have already multiplied into `colour`, so
+     * writing the file's own weight instead would unpaint every car exported
+     * with the switch on. Where the split took the whole of the diffuse there
+     * is nothing left to undo, and the file's own weight is what it was. */
+    const split = typeof entry.metallic === 'number'
+      ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
+    const unsplit = () => (split >= 0.999
+      ? [game.weight, game.weight, game.weight]
+      : colour.map((c) => Math.min(c / Math.max(1 - split, 1e-3), 1)));
+    const base = game ? unsplit()
+      : (metallic >= 0.999
+        ? specular : colour.map((c) => Math.min(c / Math.max(1 - metallic, 1e-3), 1)));
 
     const out = {
       name: entry.name || 'material',
@@ -11038,6 +11482,10 @@ const FbxGltf = (function () {
      */
     const extras = {};
     if (entry.shader) extras.shader = entry.shader;
+    /* Which of the two readings the core above holds, so that reading this
+     * file back takes the right one as the authority rather than guessing from
+     * the numbers. Written only where there was a choice to make. */
+    if (entry.ac) extras.shaderModel = game ? 'ac' : 'pbr';
     if (entry.tintTexture) extras.tintsTexture = true;
     /* The reflectance as it was read, beside the capped one the extension
      * carries. `KHR_materials_specular` is held at the 4% a dielectric has —
@@ -11056,6 +11504,11 @@ const FbxGltf = (function () {
     if (entry.additive) extras.additive = true;
     // The grain's own relief, which glTF has no second normal slot for.
     if (at.detailNormal >= 0) extras.detailNormalTexture = { index: at.detailNormal };
+    /* And the game's own per-texel finish. Deliberately not written as
+     * `metallicRoughnessTexture`: its channels drive a Blinn-Phong highlight
+     * and not a PBR one, and put in that slot every panel that wears it comes
+     * out with a metalness and a roughness nobody wrote. */
+    if (at.acMaps >= 0) extras.acMapsTexture = { index: at.acMaps };
     if (entry.stated && Object.keys(entry.stated).length) extras.stated = entry.stated;
     if (Object.keys(extras).length) out.extras = extras;
     return out;
@@ -11191,12 +11644,13 @@ const FbxGltf = (function () {
       return index;
     };
 
-    /* The maps carried across. `detailNormal` has no slot of its own in
-     * glTF and is written all the same, named from `extras` — a reader that
-     * does not know it sees an image nothing points at, which is a great
-     * deal better than a grain with no shape. */
+    /* The maps carried across. `detailNormal` and `acMaps` have no slot of
+     * their own in glTF and are written all the same, named from `extras` — a
+     * reader that does not know them sees an image nothing points at, which is
+     * a great deal better than a grain with no shape and a car body with no
+     * per-texel finish at all. */
     const SLOTS = new Set(['normal', 'occlusion', 'emissive', 'metallicRoughness',
-      'detailNormal']);
+      'detailNormal', 'acMaps']);
 
     /** Every map a material wears, written and named by index. */
     const slotsFor = (entry) => {
@@ -11227,7 +11681,8 @@ const FbxGltf = (function () {
       const key = `${entry.name}|${textured ? 'uv' : 'flat'}`;
       if (materialIndex.has(key)) return materialIndex.get(key);
       const index = json.materials.length;
-      json.materials.push(material(entry, textured ? slotsFor(entry) : null));
+      json.materials.push(material(entry, textured ? slotsFor(entry) : null,
+        scene.acShaders === true));
       materialIndex.set(key, index);
       return index;
     };
@@ -11637,14 +12092,39 @@ const FbxOut = (function () {
    * so a reader that understands it can put the two back together and one
    * that does not still sees a plausible surface.
    */
-  function materialRecord(entry, build) {
-    const colour = entry.colour || [0.8, 0.8, 0.8];
-    const specular = entry.specular || [0.04, 0.04, 0.04];
+  function materialRecord(entry, build, acShaders) {
+    /* Which reading of the surface is being written: the game's own, or the
+     * PBR approximation derived from it.
+     *
+     * This is the one place the two can differ freely. FBX has no fixed set of
+     * material properties, so the game's own numbers go in as they stand —
+     * uncapped, unsplit, with no metalness inferred — and a reader that wants
+     * the approximation can derive the same one this tool does from the same
+     * parameters, which are all written below anyway. glTF has to keep a core
+     * a stranger can render and holds its reflectance at the 4% a dielectric
+     * has; here there is nothing to hold it under. */
+    const game = acShaders && entry.ac ? entry.ac : null;
+    const painted = entry.colour || [0.8, 0.8, 0.8];
+    /* The split undone, rather than what it produced thrown away: a skin's
+     * paint and a colour set by hand have already multiplied into `colour`, so
+     * writing the file's own weight instead would unpaint every car exported
+     * with the switch on. Where the split took the whole of the diffuse there
+     * is nothing left to undo, and the file's own weight is what it was. */
+    const split = typeof entry.metallic === 'number'
+      ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
+    const colour = !game ? painted
+      : (split >= 0.999 ? [game.weight, game.weight, game.weight]
+        : painted.map((c) => Math.min(c / Math.max(1 - split, 1e-3), 1)));
+    const specular = game ? [game.facing, game.facing, game.facing]
+      : (entry.specular || [0.04, 0.04, 0.04]);
     const roughness = typeof entry.roughness === 'number' ? entry.roughness : 0.5;
     const props = [
       p70('DiffuseColor', 'Color', ...colour.map(D)),
       p70('SpecularColor', 'Color', ...specular.map(D)),
-      p70('Metallic', 'Number', D(typeof entry.metallic === 'number' ? entry.metallic : 0)),
+      // No conductor where the game states none, which is every kn5 material:
+      // the metalness is this tool's inference and the switch turns it off.
+      p70('Metallic', 'Number',
+        D(game ? 0 : (typeof entry.metallic === 'number' ? entry.metallic : 0))),
 /* FBX states a Phong exponent, not a roughness. The two meet through
        * the microfacet alpha — `alpha = roughness squared` and
        * `alpha = sqrt(2 / (n + 2))` — so the exponent is two over the fourth
@@ -11799,7 +12279,7 @@ const FbxOut = (function () {
     const worn = new Set();
     const materialFor = (entry) => {
       if (materialUid.has(entry.name)) return materialUid.get(entry.name);
-      const uid = materialRecord(entry, make);
+      const uid = materialRecord(entry, make, scene.acShaders === true);
       materialUid.set(entry.name, uid);
       // And the maps it wears, hung off it by the property each one drives.
       const wearing = [];
@@ -12907,7 +13387,7 @@ const FbxViewer = (function () {
    * busiest of the 135 cars to hand states sixteen. */
   const MAX_LIGHTS = 24;
 
-  const PALETTE_ROWS = 9;
+  const PALETTE_ROWS = 10;
   const SCHLICK_POWER = 5;
 
   /* The three-quarter view a model opens on. */
@@ -13329,6 +13809,11 @@ ${ENVIRONMENT}
   uniform int uLightsOn;
   uniform mat4 uModel;               // the same one the vertex stage uses
   uniform int uUseTextures;
+  /* Whether a game's material is shaded as the game states it or as the PBR
+   * approximation derived from it. Row 9 carries both answers, so this is a
+   * uniform rather than a rebuild: the palette is not re-derived, regrouped or
+   * re-sorted, and nothing crosses between the opaque and the blended halves. */
+  uniform int uShaders;
   uniform mat3 uViewToWorld;  // the environment stays put as the camera orbits
   uniform int uPass;          // 0 opaque, 1 blended
   uniform float uOpaqueLimit;
@@ -13550,6 +14035,43 @@ ${SHADOW_LOOKUP}
       albedo = entry.rgb;
       f0 = finish.rgb;
       roughness = clamp(finish.a, 0.05, 1.0);
+      /* Or the same surface as the game states it, where the switch is on and
+       * this material came from a file that states one.
+       *
+       * A kn5 states no metalness. The reader infers one from how much the
+       * surface reflects facing you — no dielectric reflects more than about
+       * 17% and no conductor less than half — and splits the colour between a
+       * diffuse and a conductor's reflectance on the strength of it. That
+       * inference is the approximation this switch turns off: with it off
+       * there is no conductor and no split, the albedo is the whole of the
+       * light the surface takes, and the reflection is the Fresnel the file
+       * stated rather than one held under what a dielectric is allowed.
+       *
+       * Substituted here rather than at the end because what follows is the
+       * picture, the grain and the lens multiplying into the albedo, and the
+       * game reads its picture through this number exactly as it does the
+       * other. */
+      vec4 game = texelFetch(uPalette, ivec2(slot, 9), 0);
+      if (uShaders == 1 && game.a > 0.5) {
+        /* The split undone, rather than what it produced thrown away.
+         *
+         * A skin's paint and a colour set by hand have already multiplied into
+         * this albedo — the paint is the file's own weight times what the skin
+         * says, which is how a car wears a livery — so substituting the file's
+         * weight here would unpaint every car the moment the switch went on.
+         * Dividing the metalness back out keeps both, and on the great
+         * majority of materials the metalness is nought and this changes
+         * nothing at all: what the switch does there is the reflection alone.
+         *
+         * Where the split took the whole of the diffuse — a material read as a
+         * pure conductor — there is nothing left to divide back out, and the
+         * file's own weight is what it was. A paint is already lost on such a
+         * material before this, since it was multiplied by the same nought. */
+        float conductor = clamp(extra.a, 0.0, 1.0);
+        albedo = conductor >= 0.999 ? vec3(game.r)
+          : min(albedo / max(1.0 - conductor, 1e-3), vec3(1.0));
+        f0 = vec3(game.g);
+      }
       // The alpha of the first row carries this material's texture layer,
       // offset by one so that zero means "no texture".
       int layer = int(entry.a + 0.5) - 1;
@@ -14101,6 +14623,7 @@ ${SHADOW_LOOKUP}
         lightCount: gl.getUniformLocation(program, 'uLightCount'),
         lightsOn: gl.getUniformLocation(program, 'uLightsOn'),
         useTextures: gl.getUniformLocation(program, 'uUseTextures'),
+        shaders: gl.getUniformLocation(program, 'uShaders'),
         viewToWorld: gl.getUniformLocation(program, 'uViewToWorld'),
         pass: gl.getUniformLocation(program, 'uPass'),
         opaqueLimit: gl.getUniformLocation(program, 'uOpaqueLimit'),
@@ -14316,6 +14839,10 @@ ${SHADOW_LOOKUP}
       this.lightSources = [];
       this.lightCount = 0;
       this.lightsOn = false;
+      /* Whether a game's own material model is used where a file states one.
+       * Off until something says otherwise, so a viewer nobody has told
+       * anything draws exactly what it drew before this existed. */
+      this.acShaders = false;
       this.hasTransparency = false;
       this.transparentMaterials = 0;
       this.highlight = -1;
@@ -14394,6 +14921,19 @@ ${SHADOW_LOOKUP}
     /** Whether the car's lights are on. */
     setLightsOn(on) {
       this.lightsOn = on !== false;
+      this.dirty = true;
+    }
+
+    /**
+     * Whether a game's own material model is used, where a file states one.
+     *
+     * Costs a uniform and a redraw. The palette already carries both answers,
+     * so nothing here is re-derived, regrouped, re-sorted or re-uploaded — and
+     * no material crosses between the opaque and the blended halves, which is
+     * the one change that would cost a walk over every triangle.
+     */
+    setAcShaders(on) {
+      this.acShaders = on === true;
       this.dirty = true;
     }
     setParts(parts) {
@@ -14619,6 +15159,25 @@ ${SHADOW_LOOKUP}
         const glowLayer = Number.isInteger(material.emissiveLayer)
           ? material.emissiveLayer : -1;
         data[(width * 7 + i) * 4 + 3] = Math.max(0, glowLayer + 1);
+        /* And the same surface as the game states it, beside the reading
+         * derived from it in rows 0 and 1.
+         *
+         * Both are carried so the switch between them is a uniform: a palette
+         * re-derived per click would be regrouped, re-sorted and re-uploaded,
+         * and a material crossing between the opaque and the blended halves
+         * would take half a million triangles and the sun's view with it.
+         *
+         * The fourth channel is whether there is a game's material here at
+         * all. A `.blend`, an `.obj` and an `.fbx` state none of this, and a
+         * switch thrown over one of those has nothing to switch to — so it
+         * reads nought and the derived surface stands whichever way it is
+         * set. */
+        const ac = material.ac;
+        data[(width * 9 + i) * 4] = ac && typeof ac.weight === 'number'
+          ? Math.min(1, Math.max(0, ac.weight)) : 0;
+        data[(width * 9 + i) * 4 + 1] = ac && typeof ac.facing === 'number'
+          ? Math.min(1, Math.max(0, ac.facing)) : 0;
+        data[(width * 9 + i) * 4 + 3] = ac ? 1 : 0;
         if (opacity < OPAQUE || mode === 1) {
           this.hasTransparency = true;
           this.transparentMaterials++;
@@ -15407,6 +15966,7 @@ ${SHADOW_LOOKUP}
       gl.uniform1i(this.uniforms.normalDetail, 9);
       gl.uniform1i(this.uniforms.lightCount, this.lightsOn ? this.lightCount : 0);
       gl.uniform1i(this.uniforms.lightsOn, this.lightsOn ? 1 : 0);
+      gl.uniform1i(this.uniforms.shaders, this.acShaders ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
       // Any kind of map counts: a material can carry a bump or a metallic-roughness
       // map and no picture at all, and turning textures off has to turn the
@@ -15501,6 +16061,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     groundToggle: $('ground-toggle'),
     lightsToggle: $('lights-toggle'),
     lightsLabel: $('lights-label'),
+    shadersToggle: $('shaders-toggle'),
+    shadersLabel: $('shaders-label'),
     textureToggle: $('texture-toggle'),
     resetView: $('reset-view'),
     exportGltf: $('export-gltf'),
@@ -17409,6 +17971,57 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     }
   }
 
+  /* Whether a game's own material model is used, remembered per file the way
+   * the up axis, the mirrors and the heading are.
+   *
+   * Per file rather than globally, because it is a fact about the file: a car
+   * reopened after being looked at the other way should come back the way it
+   * was left, and a `.blend` opened after a car should not inherit a switch
+   * that means nothing to it.
+   *
+   * On by default where the file states a game's material at all — the whole
+   * point of the switch is that the game's own reading is the better one for a
+   * car, and off is the escape hatch and the comparison. */
+  const shadersKey = (name) => `fbxtool:shaders:${name || 'unnamed'}`;
+
+  function rememberShaders() {
+    if (!currentDoc) return;
+    try {
+      window.localStorage.setItem(shadersKey(currentDoc.fileName),
+        dom.shadersToggle.checked ? 'on' : 'off');
+    } catch (error) {
+      /* Storage can be unavailable; the choice still holds for the session. */
+    }
+  }
+
+  function recallShaders(fileName) {
+    try {
+      return window.localStorage.getItem(shadersKey(fileName)) !== 'off';
+    } catch (error) {
+      return true;
+    }
+  }
+
+  /**
+   * Whether the palette holds a game's material, and the switch that says so.
+   *
+   * Hidden for every file that states none — a `.blend`, an `.obj`, an `.fbx`
+   * that came from neither — since a switch with nothing to switch to is worse
+   * than no switch. Unticked with it, so that what the exporter reads is what
+   * the toolbar shows.
+   */
+  function applyShaders(palette) {
+    const has = (palette || []).some((entry) => entry && entry.ac);
+    dom.shadersLabel.hidden = !has;
+    if (!has) dom.shadersToggle.checked = false;
+    else if (currentDoc) dom.shadersToggle.checked = recallShaders(currentDoc.fileName);
+    viewer.setAcShaders(has && dom.shadersToggle.checked);
+    return has;
+  }
+
+  /** Whether a car is being written as the game states it rather than derived. */
+  const shadersOn = () => !dom.shadersLabel.hidden && dom.shadersToggle.checked;
+
   /** Put the heading on the camera and on the button that says so. */
   function applyHeading() {
     viewer.setHeading(heading);
@@ -17577,6 +18190,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     // Settings first, grouping second: a renamed material has to be grouped
     // and sorted under the name it now goes by.
     FbxPalette.apply(palette, materialOverrides);
+    // Before the palette is uploaded, so the first frame is drawn the way the
+    // file will be written.
+    applyShaders(palette);
     slotTriangles = trianglesPerSlot(mesh, palette.length);
     materialGroups = FbxPalette.groups(palette, slotTriangles);
     viewer.setPalette(palette);
@@ -17687,7 +18303,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       if (!file) continue;
       if (!entry.unfinished) {
         entry.unfinished = { roughness: file.roughness, metallic: file.metallic || 0,
-          specular: file.specular.slice() };
+          specular: file.specular.slice(), ac: entry.ac };
       }
       const named = String(file.name || '').toLowerCase();
       const said = { ...(said0.get(named) || {}), ...(skin.get(named) || {}) };
@@ -17696,8 +18312,24 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       if (typeof said.reflectance !== 'number' && typeof said.metalness !== 'number') {
         file.specular = entry.unfinished.specular.slice();
         file.metallic = entry.unfinished.metallic;
+        // Nothing spoke for this one, so the game's own reading is back on
+        // offer — a skin whose config named it may have been taken off again.
+        entry.ac = entry.unfinished.ac;
         continue;
       }
+      /* And the switch has nothing to offer here.
+       *
+       * What it turns off is *this tool's* inference — a metalness guessed
+       * from how much a surface reflects facing you, because a `.kn5` states
+       * none. A config that names the surface is not that guess: it is the
+       * car's own files saying outright that this material is polished metal
+       * at this reflectance, which is as much the game's own statement as
+       * `fresnelC` is and a good deal less ambiguous.
+       *
+       * So a material the config has spoken for keeps what the config said
+       * whichever way the switch is thrown. Left in, the switch flattened
+       * every chrome a car declared back to a dielectric. */
+      entry.ac = null;
       const metal = typeof said.metalness === 'number'
         ? said.metalness : entry.unfinished.metallic;
       // A dielectric reflects four per cent facing you unless the file says
@@ -18963,6 +19595,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         textures,
         upAxis: dom.upSelect.value,
         flips: flips.slice(),
+        /* And which reading of a game's material is the one being written,
+         * which is the same switch the viewer is drawing by: what you are
+         * looking at is what comes out. */
+        acShaders: shadersOn(),
       };
       let stats;
       if (format === 'fbx') {
@@ -19016,6 +19652,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       }
       const missingMaps = unwrittenMaps(images, textures);
       stats.format = format;
+      stats.acShaders = shadersOn();
       stats.dropped = currentGeometry ? null : reportDropped(stats, missingMaps);
       lastExport = stats;
       const instanced = stats.triangles > stats.stored
@@ -19027,6 +19664,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         + `${(stats.bytes / 1048576).toFixed(1)} MiB`
         + `${stats.images ? ` with ${stats.images} image(s)` : ''} · `
         + `${(performance.now() - started).toFixed(0)} ms`
+        + (stats.acShaders === undefined ? ''
+          : ` · ${stats.acShaders ? "the game's own materials"
+            : 'materials approximated'}`)
         + describeDropped(stats.dropped), 'ok');
     } catch (error) {
       console.error(error);
@@ -19204,6 +19844,34 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     }
     return out;
   }
+  /**
+   * The surface as the game itself states it, for a material that came from a
+   * `.kn5`, or null for one that did not.
+   *
+   * Two numbers are the whole of it. `weight` is how much of the light the
+   * surface takes — `ksAmbient` and `ksDiffuse` against the pair most
+   * materials state, which is what the picture is read through. `facing` is
+   * what it reflects head-on — `fresnelC` held under `fresnelMaxLevel`, which
+   * is what the Schlick term is built on.
+   *
+   * Neither is split between a diffuse and a conductor, because the game does
+   * not split them: it shades a car with a Blinn-Phong highlight and a Fresnel
+   * over it, and chrome is a material whose reflection an artist set high
+   * rather than a metal. The split is this tool's reading of that, and it is
+   * what the switch turns off.
+   *
+   * A file with no shader name is not a game's material and gets nothing here
+   * — its `fresnelC` would be a parameter it never wrote.
+   */
+  function acSurface(props) {
+    if (typeof props.ShaderName !== 'string' || !props.ShaderName) return null;
+    const scalar = FbxAcShaders.statedScalar(props);
+    return {
+      weight: FbxAcShaders.lightWeight(scalar),
+      facing: FbxAcShaders.reflectance(scalar),
+    };
+  }
+
   /** One palette entry: how a material shades, and the image it wears. */
   function materialEntry(material, analysis, index) {
     const info = analysis || currentAnalysis;
@@ -19297,6 +19965,22 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
        * slot for, its own shading model among them. */
       shader: typeof props.ShaderName === 'string' ? props.ShaderName : null,
       stated: statedProperties(props),
+      /* And the same surface as the game states it, beside the one derived
+       * from it above.
+       *
+       * Both are carried so the switch between them costs a uniform rather
+       * than a rebuild: a palette re-derived per click would have to be
+       * regrouped, re-sorted and re-uploaded, and a material crossing between
+       * the opaque and the blended halves would re-sort half a million
+       * triangles and the sun's view with them.
+       *
+       * What differs is the metalness. A kn5 states none, and the reader
+       * infers one from how much the surface reflects facing you — which is
+       * the approximation this switch exists to be able to turn off. With it
+       * off there is no conductor and no split: the albedo is the whole of the
+       * light the surface takes, and the reflection is the Fresnel the file
+       * stated, uncapped by what a dielectric is allowed. */
+      ac: acSurface(props),
       // The maps this tool does not show, kept as they were read.
       textures: rest,
       layer: -1,
@@ -19883,7 +20567,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
     for (const skin of suppliedSkins.values()) {
       read.push(await FbxSkins.read(skin, { worn }));
     }
-    FbxSkins.settle(read, { pictures, fallback: carPaintNames,
+    FbxSkins.settle(read, { pictures, fallback: carPaintNames, materialNames: named('Material'),
       brightness: (skin) => merged((text) => FbxSkins.paintBrightness(text, skin)) });
     /* And, for the ones still stating no colour, the chip they carry a picture
      * of — which is the only thing left saying what colour they are. Settled
@@ -19918,6 +20602,21 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
           + 'dropped says which material it is — usually the car\'s own '
           + 'extension/ext_config.ini. Bring that with the car and the colour '
           + 'lands on the body.';
+      } else if (skin.paintSuspect) {
+        const { stated, corrected } = skin.paintSuspect;
+        if (corrected) {
+          option.textContent += ' · paint corrected';
+          option.title = `The car's own config points its paint at ${stated.join(', ')}, `
+            + 'which reads like rim, brake, glass or cabin shading rather than the '
+            + `body, so its colour was put on ${corrected.join(', ')} instead — the `
+            + 'car\'s own material that reads like paint.';
+        } else {
+          option.textContent += ' · paint may be misplaced';
+          option.title = `The car's own config points its paint at ${stated.join(', ')}, `
+            + 'which reads like rim, brake, glass or cabin shading rather than the '
+            + 'body, and nothing else on the car reads like paint clearly enough to '
+            + 'use instead.';
+        }
       }
       dom.skinSelect.appendChild(option);
     }
@@ -19945,10 +20644,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       ? `${wearing.name}: ${wearing.replaces} texture(s) over the top of the car`
         + (wearing.paints.length
           ? `, and its paint on ${wearing.paints.map((p) => p.material).join(', ')}`
+            + (wearing.paintSuspect && wearing.paintSuspect.corrected
+              ? ` — corrected from ${wearing.paintSuspect.stated.join(', ')}, which `
+                + 'reads like rim, brake, glass or cabin shading'
+              : '')
           : (wearing.paintLost
             ? ', but its paint stayed off — no file among those dropped says '
               + 'which material it is (usually the car\'s extension/ext_config.ini)'
-            : ''))
+            : (wearing.paintSuspect
+              ? `, but its stated material — ${wearing.paintSuspect.stated.join(', ')} — `
+                + 'reads like rim, brake, glass or cabin shading rather than paint, and '
+                + 'nothing else on the car reads like paint clearly enough to use instead'
+              : '')))
       : 'The car as the file has it.');
     return textures;
   }
@@ -20527,6 +21234,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       () => viewer.setShowGround(dom.groundToggle.checked));
     dom.lightsToggle.addEventListener('change',
       () => viewer.setLightsOn(dom.lightsToggle.checked));
+    dom.shadersToggle.addEventListener('change', () => {
+      viewer.setAcShaders(dom.shadersToggle.checked);
+      rememberShaders();
+    });
     dom.textureToggle.addEventListener('change',
       () => viewer.setShowTextures(dom.textureToggle.checked));
     dom.resetView.addEventListener('click', () => viewer.resetView());

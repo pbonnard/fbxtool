@@ -80,6 +80,14 @@
            they are. Hidden for everything that did not. -->
       <label class="check" id="lights-label" hidden><input id="lights-toggle"
         type="checkbox"> lights</label>
+      <!-- The game's own material model, for a file that states one. Hidden
+           for every file that does not, since there is nothing to switch to.
+           It settles the export as well as the view: a car written out while
+           it is on keeps what the game said, and written out while it is off
+           becomes the PBR approximation this tool derives. -->
+      <label class="check" id="shaders-label" hidden
+        title="Shade and export Assetto Corsa materials by the game's own shaders — off draws and writes the PBR approximation instead"><input
+        id="shaders-toggle" type="checkbox"> shaders</label>
       <button id="reset-view" type="button">Reset view</button>
       <!-- Which spelling the export is written in. A .glb is one file and is
            what most things want; a .gltf beside a .bin is the same document

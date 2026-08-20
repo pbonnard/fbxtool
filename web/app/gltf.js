@@ -130,17 +130,46 @@ const FbxGltf = (function () {
    * whether the base colour image carries an alpha channel. A bare number is
    * taken as the base colour index, which is what this used to take.
    */
-  function material(entry, slots) {
+  function material(entry, slots, acShaders) {
     const at = typeof slots === 'number' ? { baseColor: slots } : (slots || {});
-    const metallic = typeof entry.metallic === 'number'
-      ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
+    /* Which reading of the surface is being written: the game's own, or the
+     * PBR approximation derived from it.
+     *
+     * A kn5 states no metalness, and the reader infers one from how much the
+     * surface reflects facing you. That inference is what the switch turns
+     * off — and with it off there is no conductor and no split, so the base
+     * colour is the whole of the light the surface takes and the metalness is
+     * nought.
+     *
+     * What does *not* change either way is the core staying inside what a
+     * reader is entitled to expect: the reflectance below is still held at the
+     * 4% a dielectric has, and the emissive still inside the unit range with
+     * its strength in an extension. Keeping the game's own numbers was never
+     * an argument for writing a file that renders wrong everywhere else — they
+     * go in `extras`, where the number that was actually stated already is. */
+    const game = acShaders && entry.ac ? entry.ac : null;
+    const metallic = game ? 0
+      : (typeof entry.metallic === 'number'
+        ? Math.min(Math.max(entry.metallic, 0), 1) : 0);
     const colour = entry.colour || [0.8, 0.8, 0.8];
-    const specular = entry.specular || [0.04, 0.04, 0.04];
+    const specular = game ? [game.facing, game.facing, game.facing]
+      : (entry.specular || [0.04, 0.04, 0.04]);
     const opacity = typeof entry.opacity === 'number' ? entry.opacity : 1;
     // Our palette splits a metal's colour between diffuse and reflectance;
     // glTF puts the whole thing in the base colour and flags it as metal.
-    const base = metallic >= 0.999
-      ? specular : colour.map((c) => Math.min(c / Math.max(1 - metallic, 1e-3), 1));
+    /* The split undone, rather than what it produced thrown away: a skin's
+     * paint and a colour set by hand have already multiplied into `colour`, so
+     * writing the file's own weight instead would unpaint every car exported
+     * with the switch on. Where the split took the whole of the diffuse there
+     * is nothing left to undo, and the file's own weight is what it was. */
+    const split = typeof entry.metallic === 'number'
+      ? Math.min(Math.max(entry.metallic, 0), 1) : 0;
+    const unsplit = () => (split >= 0.999
+      ? [game.weight, game.weight, game.weight]
+      : colour.map((c) => Math.min(c / Math.max(1 - split, 1e-3), 1)));
+    const base = game ? unsplit()
+      : (metallic >= 0.999
+        ? specular : colour.map((c) => Math.min(c / Math.max(1 - metallic, 1e-3), 1)));
 
     const out = {
       name: entry.name || 'material',
@@ -223,6 +252,10 @@ const FbxGltf = (function () {
      */
     const extras = {};
     if (entry.shader) extras.shader = entry.shader;
+    /* Which of the two readings the core above holds, so that reading this
+     * file back takes the right one as the authority rather than guessing from
+     * the numbers. Written only where there was a choice to make. */
+    if (entry.ac) extras.shaderModel = game ? 'ac' : 'pbr';
     if (entry.tintTexture) extras.tintsTexture = true;
     /* The reflectance as it was read, beside the capped one the extension
      * carries. `KHR_materials_specular` is held at the 4% a dielectric has —
@@ -241,6 +274,11 @@ const FbxGltf = (function () {
     if (entry.additive) extras.additive = true;
     // The grain's own relief, which glTF has no second normal slot for.
     if (at.detailNormal >= 0) extras.detailNormalTexture = { index: at.detailNormal };
+    /* And the game's own per-texel finish. Deliberately not written as
+     * `metallicRoughnessTexture`: its channels drive a Blinn-Phong highlight
+     * and not a PBR one, and put in that slot every panel that wears it comes
+     * out with a metalness and a roughness nobody wrote. */
+    if (at.acMaps >= 0) extras.acMapsTexture = { index: at.acMaps };
     if (entry.stated && Object.keys(entry.stated).length) extras.stated = entry.stated;
     if (Object.keys(extras).length) out.extras = extras;
     return out;
@@ -376,12 +414,13 @@ const FbxGltf = (function () {
       return index;
     };
 
-    /* The maps carried across. `detailNormal` has no slot of its own in
-     * glTF and is written all the same, named from `extras` — a reader that
-     * does not know it sees an image nothing points at, which is a great
-     * deal better than a grain with no shape. */
+    /* The maps carried across. `detailNormal` and `acMaps` have no slot of
+     * their own in glTF and are written all the same, named from `extras` — a
+     * reader that does not know them sees an image nothing points at, which is
+     * a great deal better than a grain with no shape and a car body with no
+     * per-texel finish at all. */
     const SLOTS = new Set(['normal', 'occlusion', 'emissive', 'metallicRoughness',
-      'detailNormal']);
+      'detailNormal', 'acMaps']);
 
     /** Every map a material wears, written and named by index. */
     const slotsFor = (entry) => {
@@ -412,7 +451,8 @@ const FbxGltf = (function () {
       const key = `${entry.name}|${textured ? 'uv' : 'flat'}`;
       if (materialIndex.has(key)) return materialIndex.get(key);
       const index = json.materials.length;
-      json.materials.push(material(entry, textured ? slotsFor(entry) : null));
+      json.materials.push(material(entry, textured ? slotsFor(entry) : null,
+        scene.acShaders === true));
       materialIndex.set(key, index);
       return index;
     };
