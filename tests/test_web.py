@@ -1905,6 +1905,76 @@ def test_what_a_cars_config_says_its_surfaces_are_made_of(built, tmp_path):
 
 @needs_clang
 @needs_node
+def test_a_flat_detail_map_a_skin_brings_is_the_paint(built, tmp_path):
+    """A detail map that is one colour from corner to corner is no grain, and
+    a third of the ones in the cars to hand are that — the slot filled in and
+    never authored. Drawn as grains the saturated ones repaint whatever wears
+    them, so they are refused.
+
+    Except that a BMW Z3 states its paint in one and in nothing else: no
+    `cm_skin.json`, and seven `[Material_CarPaint*]` sections that name their
+    skins and state no colour. Its `body` is one grey ambient-occlusion sheet
+    all thirteen skins share byte for byte, and what changes between them is
+    the `metal_detail.dds` each lays over it — six of which are a single
+    repeated block, pure red for Hellrot and black for Schwarz. Refused with
+    the rest, all six draw the white of the sheet underneath.
+
+    So where a flat picture came from is what says what it is. The car's own
+    is the same picture under every skin it has; one the worn skin carries is
+    the one thing that changes when the skin does.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    car = tmp_path / "car"
+    for name in ("Rot", "Weiss"):
+        (car / "skins" / name).mkdir(parents=True)
+    # The sheet underneath: a panel map with the colour left out of it, which
+    # is what a car whose paint is stated elsewhere wears.
+    grey = fb.dds_bgra(4, 4, bytes([150, 150, 150, 255]) * 16)
+    # And the car's own detail map, flat and in a colour — the placeholder.
+    # Blue, so that drawing it says so unmistakably: neither the grey it must
+    # stay nor the red the skin brings.
+    blue = fb.dds_bgra(4, 4, bytes([255, 0, 0, 255]) * 16)
+    material = fb.kn5_material(
+        "body", "ksPerPixelMultiMap",
+        properties=(fb.kn5_property("fresnelC", 0.05)
+                    + fb.kn5_property("useDetail", 1.0)
+                    + fb.kn5_property("detailUVMultiplier", 1.0)),
+        property_count=3,
+        slots=(("txDiffuse", 0, "paint.dds"), ("txDetail", 3, "metal_detail.dds")))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(1.0)
+    (car / "car.kn5").write_bytes(fb.build_kn5(
+        6, textures=[("paint.dds", grey), ("metal_detail.dds", blue)],
+        materials=[material],
+        tree=fb.kn5_dummy("car", identity,
+                          fb.kn5_mesh("body", vertices, indices), 1)))
+
+    # One skin brings a flat map of its own, which is the whole of what it
+    # says and the whole of what tells it from the other.
+    (car / "skins" / "Rot" / "metal_detail.dds").write_bytes(
+        fb.dds_bgra(4, 4, bytes([0, 0, 255, 255]) * 16))
+    # And one brings the sheet back and nothing else, so the car's own flat
+    # blue is still all there is and is still not a paint.
+    (car / "skins" / "Weiss" / "paint.dds").write_bytes(grey)
+
+    result = _run(["node", str(WEB / "test" / "skingrain.js"), str(car)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
+
+@needs_clang
+@needs_node
 def test_a_car_wears_the_skin_it_is_given(built, tmp_path):
     """A `.kn5` holds the car unpainted: everything under `skins/<name>/`
     beside it replaces the texture of that name, and the skin's own two

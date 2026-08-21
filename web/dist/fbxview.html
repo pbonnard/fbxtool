@@ -20673,6 +20673,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   const wanted = (entry, slot) => !(entry.droppedMaps || []).includes(slot);
 
   /**
+   * Whether the skin that is on is what supplies a texture, rather than the
+   * car itself.
+   *
+   * The same question `decodeTexture` asks before it reaches for the embedded
+   * picture, asked here of a request that has not been decoded yet — a skin
+   * replaces the texture of a name and a material names one, so the answer is
+   * in the two names and needs neither picture.
+   */
+  const fromSkin = (request) => !!(wearing && request
+    && wearing.images.has(baseName(request.path || request.name)));
+
+  /**
    * Whether an image states a direction or a height.
    *
    * The same slot carries both. A tangent-space normal map is three channels
@@ -20727,15 +20739,19 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
    * differs from that shows. The colour a car was authored stays where it was,
    * and the grain and the cast of the picture arrive on top of it.
    *
-   * `null` for a picture that is one colour from corner to corner, which is
-   * not a grain at all: nothing about it differs from its own average, so
-   * there is nothing for it to say. A third of the detail maps in the 67 cars
-   * to hand are that — `NULL.dds`, `PURE_RED.dds`, a numbered `2.dds` — the
-   * slot filled in and never authored. Taken as a grain, the greys among them
-   * come out as the nothing they are, and the 55 that are a flat saturated
-   * colour repaint whatever wears them: a Jaguar Mk2 whose paint names a
-   * sixteen-pixel square of pure red draws red under every skin it has,
-   * liveries and previews notwithstanding.
+   * `flat` for a picture that is one colour from corner to corner, which as a
+   * grain is not a grain at all: nothing about it differs from its own
+   * average, so there is nothing for it to say. A third of the detail maps in
+   * the 67 cars to hand are that — `NULL.dds`, `PURE_RED.dds`, a numbered
+   * `2.dds` — the slot filled in and never authored. Taken as a grain, the
+   * greys among them come out as the nothing they are, and the 55 that are a
+   * flat saturated colour repaint whatever wears them: a Jaguar Mk2 whose
+   * paint names a sixteen-pixel square of pure red draws red under every skin
+   * it has, liveries and previews notwithstanding.
+   *
+   * Which is why the flag is separate from the number rather than standing in
+   * for it: whether a flat picture is a placeholder or the paint is not a
+   * question about the picture, and the caller is the one that can tell.
    */
   function detailScale(image, edge = 32) {
     try {
@@ -20765,13 +20781,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
         if (flat && (pixels[i] !== pixels[0] || pixels[i + 1] !== pixels[1]
           || pixels[i + 2] !== pixels[2])) flat = false;
       }
-      if (flat) return null;
       const mean = total / (pixels.length / 4);
       // A map that reads as nothing at all is left alone rather than dividing
       // by it: an alpha of zero comes back black through a canvas.
-      return mean > 0.02 ? 1 / mean : 1;
+      return { scale: mean > 0.02 ? 1 / mean : 1, flat };
     } catch (error) {
-      return 1;                       // unreadable pixels: take it as it comes
+      // unreadable pixels: take it as it comes, and as a grain
+      return { scale: 1, flat: false };
     }
   }
 
@@ -20804,6 +20820,23 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
   }
 
   async function resolveTextures(palette) {
+    /* The tiling each material states, put back before its grain is looked at
+     * again.
+     *
+     * A picture refused as no grain takes the tiling with it, since that is
+     * what the export asks before baking a grain into a picture. But this runs
+     * again every time a skin goes on or comes off, and a slot switched off
+     * last time is one the new picture would never be asked for — so a skin
+     * bringing the paint for a slot the car had filled with a placeholder
+     * would arrive too late to be looked at at all. What the file said is
+     * remembered once and restored each pass, and the refusal is made afresh
+     * against whichever picture is actually there. */
+    for (const material of palette) {
+      if (material.statedDetailTiling === undefined) {
+        material.statedDetailTiling = material.detailTiling;
+      }
+      material.detailTiling = material.statedDetailTiling;
+    }
     const base = await resolveLayer(palette,
       (m) => (wanted(m, 'baseColor') ? m.texture : null), 'layer');
     const finish = await resolveLayer(palette,
@@ -20844,16 +20877,36 @@ if (typeof module !== 'undefined' && module.exports) module.exports = FbxViewer;
       const layer = material.bumpLayer;
       material.bumpIsNormalMap = layer >= 0 ? kinds[layer] : false;
       material.bumpStrength = material.bumpIsNormalMap ? 1 : BUMP_RELIEF;
-      const scale = material.detailLayer >= 0 ? scales[material.detailLayer] : 1;
+      const read = material.detailLayer >= 0 ? scales[material.detailLayer] : null;
       /* A picture that turned out to be no grain is dropped rather than
        * multiplied in. The tiling goes with it, since that is what the export
        * asks before baking a grain into a picture — left set, a car would
-       * leave carrying the flat colour the viewer had just refused to draw. */
-      if (scale === null) {
+       * leave carrying the flat colour the viewer had just refused to draw.
+       *
+       * Unless the skin that is on brought it, in which case the flat colour
+       * is the paint and dropping it is what leaves the car white. A BMW Z3
+       * states its paint nowhere — no `cm_skin.json`, and seven
+       * `[Material_CarPaint*]` sections that name their skins and state no
+       * colour — because the colour is the detail map: `body` is a
+       * `ksPerPixelMultiMap` over one grey ambient-occlusion sheet every skin
+       * shares, and each skin lays its own `metal_detail.dds` over it. Six of
+       * the twelve are a single repeated block — pure red for Hellrot, black
+       * for Schwarz, #cdae29 for Dakargelb — and refused as placeholders all
+       * six draw the same white as the sheet underneath.
+       *
+       * So where a flat picture came from is what says what it is. The car's
+       * own is the slot filled in and never authored, and is the same picture
+       * under every skin it has — a Jaguar Mk2's sixteen-pixel square of pure
+       * red, which its four skins do not replace and three of which are pale
+       * green. One the worn skin carries is the one thing that changes when
+       * the skin does, which is the definition of the paint. */
+      const placeholder = read && read.flat
+        && !fromSkin(material.textures && material.textures.detail);
+      if (placeholder) {
         material.detailLayer = -1;
         material.detailTiling = 0;
       }
-      material.detailScale = scale === null ? 1 : scale;
+      material.detailScale = read ? read.scale : 1;
     }
     return {
       images: base.images,

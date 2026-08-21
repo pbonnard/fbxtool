@@ -162,7 +162,7 @@ everywhere.
 - What those channels are was settled by decoding them — `tools/maps_channels.js` over the 221 that could be read — rather than by what the name suggests. Red varies on 175 and sits at an arbitrary constant when it does not, which is a level; green is flat on 142 and 133 of those are flat at exactly 1, which is a multiplier's default; alpha is flat on 214 at exactly 1 or exactly 0, which is what the two block formats give a channel nobody wrote.
 - **`ksPerPixelNM_UVMult`** tiles its colour and its relief by the two multipliers it states apart — a median of 12.5 and 195 across the 32 materials that state them. A stated nought is a multiplier nobody set, not one set to nothing.
 - `ksAlphaRef` stated as nought read as the game's own 0.5: every alpha-tested material counted states nought, and nought cuts nothing out, so a grille taken at face value is a solid rectangle.
-- `txDetail` applied as a tiled grain, neutral at its own average.
+- `txDetail` applied as a tiled grain, neutral at its own average. A map that is one colour from corner to corner is no grain and is refused — a third of the 581 in the 67 cars to hand are that, and 55 are saturated enough to repaint whatever wears them — **unless the worn skin is what brought it**, in which case the flat colour is the paint: a BMW Z3 states its colour nowhere else, and its thirteen skins share one grey ambient-occlusion sheet and differ only in the `metal_detail.dds` each lays over it.
 - Meshes marked invisible and nodes marked inactive are read, counted, reported and not drawn; visibility descends.
 - Textures carried on the `Video` clip and shared between materials; textures a material names but the file lacks are listed.
 - `AlphaBlend` and alpha-tested materials reported with their `AlphaMode`.
@@ -180,6 +180,7 @@ everywhere.
 - Materials and colours paired by order; one colour is spread over however many materials are named.
 - Names held against the model — a material the car has not got is not painted.
 - The paint **tints** its texture rather than replacing it.
+- A skin that states no colour anywhere can still be the paint by the `txDetail` map it brings; where a flat detail map came from is what says whether it is a placeholder or the paint.
 - **A named paint checked against what it reads like.** A material naming a wheel, a brake, a lamp or the cabin — a Ferrari Mondial's own `extension/ext_config.ini` points its paint at `EXT_RIM_AO`, its wheel rims' baked ambient occlusion — is flagged, and where the car's own materials name exactly one thing that reads like paint and is not the same mistake itself, the web viewer puts the colour there instead; more than one candidate is not guessed among.
 
 ## Web viewer
