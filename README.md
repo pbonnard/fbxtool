@@ -65,7 +65,7 @@ everywhere.
 | Objects | count by `Type (SubType)`, vertex and polygon counts, shading model, texture paths, cluster weights, curve key counts |
 | Scene hierarchy | transform tree rebuilt from `Connections`, with geometry and materials as attachments |
 | Connections | totals by kind (`OO`, `OP`), optionally each connection with both endpoints resolved |
-| Animation | stacks, layers, curve and curve-node counts, stack durations, 6.x takes |
+| Animation | stacks, layers, curve and curve-node counts, stack durations, 6.x takes; Assetto Corsa `.ksanim` clips beside a car read and played |
 | Warnings | structural inconsistencies found while reading |
 
 `--tree` prints the container itself. Array properties are summarised as
@@ -168,7 +168,7 @@ everywhere.
 - `AlphaBlend` and alpha-tested materials reported with their `AlphaMode`.
 - **Lamp lens colours** read from `GLASS_COLOR` in the whole `extension/` folder, keyed by mesh; a white or grey tint darkens, a saturated one replaces and reduces what shows through.
 - **Protected cars** detected by the `__AC_SHADERS_PATCH_KN5ENC_v1__` marker and by triangle winding disagreeing with vertex normals; reported, never decrypted.
-- **Not read**: `animations/`, `data.acd`, `.knh` hierarchies, the encrypted half of a protected car.
+- **Not read**: `data.acd`, `.knh` hierarchies, the encrypted half of a protected car.
 
 #### Skins
 
@@ -182,6 +182,18 @@ everywhere.
 - The paint **tints** its texture rather than replacing it.
 - A skin that states no colour anywhere can still be the paint by the `txDetail` map it brings; where a flat detail map came from is what says whether it is a placeholder or the paint.
 - **A named paint checked against what it reads like.** A material naming a wheel, a brake, a lamp or the cabin — a Ferrari Mondial's own `extension/ext_config.ini` points its paint at `EXT_RIM_AO`, its wheel rims' baked ambient occlusion — is flagged, and where the car's own materials name exactly one thing that reads like paint and is not the same mistake itself, the web viewer puts the colour there instead; more than one candidate is not guessed among.
+
+#### Animations
+
+- Everything under `animations/<name>.ksanim` beside the car is read: both versions in circulation — 1,379 of the 1,461 clips across the cars to hand are version 2 (quaternion, translation and scale per key), 71 are version 1 (a 4x4).
+- The format has no magic number, so a clip is accepted only when its structure lands exactly on the last byte of the file. That is what rejects the `._`-prefixed macOS resource forks that turn up in the same folders — eleven of the 1,461.
+- **A key is the node's whole placement, not a change to it.** A BMW Z3's `capote.ksanim` opens on the translation, rotation and scale its own model states for the same node, so at position 0 the car is exactly the car the file describes.
+- **Played by position, not by time.** There is no clock in the file: the game drives a clip from how far the wheel is turned or the door is open, so the viewer offers a position from 0 to 1 and a button that sweeps it.
+- **Held against the model, and against itself.** A clip is offered only where it names a node this car has *and moves it*. Of 123 clips across 22 cars, 48 name nothing but `DRIVER:` rig nodes — the driver is a separate model living inside the game — and others name nodes here and hold every one of them still: a BMW Z3's `steer.ksanim` names 270 nodes, 13 of which the car has, and all 13 are the same placement in all 100 keys, because the turning is in the 257 belonging to the car it was authored against. Both are counted and said rather than offered as a slider that does nothing.
+- Only this car's nodes are decoded, which is most of the work saved on a clip written for another one.
+- A clip naming a node that carries no mesh moves everything hanging off it, so a rigged door swings from its hinge.
+- Applied as one matrix per part rather than by rebuilding the scene: the difference between where the clip puts a part and where the file had it, in the vertex stage of all three passes, so the picture, the ground shadow and what the mouse can land on agree.
+- **Not written out**: neither glTF nor FBX is given the clip. What leaves is the car at whichever position it is standing at.
 
 ## Web viewer
 
@@ -379,6 +391,7 @@ node web/test/parts.js samples/scene_parts.fbx       # the explode, and picking
 node web/test/flip.js samples/scene_parts.fbx        # mirroring, and its winding
 node web/test/turn.js samples/scene_parts.fbx        # facing the other way
 node web/test/skin.js <car folder> <other.kn5>       # putting a skin on a car
+node web/test/animation.js car/                      # the .ksanim clips beside a car
 node web/test/shaders.js <dir> <chrome.kn5> <paint.kn5> <plain.fbx>  # the shaders switch
 node web/test/acmaps.js <dark.kn5> <bright.kn5> <tiled.kn5>  # the per-texel finish
 node web/test/drop.js samples/pyramid.obj samples/pyramid.mtl samples/checker.png

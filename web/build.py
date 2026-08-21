@@ -39,6 +39,7 @@ SCRIPTS = [
     "acshaders.js",
     "kn5.js",
     "skins.js",
+    "ksanim.js",
     "psd.js",
     "dds.js",
     "png.js",

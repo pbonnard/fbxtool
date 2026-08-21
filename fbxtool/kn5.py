@@ -52,7 +52,7 @@ import struct
 import zlib
 from typing import Sequence
 
-from . import acshaders
+from . import acshaders, ksanim
 from .model import ArrayInfo, Document, Node, ParseError, Property
 
 __all__ = ["MAGIC", "NODE_CLASSES", "is_kn5", "parse_kn5"]
@@ -1334,6 +1334,9 @@ class _Scene:
         self.bones = 0
         self.depth = 0
         self.lods: list[str] = []
+        #: What every node is called, which is what an animation beside the car
+        #: names its nodes by.
+        self.names: set[str] = set()
         self.used_materials: set[int] = set()
         #: Triangles wound with their own normals, and against them.
         self.winding = [0, 0]
@@ -1356,6 +1359,8 @@ def _walk(cursor: _Cursor, build: _Builder, scene: _Scene, doc: Document,
         raise ParseError(f"{name or 'a node'} claims {children} children")
     active = bool(cursor.u8())
     scene.nodes += 1
+    if name:
+        scene.names.add(name)
     if not active:
         scene.inactive += 1
 
@@ -1716,6 +1721,9 @@ def parse_kn5(
         "tree_depth": scene.depth,
         "lods": scene.lods,
         "lenses": len(lit),
+        # And the clips in `animations/` beside the car, each held against the
+        # nodes this model actually has.
+        "animation_clips": ksanim.read_clips(path, scene.names),
         "skins": _skins(path, {name.lower() for name in named if name},
                         _base_pictures(materials),
                         {material.name.lower(): material.name for material in materials}),

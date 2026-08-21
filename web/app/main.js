@@ -18,6 +18,10 @@
     meshInfo: $('mesh-info'),
     geometrySelect: $('geometry-select'),
     skinSelect: $('skin-select'),
+    animSelect: $('anim-select'),
+    animControls: $('anim-controls'),
+    animSlider: $('anim-slider'),
+    animPlay: $('anim-play'),
     modeSelect: $('mode-select'),
     envSelect: $('env-select'),
     subdivSelect: $('subdiv-select'),
@@ -81,6 +85,21 @@
   const suppliedImages = new Map();
   /** Skin folders the user supplied, keyed by the folder's own name. */
   const suppliedSkins = new Map();
+
+  /** The `.ksanim` files the user supplied, keyed by their own name. */
+  const suppliedClips = new Map();
+  /** Every clip worth offering for the car that is open. */
+  let clipsOffered = [];
+  /** The clip that is on, with its keys decoded, or null for none. */
+  let clipWorn = null;
+  /** How far through it, 0 to 1 — a position and not a time, which is how the
+   *  game drives one: how far the wheel is turned, how far the door is open. */
+  let clipPosition = 0;
+  /** The scene's frames and where each part stood before any clip went on,
+   *  settled once per car because none of it changes while one plays. */
+  let clipBase = null;
+  /** The handle of the loop stepping the position along, when it is running. */
+  let clipPlaying = 0;
   /** The one that is on, read and held against the car it is for. */
   let wearing = null;
   /** Every skin worth offering for the car that is open. */
@@ -264,7 +283,7 @@
   }
 
   //: What counts as something a model needs rather than something beside it.
-  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds|mtl|bin|json|ini)$/i;
+  const COMPANION_NAMES = /\.(png|jpe?g|gif|bmp|webp|tga|ktx2|psd|dds|mtl|bin|json|ini|ksanim)$/i;
 
   /**
    * As much of a folder as is worth reading, models and their companions first.
@@ -417,6 +436,7 @@
      */
     if (list.some((file) => !COMPANION_NAMES.test(file.name))) {
       suppliedSkins.clear();
+      suppliedClips.clear();
       suppliedDressing.clear();
       carPaintNames = [];
       carShaders = new Map();
@@ -424,6 +444,14 @@
     }
     // The paint jobs beside the car, kept apart by the folder each was in.
     for (const [name, skin] of FbxSkins.group(list, pathOf)) suppliedSkins.set(name, skin);
+    /* And the clips, which live in `animations/` beside the car. Taken from
+     * wherever in the drop they turned up rather than from that folder alone:
+     * the folder is where a car keeps them and is what this is written for,
+     * but somebody dropping a model and one clip on top of it means the clip,
+     * and a picker that ignored it would be a tool arguing about filing. */
+    for (const file of list) {
+      if (/\.ksanim$/i.test(file.name)) suppliedClips.set(baseName(file.name), file);
+    }
     /* And the car's own `extension/ext_config.ini`, since half of them declare
      * which material is the paint once for the whole car rather than once per
      * skin — a Renault 5 names `body`, `body2` and `rim_colored` there and its
@@ -742,6 +770,15 @@
     dom.skinSelect.hidden = true;
     skinsOffered = [];
     wearing = null;
+    stopClip();
+    dom.animSelect.innerHTML = '';
+    dom.animSelect.hidden = true;
+    dom.animControls.hidden = true;
+    dom.animSlider.value = '0';
+    clipsOffered = [];
+    clipWorn = null;
+    clipBase = null;
+    clipPosition = 0;
     dom.explodeSlider.value = '0';
     dom.explodeSlider.disabled = true;
     dom.meshInfo.textContent = 'no file loaded';
@@ -858,6 +895,8 @@
       // Last, and awaited: building a scene is the slow half of a load.
       await populateSkins(doc);
       await populateGeometry(doc);
+      // Last of all: a clip moves parts, so there have to be parts.
+      await populateClips(doc);
     } catch (error) {
       console.error(error);
       setStatus(`Could not read ${file.name}: ${error.message}`, 'error');
@@ -1024,15 +1063,23 @@
     return frames;
   }
 
-  /** A frame's world matrix, composed up the parent chain. */
-  function worldMatrix(frame, frames, cache) {
+  /**
+   * A frame's world matrix, composed up the parent chain.
+   *
+   * *override* is where an animation puts the nodes it names — a clip states a
+   * node's whole local placement per key, so it stands in for what the file
+   * said rather than being composed with it, and everything under that node
+   * follows because the chain is walked either way.
+   */
+  function worldMatrix(frame, frames, cache, override) {
     if (cache.has(frame.key)) return cache.get(frame.key);
     // Guard against a cycle in a malformed file: claim the identity first.
     cache.set(frame.key, FbxTransform.identity());
-    let matrix = FbxTransform.localMatrix(frame.properties);
+    let matrix = (override && override.get(frame.key))
+      || FbxTransform.localMatrix(frame.properties);
     if (frame.parent !== null && frames.has(frame.parent)) {
       matrix = FbxTransform.multiply(
-        worldMatrix(frames.get(frame.parent), frames, cache), matrix);
+        worldMatrix(frames.get(frame.parent), frames, cache, override), matrix);
     }
     cache.set(frame.key, matrix);
     return matrix;
@@ -1103,6 +1150,9 @@
         min: mesh.min,
         max: mesh.max,
         name: named || 'part',
+        /* Which node of the scene placed it, so that something moving that
+         * node — an animation beside the car — can find the part again. */
+        key: part.key,
         materialNames: part.materials.map((material) => material.displayName),
         /* And the colour of the lens this part is, where the car's lighting
          * config says it is one. It belongs to the part and not to the
@@ -1181,6 +1231,10 @@
       }
       table.push({
         name: piece.name,
+        /* Read off the piece this segment was cut from rather than the cut
+         * itself: splitting a part in two leaves both halves placed by the
+         * node that placed the whole, and both have to move with it. */
+        key: (built.pieces[kept[index].source] || {}).key,
         centre: [0, 1, 2].map((k) => (piece.min[k] + piece.max[k]) / 2),
         min: piece.min.slice(),
         max: piece.max.slice(),
@@ -1483,6 +1537,7 @@
     }
     const has = found > 0 || carLightSources.length > 0;
     viewer.setParts(partTable);
+    resettleClip();
     dom.lightsLabel.hidden = !has;
     if (!has) dom.lightsToggle.checked = false;
     viewer.setLightSources(carLightSources);
@@ -4685,6 +4740,251 @@
     dom.skinSelect.value = '';
   }
 
+  /* ---------------------------------------------------- the car's own moving
+   *
+   * Everything under `animations/` beside a `.kn5` is one clip: `steer`,
+   * `car_door_L`, `car_wiper`, `capote`. A clip names some of the model's
+   * nodes and gives each of them a row of placements, and it is played by
+   * *position* rather than by time — the steering wheel is however far through
+   * `steer.ksanim` the front wheels are turned. So what is offered here is a
+   * slider from nought to one, and the button beside it sweeps that slider.
+   */
+
+  //: What a part that is not going anywhere comes out as.
+  const IDENTITY_4 = FbxTransform.identity();
+
+  /**
+   * Offer the clips that came with the car, and say what each one moves.
+   *
+   * A clip is read for what it says and then held against the model rather
+   * than believed, which is the rule the skins are read by and is here for the
+   * same reason. Of 123 clips across the 22 cars to hand, 48 name nothing but
+   * `DRIVER:` nodes — the driver's rig, which is a separate model living
+   * inside the game rather than beside the car — and 2 name nothing the car
+   * has at all, which is a clip copied from another car. Neither is a fault in
+   * the file, and neither has anything to move here, so both are counted and
+   * left out of the picker rather than offered and found to do nothing.
+   */
+  async function populateClips(doc) {
+    dom.animSelect.innerHTML = '';
+    stopClip();
+    clipWorn = null;
+    clipsOffered = [];
+    clipBase = null;
+    clipPosition = 0;
+    dom.animControls.hidden = true;
+    if (!suppliedClips.size || !doc) {
+      dom.animSelect.hidden = true;
+      return;
+    }
+    const objects = FbxAnalyze.child(doc.root, 'Objects');
+    const nodes = new Set((objects ? objects.children : [])
+      .filter((entry) => entry.name === 'Model')
+      .map((entry) => String(entry.props[1].value).split('\u0000')[0]));
+
+    const read = [];
+    for (const file of suppliedClips.values()) {
+      let clip;
+      try {
+        /* Decoded for this car's nodes and no others, which is most of the
+         * work saved: a steering clip names 270 and thirteen of them are here.
+         * Read in full at the picker rather than when one is chosen, because
+         * whether a clip is worth offering is a question about its keys. */
+        clip = FbxKsanim.parse(new Uint8Array(await file.arrayBuffer()),
+          { name: file.name.replace(/\.ksanim$/i, ''), loadKeys: true, only: nodes });
+      } catch (error) {
+        /* Not a clip, whatever it is called. A folder zipped on a Mac carries
+         * an `._name.ksanim` beside every real one, and eleven of the 1,461
+         * files in the cars to hand are exactly that. */
+        continue;
+      }
+      const landed = clip.tracks.filter((track) => nodes.has(track.name));
+      read.push({
+        file,
+        clip,
+        matched: landed.length,
+        moved: landed.filter((track) => FbxKsanim.moves(track)).length,
+      });
+    }
+    /* Offered for what it moves rather than for what it names. A clip written
+     * for one car and dropped beside another names some of the same nodes and
+     * holds every one of them still — five of a BMW Z3's thirteen are that,
+     * `steer.ksanim` among them — and offering one is offering a slider that
+     * does nothing. */
+    const offered = read.filter((entry) => entry.moved > 0)
+      .sort((a, b) => a.clip.name.localeCompare(b.clip.name));
+    const drivers = read.filter((entry) => entry.clip.driverOnly).length;
+    const still = read.filter((entry) => entry.matched && !entry.moved).length;
+    const stray = read.length - offered.length - drivers - still;
+    if (!offered.length) {
+      dom.animSelect.hidden = true;
+      if (read.length) {
+        console.info(`${read.length} animation(s) beside this car and none of them `
+          + `moves it: ${drivers} the driver's rig, ${still} naming nodes here and `
+          + `moving none of them, ${stray} naming nothing it has`);
+      }
+      return;
+    }
+    clipsOffered = offered;
+
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'Not moving — as the file has it';
+    dom.animSelect.appendChild(none);
+    for (const entry of offered) {
+      const option = document.createElement('option');
+      option.value = entry.clip.name;
+      option.textContent = `${entry.clip.name} — ${entry.moved} node`
+        + `${entry.moved === 1 ? '' : 's'}`;
+      if (entry.matched < entry.clip.tracks.length || entry.moved < entry.matched) {
+        option.title = `${entry.clip.name} names ${entry.clip.tracks.length} node(s): `
+          + `${entry.matched} are on this car and ${entry.moved} of those move`;
+      }
+      dom.animSelect.appendChild(option);
+    }
+    if (drivers || stray || still) {
+      const note = document.createElement('option');
+      note.disabled = true;
+      note.textContent = `(${drivers + stray + still} more move nothing here`
+        + (drivers ? ` — ${drivers} the driver's rig` : '') + ')';
+      dom.animSelect.appendChild(note);
+    }
+    dom.animSelect.hidden = false;
+    dom.animSelect.value = '';
+  }
+
+  /**
+   * The scene's frames and where each part stood before anything moved it.
+   *
+   * Settled once per car and held: none of it changes while a clip plays, and
+   * the inverse of each part's own placement is what turns an animated world
+   * matrix into the difference the shader is handed.
+   */
+  function clipFoundation() {
+    const frames = collectFrames();
+    const cache = new Map();
+    const inverse = new Map();
+    for (const part of partTable || []) {
+      if (part.key === undefined || inverse.has(part.key)) continue;
+      const frame = frames.get(part.key);
+      inverse.set(part.key, frame
+        ? FbxTransform.invert(worldMatrix(frame, frames, cache)) : null);
+    }
+    return { frames, inverse };
+  }
+
+  /**
+   * Where the clip that is on puts every part, as the viewer wants it.
+   *
+   * The vertices were baked into the model's own space by the placement the
+   * file had, so what the shader is handed is the difference: the animated
+   * world matrix over the inverse of the original. A part the clip does not
+   * reach comes back null and is left exactly where it is — which is most of
+   * a car, since a steering clip names 270 nodes and a door names two.
+   */
+  function clipPose() {
+    if (!clipWorn || !(partTable || []).length) return null;
+    if (!clipBase) clipBase = clipFoundation();
+    const { frames, inverse } = clipBase;
+    const placed = FbxKsanim.poseAt(clipWorn, clipPosition);
+    const override = new Map();
+    for (const [key, frame] of frames) {
+      const matrix = placed.get(String(frame.model.displayName || ''));
+      if (matrix) override.set(key, matrix);
+    }
+    if (!override.size) return null;
+    const cache = new Map();
+    let moved = 0;
+    const poses = partTable.map((part) => {
+      const frame = part.key === undefined ? null : frames.get(part.key);
+      const was = frame ? inverse.get(part.key) : null;
+      if (!frame || !was) return null;
+      const now = worldMatrix(frame, frames, cache, override);
+      const delta = FbxTransform.multiply(now, was);
+      if (delta.every((value, at) => Math.abs(value - IDENTITY_4[at]) < 1e-7)) {
+        return null;
+      }
+      moved += 1;
+      return { matrix: delta, normal: FbxTransform.normalMatrix(delta) };
+    });
+    return moved ? poses : null;
+  }
+
+  /** Draw the car where the clip and the position now put it. */
+  function refreshClip() {
+    viewer.setAnimation(clipPose());
+  }
+
+  /**
+   * The parts have been built again, so what a clip was measured against is
+   * gone: a skin hiding a number plate, an edit splitting a door in two, a
+   * different geometry chosen. The foundation is dropped and the clip put back
+   * on top of whatever the car is now.
+   */
+  function resettleClip() {
+    clipBase = null;
+    if (clipWorn) refreshClip();
+  }
+
+  /** Put a clip on, or take the one that is on off, and draw it again. */
+  async function wearClip(name) {
+    stopClip();
+    const entry = clipsOffered.find((one) => one.clip.name === name) || null;
+    clipPosition = 0;
+    dom.animSlider.value = '0';
+    dom.animControls.hidden = !entry;
+    if (!entry) {
+      clipWorn = null;
+      viewer.setAnimation(null);
+      setStatus('The car as the file has it.');
+      return;
+    }
+    clipWorn = entry.clip;
+    refreshClip();
+    const missing = clipWorn.tracks.length - entry.matched;
+    const held = entry.matched - entry.moved;
+    setStatus(`${clipWorn.name}: ${entry.moved} node(s) of this car moved over `
+      + `${clipWorn.keys} position(s)`
+      + (held ? `, ${held} it names here and holds still` : '')
+      + (missing ? `, and ${missing} it names that this car has not got` : ''));
+  }
+
+  /* How long one sweep of the slider takes, in milliseconds. A clip has no
+   * duration of its own — the game drives it from a wheel or a door rather
+   * than from a clock — so this is a speed to watch it at and nothing the
+   * file said. */
+  const CLIP_SWEEP = 2500;
+
+  function stopClip() {
+    if (clipPlaying) cancelAnimationFrame(clipPlaying);
+    clipPlaying = 0;
+    dom.animPlay.textContent = 'play';
+  }
+
+  /** Sweep the position back and forth, which is what watching one is. */
+  function playClip() {
+    if (!clipWorn) return;
+    stopClip();
+    dom.animPlay.textContent = 'stop';
+    let last = null;
+    /* Back and forth rather than round and round: both ends of a clip are the
+     * ends of something — shut and open, straight ahead and full lock — and a
+     * door that springs shut every two seconds reads as a fault. */
+    let way = clipPosition >= 1 ? -1 : 1;
+    const step = (now) => {
+      if (last === null) last = now;
+      const by = ((now - last) / CLIP_SWEEP) * way;
+      last = now;
+      let next = clipPosition + by;
+      if (next >= 1) { next = 1; way = -1; } else if (next <= 0) { next = 0; way = 1; }
+      clipPosition = next;
+      dom.animSlider.value = String(Math.round(next * 1000));
+      refreshClip();
+      clipPlaying = requestAnimationFrame(step);
+    };
+    clipPlaying = requestAnimationFrame(step);
+  }
+
   /** Put a skin on, or take the one that is on off, and draw it again. */
   async function wearSkin(name) {
     wearing = skinsOffered.find((skin) => skin.name === name) || null;
@@ -4883,6 +5183,7 @@
       viewer.setMesh(built.mesh, { keepCamera });
       partTable = built.table || [];
       viewer.setParts(partTable);
+      resettleClip();
       settleParts();
       setSelectedPart(-1);
       // Only a scene of several parts has anything to pull apart.
@@ -5097,6 +5398,7 @@
       viewer.setMesh(mesh, { keepCamera });
       partTable = built.table;
       viewer.setParts(partTable);
+      resettleClip();
       settleParts();
       setSelectedPart(-1);
       dom.explodeSlider.disabled = true;
@@ -5201,6 +5503,20 @@
       const candidates = FbxAnalyze.findAllGeometry(currentDoc);
       const entry = candidates[Number(dom.geometrySelect.value)];
       if (entry) showGeometry(entry);
+    });
+    dom.animSelect.addEventListener('change', () => {
+      wearClip(dom.animSelect.value).catch((error) => {
+        setStatus(`could not play that: ${error.message}`, 'error');
+      });
+    });
+    dom.animSlider.addEventListener('input', () => {
+      // Dragging it is the other way of playing one, so the sweep gives way.
+      stopClip();
+      clipPosition = Number(dom.animSlider.value) / 1000;
+      refreshClip();
+    });
+    dom.animPlay.addEventListener('click', () => {
+      if (clipPlaying) stopClip(); else playClip();
     });
     dom.skinSelect.addEventListener('change', () => {
       wearSkin(dom.skinSelect.value).catch((error) => {
@@ -5368,6 +5684,19 @@
       get palette() { return currentPalette; },
       get parts() { return sceneParts.length; },
       get partTable() { return partTable; },
+      /*: The clips the folder brought and what each moves, and how far
+       *  through the one that is on the car currently stands. */
+      get clips() {
+        return clipsOffered.map((entry) => ({
+          name: entry.clip.name,
+          version: entry.clip.version,
+          nodes: entry.clip.tracks.length,
+          keys: entry.clip.keys,
+          matched: entry.matched,
+          moved: entry.moved,
+        }));
+      },
+      get clipPosition() { return clipWorn ? clipPosition : null; },
       //: The skins the folder brought, and what each paints.
       get skins() { return skinsOffered.slice(); },
       //: The two ways a grain is baked into a picture, held against each

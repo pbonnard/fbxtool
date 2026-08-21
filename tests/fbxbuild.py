@@ -2731,6 +2731,28 @@ _KN5_CUBE_FACES = [
 ]
 
 
+def ksanim(tracks, version: int = 2) -> bytes:
+    """One Assetto Corsa animation clip.
+
+    *tracks* is ``(name, keys)`` pairs.  A version 2 key is
+    ``(quaternion, translation, scale)`` and a version 1 key is the sixteen
+    numbers of a 4x4 with the translation in its last row — the two spellings
+    of the same thing, which is what the reader has to agree about.
+    """
+    out = bytearray(struct.pack("<II", version, len(tracks)))
+    for name, keys in tracks:
+        encoded = name.encode("utf-8")
+        out += struct.pack("<I", len(encoded)) + encoded
+        out += struct.pack("<I", len(keys))
+        for key in keys:
+            if version == 1:
+                out += struct.pack("<16f", *key)
+            else:
+                rotation, translation, scale = key
+                out += struct.pack("<10f", *rotation, *translation, *scale)
+    return bytes(out)
+
+
 def kn5_cube(size: float = 1.0, *, inward: bool = False):
     """A cube as ``(vertices, indices)`` for :func:`kn5_mesh`.
 

@@ -240,12 +240,37 @@ const FbxViewer = (function () {
     vec3 centre = texelFetch(uParts, ivec2(index, 0), 0).xyz;
     return position + (centre - uCentre) * uExplode;
   }
+
+  /* Where the animation beside the car puts this part.
+   *
+   * A clip states a node's whole local placement per key, and the vertices
+   * here are already baked into the model's own space by the placement the
+   * file had. So what arrives is the difference between the two — the animated
+   * world matrix over the inverse of the original — which is a matrix per part
+   * and nothing per vertex, and lets a door swing without the scene being
+   * built again.
+   *
+   * Three rows of a 3x4: the fourth is (0, 0, 0, 1) on everything a clip can
+   * hold, so it is not stored and not read. */
+  uniform highp sampler2D uAnim;
+  uniform int uAnimated;
+
+  vec3 animate(vec3 position, float part) {
+    if (uAnimated == 0 || uPartCount <= 0) return position;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return position;
+    vec4 point = vec4(position, 1.0);
+    return vec3(dot(texelFetch(uAnim, ivec2(index, 0), 0), point),
+                dot(texelFetch(uAnim, ivec2(index, 1), 0), point),
+                dot(texelFetch(uAnim, ivec2(index, 2), 0), point));
+  }
   void main() {
     // A part the car takes away is put outside the clip volume: gone from
     // the picture, from the shadow it would have dropped and from what the
     // mouse can land on, without the scene being built again.
     if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-    gl_Position = uShadowMatrix * uModel * vec4(explode(aPosition, aPart), 1.0);
+    gl_Position = uShadowMatrix * uModel
+      * vec4(explode(animate(aPosition, aPart), aPart), 1.0);
   }`;
 
   const SHADOW_FRAGMENT = `#version 300 es
@@ -420,18 +445,60 @@ ${ENVIRONMENT}
     return position + (centre - uCentre) * uExplode;
   }
 
+  /* Where the animation beside the car puts this part.
+   *
+   * A clip states a node's whole local placement per key, and the vertices
+   * here are already baked into the model's own space by the placement the
+   * file had. So what arrives is the difference between the two — the animated
+   * world matrix over the inverse of the original — which is a matrix per part
+   * and nothing per vertex, and lets a door swing without the scene being
+   * built again.
+   *
+   * Three rows of a 3x4: the fourth is (0, 0, 0, 1) on everything a clip can
+   * hold, so it is not stored and not read. */
+  uniform highp sampler2D uAnim;
+  uniform int uAnimated;
+
+  vec3 animate(vec3 position, float part) {
+    if (uAnimated == 0 || uPartCount <= 0) return position;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return position;
+    vec4 point = vec4(position, 1.0);
+    return vec3(dot(texelFetch(uAnim, ivec2(index, 0), 0), point),
+                dot(texelFetch(uAnim, ivec2(index, 1), 0), point),
+                dot(texelFetch(uAnim, ivec2(index, 2), 0), point));
+  }
+
+  /* And the way it faces, which a placement changes too — a door that swings
+   * ninety degrees and keeps the normals it had is lit as though it were still
+   * shut. Held apart from the placement rather than derived from it, because
+   * a clip may scale as well as turn: a soft top folds by shrinking to a third
+   * of its height, and what turns its normals is the inverse transpose. */
+  vec3 animateNormal(vec3 normal, float part) {
+    if (uAnimated == 0 || uPartCount <= 0) return normal;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return normal;
+    return vec3(dot(texelFetch(uAnim, ivec2(index, 3), 0).xyz, normal),
+                dot(texelFetch(uAnim, ivec2(index, 4), 0).xyz, normal),
+                dot(texelFetch(uAnim, ivec2(index, 5), 0).xyz, normal));
+  }
+
   void main() {
     // A part the car takes away is put outside the clip volume: gone from
     // the picture, from the shadow it would have dropped and from what the
     // mouse can land on, without the scene being built again.
     if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-    vec3 position = explode(aPosition, aPart);
+    /* Animated first and pulled apart after, so a clip is played on the car
+     * the file describes and the explode is a way of looking at whatever came
+     * out. Each part still slides along the line to where its middle started,
+     * which is what keeps the pieces from crossing. */
+    vec3 position = explode(animate(aPosition, aPart), aPart);
     vec4 viewPosition = uModelView * vec4(position, 1.0);
     vViewPosition = viewPosition.xyz;
     // The same space the environment and the shadow map are in: the model
     // placed and turned the right way up, before the camera.
     vWorld = (uModel * vec4(position, 1.0)).xyz;
-    vNormal = uNormalMatrix * aNormal;
+    vNormal = uNormalMatrix * animateNormal(aNormal, aPart);
     vMaterial = aMaterial;
     vUv = aUv;
     vPart = int(aPart + 0.5);
@@ -474,13 +541,38 @@ ${ENVIRONMENT}
     return position + (centre - uCentre) * uExplode;
   }
 
+  /* Where the animation beside the car puts this part.
+   *
+   * A clip states a node's whole local placement per key, and the vertices
+   * here are already baked into the model's own space by the placement the
+   * file had. So what arrives is the difference between the two — the animated
+   * world matrix over the inverse of the original — which is a matrix per part
+   * and nothing per vertex, and lets a door swing without the scene being
+   * built again.
+   *
+   * Three rows of a 3x4: the fourth is (0, 0, 0, 1) on everything a clip can
+   * hold, so it is not stored and not read. */
+  uniform highp sampler2D uAnim;
+  uniform int uAnimated;
+
+  vec3 animate(vec3 position, float part) {
+    if (uAnimated == 0 || uPartCount <= 0) return position;
+    int index = int(part + 0.5);
+    if (index < 0 || index >= uPartCount) return position;
+    vec4 point = vec4(position, 1.0);
+    return vec3(dot(texelFetch(uAnim, ivec2(index, 0), 0), point),
+                dot(texelFetch(uAnim, ivec2(index, 1), 0), point),
+                dot(texelFetch(uAnim, ivec2(index, 2), 0), point));
+  }
+
   void main() {
     // A part the car takes away is put outside the clip volume: gone from
     // the picture, from the shadow it would have dropped and from what the
     // mouse can land on, without the scene being built again.
     if (takenAway(aPart)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     vPart = int(aPart + 0.5);
-    gl_Position = uProjection * uModelView * vec4(explode(aPosition, aPart), 1.0);
+    gl_Position = uProjection * uModelView
+      * vec4(explode(animate(aPosition, aPart), aPart), 1.0);
   }`;
 
   const PICK_FRAGMENT = `#version 300 es
@@ -1411,6 +1503,8 @@ ${SHADOW_LOOKUP}
         parts: gl.getUniformLocation(program, 'uParts'),
         partCount: gl.getUniformLocation(program, 'uPartCount'),
         explode: gl.getUniformLocation(program, 'uExplode'),
+        anim: gl.getUniformLocation(program, 'uAnim'),
+        animated: gl.getUniformLocation(program, 'uAnimated'),
         centre: gl.getUniformLocation(program, 'uCentre'),
         envZenith: gl.getUniformLocation(program, 'ENV_ZENITH'),
         envHorizon: gl.getUniformLocation(program, 'ENV_HORIZON'),
@@ -1438,6 +1532,8 @@ ${SHADOW_LOOKUP}
         parts: gl.getUniformLocation(this.pickProgram, 'uParts'),
         partCount: gl.getUniformLocation(this.pickProgram, 'uPartCount'),
         explode: gl.getUniformLocation(this.pickProgram, 'uExplode'),
+        anim: gl.getUniformLocation(this.pickProgram, 'uAnim'),
+        animated: gl.getUniformLocation(this.pickProgram, 'uAnimated'),
         centre: gl.getUniformLocation(this.pickProgram, 'uCentre'),
       };
 
@@ -1470,6 +1566,8 @@ ${SHADOW_LOOKUP}
         parts: gl.getUniformLocation(this.shadowProgram, 'uParts'),
         partCount: gl.getUniformLocation(this.shadowProgram, 'uPartCount'),
         explode: gl.getUniformLocation(this.shadowProgram, 'uExplode'),
+        anim: gl.getUniformLocation(this.shadowProgram, 'uAnim'),
+        animated: gl.getUniformLocation(this.shadowProgram, 'uAnimated'),
         centre: gl.getUniformLocation(this.shadowProgram, 'uCentre'),
         shadowMatrix: gl.getUniformLocation(this.shadowProgram, 'uShadowMatrix'),
         model: gl.getUniformLocation(this.shadowProgram, 'uModel'),
@@ -1645,6 +1743,20 @@ ${SHADOW_LOOKUP}
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, null);
+      /* And one texel per part again, holding where the animation beside the
+       * car has moved it to. Kept apart from the parts texture rather than
+       * added to it as three more rows: the parts are settled once a car is
+       * open and this changes every time the slider moves, and re-uploading a
+       * car's lens colours sixty times a second to say a door is ajar is the
+       * one thing worth avoiding here. */
+      this.animTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.animTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      this.animated = false;
       this.parts = [];
       this.partCount = 0;
       this.explode = 0;
@@ -1730,6 +1842,11 @@ ${SHADOW_LOOKUP}
       this.parts = Array.isArray(parts) ? parts : [];
       this.partCount = this.parts.length;
       this.selectedPart = -1;
+      /* A different set of parts is a different car, or the same one settled
+       * again. Either way what was uploaded is one part per texel of a list
+       * that no longer exists, so the animation comes off and is put back by
+       * whoever still has a clip on. */
+      this.animated = false;
       if (!this.partCount) { this.dirty = true; return; }
       /* Four rows: where each part's middle is, what colour of lens it is, and
        * the two colours it gives off as a lamp — lit and unlit.
@@ -1780,7 +1897,7 @@ ${SHADOW_LOOKUP}
       this.dirty = true;
     }
 
-    /** Hand a program everything the explode needs. */
+    /** Hand a program everything the explode and the animation need. */
     _bindParts(uniforms) {
       const gl = this.gl;
       gl.activeTexture(gl.TEXTURE3);
@@ -1788,6 +1905,10 @@ ${SHADOW_LOOKUP}
       gl.uniform1i(uniforms.parts, 3);
       gl.uniform1i(uniforms.partCount, this.partCount);
       gl.uniform1f(uniforms.explode, this.explode || 0);
+      gl.activeTexture(gl.TEXTURE11);
+      gl.bindTexture(gl.TEXTURE_2D, this.animTexture);
+      gl.uniform1i(uniforms.anim, 11);
+      gl.uniform1i(uniforms.animated, this.animated ? 1 : 0);
       const centre = this.modelCentre || [0, 0, 0];
       gl.uniform3f(uniforms.centre, centre[0], centre[1], centre[2]);
       gl.activeTexture(gl.TEXTURE0);
@@ -2302,6 +2423,54 @@ ${SHADOW_LOOKUP}
     }
 
     /** How far apart to pull the parts: 0 is the model as it was built. */
+    /**
+     * Where the animation beside the car has moved each part to, or nothing at
+     * all for a car standing as its file has it.
+     *
+     * *poses* is one entry per part, in the order they were given: `matrix` is
+     * the difference between where the clip puts the part and where the file
+     * had it, and `normal` is what turns the part's normals with it. A part
+     * the clip says nothing about is a null, and is left where it is.
+     *
+     * Only the two matrices arrive here — working out which nodes a clip names
+     * and composing the chain above them is the reader's job, and this is the
+     * part of it that has to happen while somebody is dragging a slider.
+     */
+    setAnimation(poses) {
+      const gl = this.gl;
+      const list = Array.isArray(poses) ? poses : null;
+      const on = !!(list && this.partCount && list.some(Boolean));
+      if (!on && !this.animated) return;   // still still: nothing to upload
+      this.animated = on;
+      this.dirty = true;
+      if (!on) return;
+      // Six rows: three of the placement, three of what turns the normals.
+      const data = new Float32Array(this.partCount * 24);
+      for (let i = 0; i < this.partCount; i++) {
+        const pose = list[i];
+        const m = pose && pose.matrix;
+        const n = pose && pose.normal;
+        for (let row = 0; row < 3; row++) {
+          const at = (this.partCount * row + i) * 4;
+          /* Read out of a column-major matrix a row at a time, which is what
+           * the shader dots against a point. */
+          data[at] = m ? m[row] : (row === 0 ? 1 : 0);
+          data[at + 1] = m ? m[4 + row] : (row === 1 ? 1 : 0);
+          data[at + 2] = m ? m[8 + row] : (row === 2 ? 1 : 0);
+          data[at + 3] = m ? m[12 + row] : 0;
+          const to = (this.partCount * (row + 3) + i) * 4;
+          data[to] = n ? n[row] : (row === 0 ? 1 : 0);
+          data[to + 1] = n ? n[3 + row] : (row === 1 ? 1 : 0);
+          data[to + 2] = n ? n[6 + row] : (row === 2 ? 1 : 0);
+          data[to + 3] = 0;
+        }
+      }
+      gl.bindTexture(gl.TEXTURE_2D, this.animTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.partCount, 6, 0,
+        gl.RGBA, gl.FLOAT, data);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
     setExplode(amount) {
       const next = Math.max(0, Number(amount) || 0);
       if (next === this.explode) return;

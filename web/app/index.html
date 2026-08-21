@@ -35,6 +35,16 @@
            beside it replaces a texture of the same name. Which skin it wears
            is the folder's question, so it is asked here. -->
       <select id="skin-select" title="Skin to wear" hidden></select>
+      <!-- And everything under animations/ beside it is one clip: a door, the
+           wipers, the steering. A clip has no duration - the game plays it by
+           how far the wheel is turned or the door is open - so what is offered
+           is a position through it rather than a time. -->
+      <select id="anim-select" title="Animation to play" hidden></select>
+      <label class="slider" id="anim-controls" hidden
+             title="How far through the clip, which is what the game drives from the wheel or the door">
+        <button id="anim-play" type="button" title="Sweep the position back and forth">play</button>
+        <input id="anim-slider" type="range" min="0" max="1000" value="0" step="1">
+      </label>
       <select id="mode-select" title="Shading mode">
         <option value="0">File colours</option>
         <option value="1">Index colours</option>

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -1902,6 +1903,77 @@ def test_what_a_cars_config_says_its_surfaces_are_made_of(built, tmp_path):
     print(result.stdout)
     assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
     assert "all checks passed" in result.stdout
+
+@needs_clang
+@needs_node
+def test_a_car_plays_the_animations_beside_it(built, tmp_path):
+    """Everything under ``animations/`` beside a ``.kn5`` is one clip, naming
+    some of the model's nodes and giving each a row of placements.
+
+    There is no clock in the file.  The game plays one by *position* — the
+    wheel is however far through ``steer.ksanim`` it is turned, the door
+    however far through ``car_door_L.ksanim`` it is open — so what the viewer
+    offers is a position rather than a time, and the first key of a clip is
+    where the model already had the node.
+
+    Of 123 clips across the 22 cars to hand, 48 name nothing but ``DRIVER:``
+    nodes and 2 name nothing their car has, so a picker that offered every file
+    it found would offer half of them for nothing.
+    """
+    try:
+        probe = _run(["node", "-e", "require('playwright')"], env=_node_env())
+        if probe.returncode != 0:
+            pytest.skip("playwright is not installed for node")
+    except OSError:  # pragma: no cover
+        pytest.skip("node is unavailable")
+
+    import fbxbuild as fb
+
+    car = tmp_path / "car"
+    (car / "animations").mkdir(parents=True)
+    white = fb.dds_bgra(4, 4, bytes([220, 220, 220, 255]) * 16)
+    material = fb.kn5_material("paint", "ksPerPixel",
+                               slots=(("txDiffuse", 0, "paint.dds"),))
+    identity = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    # The door out beside the body rather than inside it: a part nobody can
+    # see move is a part no check can speak for.
+    beside = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+              0.0, 0.0, 1.0, 0.0, 1.6, 0.0, 0.0, 1.0)
+    vertices, indices = fb.kn5_cube(0.6)
+    # `rig` carries no mesh of its own and `door` hangs off it, which is what a
+    # clip naming the node above the mesh has to be held against.
+    door = fb.kn5_dummy("rig", identity,
+                        fb.kn5_dummy("door", beside,
+                                     fb.kn5_mesh("door_panel", vertices, indices), 1), 1)
+    tree = fb.kn5_dummy("car", identity,
+                        fb.kn5_mesh("body", vertices, indices) + door, 2)
+    (car / "car.kn5").write_bytes(fb.build_kn5(
+        6, textures=[("paint.dds", white)], materials=[material], tree=tree))
+
+    still = ((0.0, 0.0, 0.0, 1.0), (1.6, 0.0, 0.0), (1.0, 1.0, 1.0))
+    # A quarter turn about +Y, which is a door on its hinge.
+    quarter = math.sqrt(0.5)
+    swung = ((0.0, quarter, 0.0, quarter), (1.6, 0.0, 0.0), (1.0, 1.0, 1.0))
+    half = ((0.0, 0.38268, 0.0, 0.92388), (1.6, 0.0, 0.0), (1.0, 1.0, 1.0))
+    (car / "animations" / "swing.ksanim").write_bytes(
+        fb.ksanim([("door", [still, half, swung])]))
+    # The same thing said one node higher up, where there is no mesh at all.
+    (car / "animations" / "sink.ksanim").write_bytes(fb.ksanim([("rig", [
+        ((0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+        ((0.0, 0.0, 0.0, 1.0), (0.0, -1.2, 0.0), (1.0, 1.0, 1.0))])]))
+    # And the two kinds that name nothing here.
+    (car / "animations" / "stranger.ksanim").write_bytes(
+        fb.ksanim([("someone_elses_wing", [still])]))
+    (car / "animations" / "gas.ksanim").write_bytes(
+        fb.ksanim([("DRIVER:DRIVER", [still]), ("DRIVER:RIG_Center", [still])]))
+
+    result = _run(["node", str(WEB / "test" / "animation.js"), str(car)],
+                  env=_node_env(), timeout=300)
+    print(result.stdout)
+    assert result.returncode == 0, f"{result.stdout}" + chr(10) + f"{result.stderr}"
+    assert "all checks passed" in result.stdout
+
 
 @needs_clang
 @needs_node

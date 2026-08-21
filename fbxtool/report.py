@@ -346,6 +346,36 @@ def _render_kn5_rows(rows: list[tuple[str, Any]], doc) -> None:
         rows.append(("Named but absent", f"{len(missing):,}: "
                                          + ", ".join(missing[:4])
                                          + (" …" if len(missing) > 4 else "")))
+    clips = extra.get("animation_clips") or []
+    if clips:
+        # What lands is the part worth reading at a glance.  A clip naming
+        # nothing this car has is one copied from another car, and one naming
+        # nothing but `DRIVER:` nodes is the driver's rig, which lives inside
+        # the game rather than beside the car: of 123 clips across 22 cars, 48
+        # are the driver's and 2 name nothing the car has.
+        playable = [clip for clip in clips if clip["moved"]]
+        drivers = sum(1 for clip in clips if clip["driver"])
+        stray = sum(1 for clip in clips
+                    if not clip["matched"] and not clip["driver"])
+        # And the third kind, which is the one a count alone hides: a clip
+        # written for another car names some of the same nodes and holds every
+        # one of them still.
+        still = sum(1 for clip in clips if clip["matched"] and not clip["moved"])
+        detail = f"{len(clips):,} beside the file"
+        if playable:
+            best = max(playable, key=lambda clip: clip["moved"])
+            detail += (f" — {best['name']} moves {best['moved']:,} of this "
+                       f"car's nodes over {best['keys']:,} key(s)")
+        notes = []
+        if drivers:
+            notes.append(f"{drivers:,} the driver's rig")
+        if stray:
+            notes.append(f"{stray:,} naming nothing this car has")
+        if still:
+            notes.append(f"{still:,} naming nodes here and moving none of them")
+        if notes:
+            detail += " (" + ", ".join(notes) + ")"
+        rows.append(("Animations", detail))
     skins = [skin for skin in (extra.get("skins") or []) if skin["replaces"]]
     if skins:
         best = skins[0]
